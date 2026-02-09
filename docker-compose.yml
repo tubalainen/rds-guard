@@ -1,6 +1,8 @@
 services:
   rds-guard:
-    build: .
+    image: ghcr.io/tubalainen/rds-guard:latest
+    # To build locally instead of pulling, comment out 'image' and uncomment:
+    # build: .
     container_name: rds-guard
     restart: unless-stopped
     env_file: .env

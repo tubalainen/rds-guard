@@ -82,10 +82,11 @@ sudo modprobe -r dvb_usb_rtl28xxu
 1. Clone the repository and enter the directory:
 
 ```bash
+git clone https://github.com/tubalainen/rds-guard.git
 cd rds-guard
 ```
 
-2. Edit `.env` to match your setup. At minimum, set your FM frequency:
+2. Create a `.env` file with your settings. At minimum, set your FM frequency:
 
 ```bash
 FM_FREQUENCY=103.3M        # Your local P4 frequency
@@ -99,11 +100,13 @@ MQTT_HOST=192.168.1.100        # Your MQTT broker IP
 MQTT_PORT=1883
 ```
 
-3. Build and start:
+3. Pull and start:
 
 ```bash
 docker compose up -d
 ```
+
+This pulls the pre-built image from `ghcr.io/tubalainen/rds-guard:latest` (amd64 + arm64).
 
 4. Open the web UI at **http://your-host:8022**
 
@@ -112,6 +115,8 @@ docker compose up -d
 ```bash
 docker compose logs -f rds-guard
 ```
+
+> **Building locally:** To build from source instead of pulling the pre-built image, edit `docker-compose.yml` — comment out the `image:` line and uncomment `build: .`, then run `docker compose up -d --build`.
 
 ## Configuration
 
@@ -293,15 +298,21 @@ rds-guard/
 
 ## Operations
 
-### Rebuild and restart
+### Update and restart
 
-To do a clean rebuild from scratch (wipes the event database):
+Pull the latest image and restart (preserves event history):
 
 ```bash
-docker compose down -v && docker compose build --no-cache && docker compose up -d && docker compose logs -f
+docker compose down && docker compose pull && docker compose up -d && docker compose logs -f
 ```
 
-To rebuild without wiping the database (preserves event history):
+Clean restart from scratch (wipes the event database):
+
+```bash
+docker compose down -v && docker compose pull && docker compose up -d && docker compose logs -f
+```
+
+If building locally (with `build: .` in docker-compose.yml):
 
 ```bash
 docker compose down && docker compose build --no-cache && docker compose up -d && docker compose logs -f
