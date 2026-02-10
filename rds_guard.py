@@ -206,10 +206,17 @@ class RulesEngine:
       6. EON TA (group 14A): eon_traffic event
     """
 
-    def __init__(self):
+    def __init__(self, recorder=None, record_event_types=None):
         self.lock = threading.Lock()
         # Per-PI active traffic announcement: pi -> {event_id, since, radiotext, prog_type}
         self._active = {}
+        # Per-PI active emergency: pi -> {event_id, since}
+        self._active_emergency = {}
+        # Audio recorder (may be None if not initialized yet)
+        self._recorder = recorder
+        self._record_types = set(
+            t.strip() for t in (record_event_types or "traffic,emergency").split(",")
+        )
 
     def _station_context(self, pi):
         si = station_info.snapshot()
@@ -248,12 +255,20 @@ class RulesEngine:
                     frequency=freq,
                     started_at=ts,
                 )
+                payload["event_id"] = event_id
                 self._active[pi] = {
                     "event_id": event_id,
                     "since": ts,
                     "radiotext": [],
                     "prog_type": data.get("prog_type", ""),
                 }
+
+                # Start audio recording
+                if self._recorder and "traffic" in self._record_types:
+                    self._recorder.start(event_id)
+                    event_store.update_event_transcription_status(
+                        event_id, "recording")
+
                 log.info("EVENT traffic start on %s (event #%d)", pi, event_id)
                 _mqtt_pub(mqtt_client, "alert", payload)
                 broadcast_ws({"topic": "alert", "payload": payload, "timestamp": ts})
@@ -261,6 +276,16 @@ class RulesEngine:
             else:
                 # --- Traffic announcement END ---
                 ann = self._active.pop(pi, {})
+                event_id = ann.get("event_id")
+
+                # Stop audio recording
+                has_audio = False
+                if self._recorder and event_id:
+                    has_audio = self._recorder.stop()
+                    if has_audio:
+                        event_store.update_event_transcription_status(
+                            event_id, "saving")
+
                 duration = self._duration(ann.get("since"), ts)
                 payload = {
                     "type": "traffic",
@@ -272,9 +297,11 @@ class RulesEngine:
                     "duration_sec": duration,
                     "radiotext": ann.get("radiotext", []),
                     "prog_type": data.get("prog_type", ""),
+                    "audio_available": has_audio,
+                    "transcription_status": "saving" if has_audio else "none",
+                    "event_id": event_id,
                     "timestamp": ts,
                 }
-                event_id = ann.get("event_id")
                 if event_id:
                     event_store.end_event(
                         event_id=event_id,
@@ -325,7 +352,7 @@ class RulesEngine:
             "prog_type": pty,
             "timestamp": ts,
         }
-        event_store.insert_event(
+        event_id = event_store.insert_event(
             event_type="emergency",
             severity="critical",
             state="active",
@@ -335,9 +362,72 @@ class RulesEngine:
             frequency=config.FM_FREQUENCY,
             started_at=ts,
         )
+        payload["event_id"] = event_id
+
+        # Track active emergency for end detection
+        with self.lock:
+            self._active_emergency[pi] = {
+                "event_id": event_id,
+                "since": ts,
+            }
+
+        # Start audio recording
+        if self._recorder and "emergency" in self._record_types:
+            self._recorder.start(event_id)
+            event_store.update_event_transcription_status(
+                event_id, "recording")
+
         log.warning("EVENT emergency PTY alarm on %s: %s", pi, pty)
         _mqtt_pub(mqtt_client, "alert", payload)
         broadcast_ws({"topic": "alert", "payload": payload, "timestamp": ts})
+
+    def on_pty_normal(self, mqtt_client, pi, pty, data):
+        """PTY changed away from alarm — end emergency recording."""
+        ts = msg_ts(data)
+        with self.lock:
+            em = self._active_emergency.pop(pi, None)
+        if not em:
+            return
+
+        event_id = em["event_id"]
+
+        # Stop audio recording
+        has_audio = False
+        if self._recorder:
+            has_audio = self._recorder.stop()
+            if has_audio:
+                event_store.update_event_transcription_status(
+                    event_id, "saving")
+
+        duration = self._duration(em.get("since"), ts)
+        event_store.end_event(
+            event_id=event_id,
+            ended_at=ts,
+            duration_sec=duration,
+        )
+
+        ctx = self._station_context(pi)
+        payload = {
+            "type": "emergency",
+            "state": "end",
+            "station": ctx,
+            "frequency": config.FM_FREQUENCY,
+            "started": em.get("since", ""),
+            "ended": ts,
+            "duration_sec": duration,
+            "audio_available": has_audio,
+            "transcription_status": "saving" if has_audio else "none",
+            "event_id": event_id,
+            "timestamp": ts,
+        }
+        log.info("EVENT emergency end on %s (PTY → %s)", pi, pty)
+        _mqtt_pub(mqtt_client, "alert", payload)
+        broadcast_ws({"topic": "alert", "payload": payload, "timestamp": ts})
+
+    def is_emergency_active(self, pi):
+        """Check if an emergency broadcast is active for the given PI."""
+        with self.lock:
+            return pi in self._active_emergency
 
     def on_tmc(self, mqtt_client, pi, tmc, data):
         """TMC message received."""
@@ -419,6 +509,112 @@ class RulesEngine:
 
 
 rules_engine = RulesEngine()
+
+
+# ---------------------------------------------------------------------------
+# Transcription completion callback — called from transcriber thread
+# ---------------------------------------------------------------------------
+
+def _on_transcription_complete(event_id, text, error):
+    """Handle transcription result — update DB, publish MQTT + WS."""
+    if error:
+        event_store.update_event_transcription(event_id, None, status="error")
+        payload = {
+            "type": "transcription_update",
+            "event_id": event_id,
+            "transcription_status": "error",
+            "transcription_error": str(error),
+        }
+        _mqtt_pub(mqtt_client, "alert", {
+            "state": "transcription_failed",
+            "event_id": event_id,
+            "transcription_status": "error",
+            "transcription_error": str(error),
+            "audio_available": True,
+            "timestamp": now_iso(),
+        })
+        broadcast_ws({"topic": "transcription_error", "event_id": event_id,
+                       "error": str(error), "timestamp": now_iso()})
+        return
+
+    event_store.update_event_transcription(event_id, text, status="done")
+
+    # Fetch the full event for the MQTT payload
+    try:
+        rows, _ = event_store.query_events(limit=1, offset=0)
+        event = None
+        for r in rows:
+            if r.get("id") == event_id:
+                event = r
+                break
+        if not event:
+            # Direct lookup
+            import sqlite3
+            conn = event_store._conn()
+            row = conn.execute(
+                "SELECT * FROM events WHERE id = ?", (event_id,)
+            ).fetchone()
+            event = dict(row) if row else {}
+    except Exception:
+        event = {}
+
+    ts = now_iso()
+    pi = event.get("pi", "")
+    evt_type = event.get("type", "traffic")
+
+    # Parse station context from stored data
+    station = {"pi": pi}
+    if event.get("station_ps"):
+        station["ps"] = event["station_ps"]
+
+    import json as _json
+    radiotext = event.get("radiotext", "[]")
+    if isinstance(radiotext, str):
+        try:
+            radiotext = _json.loads(radiotext)
+        except Exception:
+            radiotext = []
+
+    # Publish to rds/alert with state=transcribed
+    alert_payload = {
+        "type": evt_type,
+        "state": "transcribed",
+        "event_id": event_id,
+        "station": station,
+        "frequency": event.get("frequency", ""),
+        "started": event.get("started_at", ""),
+        "ended": event.get("ended_at", ""),
+        "duration_sec": event.get("duration_sec"),
+        "radiotext": radiotext,
+        "transcription": text,
+        "transcription_status": "done",
+        "audio_available": True,
+        "timestamp": ts,
+    }
+    _mqtt_pub(mqtt_client, "alert", alert_payload)
+
+    # Publish to rds/{pi}/{type}/transcription (retained)
+    if pi:
+        transcription_payload = {
+            "event_id": event_id,
+            "station": station,
+            "transcription": text,
+            "language": config.TRANSCRIPTION_LANGUAGE,
+            "duration_sec": event.get("duration_sec"),
+            "radiotext": radiotext,
+            "timestamp": ts,
+        }
+        pub(mqtt_client, f"{pi}/{evt_type}/transcription",
+            transcription_payload, qos=1, retain=True)
+
+    # WebSocket broadcast
+    broadcast_ws({
+        "topic": "transcription",
+        "event_id": event_id,
+        "transcription": text,
+        "transcription_status": "done",
+        "timestamp": ts,
+    })
 
 # ---------------------------------------------------------------------------
 # Statistics
@@ -767,6 +963,8 @@ def process_group(client, data):
             qos=1, retain=config.MQTT_RETAIN_STATE)
         if pty in ALERT_PTY:
             rules_engine.on_pty_alert(client, pi, pty, data)
+        elif rules_engine.is_emergency_active(pi):
+            rules_engine.on_pty_normal(client, pi, pty, data)
 
     # Rule 5: EON Traffic Announcements
     if group == "14A":
@@ -990,6 +1188,8 @@ def main():
     log.info("  Retention:  %d days", config.EVENT_RETENTION_DAYS)
     log.info("  Web UI:     port %d", config.WEB_UI_PORT)
     log.info("  MQTT:       %s", "enabled" if config.MQTT_ENABLED else "disabled")
+    log.info("  Recording:  always on → %s", config.AUDIO_DIR)
+    log.info("  Transcribe: %s", config.TRANSCRIPTION_ENGINE)
     if config.MQTT_ENABLED:
         log.info("  MQTT host:  %s:%s", config.MQTT_HOST or "(empty)", config.MQTT_PORT)
         log.info("  MQTT user:  %s", config.MQTT_USER or "(none)")
@@ -1001,6 +1201,34 @@ def main():
     event_store.close_stale_events()
 
     stop_event = threading.Event()
+
+    # --- 1b. Initialize transcription + recording ---
+    from transcriber import create_transcriber
+    from audio_recorder import AudioRecorder
+
+    transcriber_instance = create_transcriber(
+        engine=config.TRANSCRIPTION_ENGINE,
+        language=config.TRANSCRIPTION_LANGUAGE,
+        model_size=config.TRANSCRIPTION_MODEL,
+        device=config.TRANSCRIPTION_DEVICE,
+        remote_url=config.WHISPER_REMOTE_URL,
+        remote_timeout=config.WHISPER_REMOTE_TIMEOUT,
+    )
+    if transcriber_instance:
+        transcriber_instance.start()
+
+    recorder = AudioRecorder(
+        audio_dir=config.AUDIO_DIR,
+        transcriber=transcriber_instance,
+        on_transcription_complete=_on_transcription_complete,
+        max_duration_sec=config.MAX_RECORDING_SEC,
+    )
+    log.info("Audio recording enabled → %s", config.AUDIO_DIR)
+
+    # Wire recorder to rules engine
+    rules_engine._recorder = recorder
+    rules_engine._record_types = set(
+        t.strip() for t in config.RECORD_EVENT_TYPES.split(","))
 
     # --- 2. Start web server FIRST — always available ---
     log.info("Starting web server on port %d...", config.WEB_UI_PORT)
@@ -1031,14 +1259,14 @@ def main():
     else:
         log.info("MQTT disabled (set MQTT_ENABLED=true in .env to activate)")
 
-    # --- 4. Start radio pipeline ---
+    # --- 4. Start radio pipeline (with AudioTee + recorder) ---
     from pipeline import run_pipeline
 
     _last_stats_log = time.time()
 
     pipeline_thread = threading.Thread(
         target=run_pipeline,
-        args=(_on_pipeline_line, pipeline_status, stop_event),
+        args=(_on_pipeline_line, pipeline_status, stop_event, recorder),
         daemon=True,
     )
     pipeline_thread.start()
