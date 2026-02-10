@@ -250,14 +250,24 @@ class AudioRecorder:
             self._buffer.write(chunk)
 
     def stop(self):
-        """Stop recording and finalize."""
+        """Stop recording and finalize.
+
+        Returns True if a valid recording was captured (will be saved
+        and transcribed), False if recording was discarded (too short
+        or not active). The rules engine uses this to set
+        audio_available in the MQTT end payload.
+        """
         with self._lock:
             if not self._recording:
-                return
-            self._finalize()
+                return False
+            return self._finalize()
 
     def _finalize(self):
-        """Write WAV, enqueue transcription. Must hold self._lock."""
+        """Write WAV, enqueue transcription. Must hold self._lock.
+
+        Returns True if recording is valid and will be saved, False
+        if discarded.
+        """
         self._recording = False
         raw_pcm = self._buffer.getvalue()
         self._buffer = None
@@ -267,7 +277,7 @@ class AudioRecorder:
 
         if elapsed < self.MIN_DURATION_SEC or len(raw_pcm) == 0:
             log.info("Recording too short (%.1fs), discarding", elapsed)
-            return
+            return False
 
         # Save in background thread to avoid blocking the tee
         threading.Thread(
@@ -275,14 +285,18 @@ class AudioRecorder:
             args=(event_id, raw_pcm, elapsed),
             daemon=True,
         ).start()
+        return True
 
     def _save_and_transcribe(self, event_id, raw_pcm, duration):
-        """Downsample, save WAV, run transcription."""
-        # 1. Downsample 171 kHz → 16 kHz (for smaller files + STT input)
-        # 2. Write WAV to /data/audio/{event_id}.wav
-        # 3. Encode OGG/Opus for web playback: /data/audio/{event_id}.ogg
-        # 4. Queue transcription
-        # 5. Call on_complete callback with results
+        """Downsample, save WAV + OGG, run transcription."""
+        # 1. Pipe raw PCM to ffmpeg for WAV (resampled 171→16 kHz):
+        #    ffmpeg -f s16le -ar 171000 -ac 1 -i pipe: -ar 16000 {id}.wav
+        # 2. Pipe raw PCM to ffmpeg for OGG/Opus (web playback):
+        #    ffmpeg -f s16le -ar 171000 -ac 1 -i pipe: -ar 16000 -c:a libopus {id}.ogg
+        # 3. event_store.update_event_audio(event_id, "{id}.ogg")
+        # 4. event_store.update_transcription_status(event_id, "transcribing")
+        # 5. transcriber.enqueue(wav_path, event_id, callback)
+        # 6. Callback updates event_store + publishes MQTT/WS
 ```
 
 **Audio processing pipeline** (within `_save_and_transcribe`):
@@ -290,17 +304,24 @@ class AudioRecorder:
 ```
 Raw PCM (171 kHz, 16-bit, mono)
     │
-    ▼  scipy.signal.resample_poly  OR  audioop.ratecv
-Resampled PCM (16 kHz, 16-bit, mono)
+    ▼  ffmpeg subprocess (single call: resample + encode)
     │
-    ├──▶ WAV file  (for archival / fallback playback)
+    ├──▶ WAV file  (16 kHz, for STT input + archival)
+    │       ffmpeg -f s16le -ar 171000 -ac 1 -i pipe:
+    │              -ar 16000 {event_id}.wav
     │
-    ▼  ffmpeg  OR  opusenc  OR  soundfile+pyogg
-OGG/Opus file  (for web playback — much smaller)
+    └──▶ OGG/Opus file  (for web playback — much smaller)
+            ffmpeg -f s16le -ar 171000 -ac 1 -i pipe:
+                   -ar 16000 -c:a libopus {event_id}.ogg
     │
     ▼
 Transcription input (16 kHz WAV)
 ```
+
+**Why ffmpeg for resampling?** Using ffmpeg as a subprocess for both
+resampling (171 kHz → 16 kHz) and encoding (PCM → OGG/Opus) keeps the
+Python dependencies minimal — no scipy or audioop needed. ffmpeg is already
+a required system dependency for OGG encoding, so resampling comes for free.
 
 **File naming convention:**
 ```
@@ -404,9 +425,16 @@ class Transcriber:
         self._queue.put((audio_path, event_id, callback))
 
     def run(self):
-        """Worker loop — runs in a dedicated thread."""
+        """Worker loop — runs in a dedicated daemon thread.
+
+        Exits when a None sentinel is enqueued (shutdown) or when the
+        daemon thread is killed on process exit.
+        """
         while True:
-            audio_path, event_id, callback = self._queue.get()
+            item = self._queue.get()
+            if item is None:
+                break  # Shutdown sentinel
+            audio_path, event_id, callback = item
             try:
                 if self._engine == "remote":
                     text = self._transcribe_remote(audio_path)
@@ -525,7 +553,13 @@ part of the event data, not a separate opt-in feature.
 ALTER TABLE events ADD COLUMN audio_path TEXT;
 ALTER TABLE events ADD COLUMN transcription TEXT;
 ALTER TABLE events ADD COLUMN transcription_status TEXT;
--- transcription_status: null | "recording" | "transcribing" | "done" | "error"
+-- transcription_status: null | "recording" | "saving" | "transcribing" | "done" | "error"
+--   null        = no recording (non-recordable event type, or TRANSCRIPTION_ENGINE=none)
+--   "recording" = audio is being captured (TA in progress)
+--   "saving"    = recording stopped, audio files being written (brief, ~1-2s)
+--   "transcribing" = audio saved, STT engine processing
+--   "done"      = transcription complete
+--   "error"     = transcription failed (audio still available)
 ```
 
 **Migration strategy**: Use `ALTER TABLE ADD COLUMN IF NOT EXISTS` in
@@ -642,7 +676,7 @@ available — the audio has just stopped recording and is being processed:
   ],
   "prog_type": "News",
   "audio_available": true,
-  "transcription_status": "transcribing",
+  "transcription_status": "saving",
   "event_id": 42,
   "timestamp": "2024-02-10T15:32:15"
 }
@@ -650,8 +684,8 @@ available — the audio has just stopped recording and is being processed:
 
 | Field | Status | Notes |
 |-------|--------|-------|
-| `audio_available` | **NEW** | `true` — recording is always saved for recordable event types |
-| `transcription_status` | **NEW** | `"transcribing"` (in progress) or `"none"` (if `TRANSCRIPTION_ENGINE=none`) |
+| `audio_available` | **NEW** | `true` if `recorder.stop()` returned True (recording kept), `false` if discarded (too short) |
+| `transcription_status` | **NEW** | `"saving"` (audio being written, transcription queued next) or `"none"` (if `TRANSCRIPTION_ENGINE=none`) |
 | `event_id` | **NEW** | Same ID from the start event, for correlation |
 | All others | Existing | Unchanged from current code |
 
@@ -748,9 +782,18 @@ Audio is still available for manual playback even when transcription fails.
 ```
 state: "start"                → TA flag on  (recording begins)
 state: "update"               → RadioText received during TA
-state: "end"                  → TA flag off (recording stops, transcription queued)
+state: "end"                  → TA flag off (recording stopped, audio being saved)
 state: "transcribed"          → Transcription complete (full text available)
 state: "transcription_failed" → Transcription error (audio still available)
+```
+
+**transcription_status progression** (in the event row / MQTT payloads):
+```
+"recording"    → TA active, audio being captured
+"saving"       → TA ended, audio files being written to disk (~1-2s)
+"transcribing" → Audio saved, STT engine processing (~2-120s depending on engine)
+"done"         → Transcription complete
+"error"        → Transcription failed
 ```
 
 For consumers that don't care about transcription, the existing `start` →
@@ -855,33 +898,60 @@ EON events are data-only and never trigger recording.
 process_group()
     └─▶ rules_engine.on_ta_change(ta=True)
             ├─▶ event_store.insert_event()  → event_id
-            ├─▶ audio_recorder.start(event_id)     ← NEW
+            ├─▶ audio_recorder.start(event_id)                    ← NEW
+            ├─▶ event_store.update_transcription_status("recording")
             └─▶ MQTT pub + WebSocket broadcast
 
 process_group()  [later...]
     └─▶ rules_engine.on_ta_change(ta=False)
-            ├─▶ audio_recorder.stop()               ← NEW
-            │       └─▶ _save_and_transcribe()
-            │               ├─▶ downsample + save WAV/OGG
-            │               ├─▶ event_store.update_event_audio()
-            │               ├─▶ transcriber.enqueue()
-            │               │       └─▶ [async] transcribe()
-            │               │               ├─▶ event_store.update_event_transcription()
-            │               │               ├─▶ MQTT pub transcription
-            │               │               └─▶ WebSocket broadcast update
-            │               └─▶ MQTT pub (end event with audio_available=true)
+            │  [synchronous]
+            ├─▶ has_audio = audio_recorder.stop()  → True/False   ← NEW
             ├─▶ event_store.end_event()
-            └─▶ MQTT pub + WebSocket broadcast
+            ├─▶ event_store.update_transcription_status("saving")
+            ├─▶ MQTT pub (end, audio_available=has_audio)
+            └─▶ WebSocket broadcast
+            │
+            │  [async — in background thread spawned by stop()]
+            └─▶ _save_and_transcribe()
+                    ├─▶ ffmpeg: downsample + save WAV/OGG
+                    ├─▶ event_store.update_event_audio()
+                    ├─▶ event_store.update_transcription_status("transcribing")
+                    ├─▶ transcriber.enqueue()
+                    │       └─▶ [async] transcribe()
+                    │               ├─▶ event_store.update_event_transcription()
+                    │               ├─▶ MQTT pub (state:"transcribed")
+                    │               └─▶ WebSocket broadcast update
+                    └─▶ (on error → event_store.update_transcription_status("error"))
 ```
 
 ### 3.2 Emergency Broadcast Recording
 
-Same pattern but triggered by `on_pty_alert()`. Since emergency broadcasts
-don't have an explicit "end" signal (PTY changes back from Alarm), use a
-timeout:
+Same pattern but triggered by `on_pty_alert()`. Unlike traffic announcements
+(which have a clear TA flag on/off lifecycle), emergency broadcasts have no
+explicit "end" signal in the current code. This requires a new mechanism:
 
-- Start recording when PTY → Alarm
-- Stop recording when PTY changes away from Alarm, OR after `MAX_RECORDING_SEC`
+- **Start**: When PTY → Alarm, call `recorder.start(event_id)`
+- **Stop**: When PTY changes away from Alarm, OR after `MAX_RECORDING_SEC`
+
+**Implementation detail — PTY end detection**: The current `process_group()`
+in `rds_guard.py` calls `on_pty_alert()` only when PTY enters an alarm type.
+A new method `on_pty_normal()` is needed, called when PTY changes FROM an
+alarm type to a non-alarm type:
+
+```python
+# In process_group(), Rule 4 section:
+if pty and state.changed(pi, "station/pty", pty):
+    pub(...)
+    if pty in ALERT_PTY:
+        rules_engine.on_pty_alert(client, pi, pty, data)
+    elif rules_engine.is_emergency_active(pi):
+        rules_engine.on_pty_normal(client, pi, pty, data)
+        # Stops recording, triggers transcription
+```
+
+Additionally, `AudioRecorder._finalize()` handles the `MAX_RECORDING_SEC`
+timeout during `feed()`, so very long emergency broadcasts are capped
+automatically even if PTY never changes back.
 
 ### 3.3 Thread Safety
 
@@ -991,14 +1061,22 @@ Shared state:
 - `.env.example` — Document new env vars
 
 **Tasks:**
-1. Add `ffmpeg` to Dockerfile runtime stage (for audio encoding)
-2. Add Python deps: `faster-whisper`, `numpy`, `requests`
-3. Create `/data/audio` directory in entrypoint
-4. Update `.env.example` with new configuration options (see Section 14)
-5. Add example `docker-compose.gpu.yml` for combined RDS Guard + remote
+1. Add `ffmpeg` to Dockerfile runtime stage (for audio resampling + encoding)
+2. Add Python deps: `faster-whisper`, `requests` to `requirements.txt`
+3. Add COPY lines for new Python files in Dockerfile:
+   ```dockerfile
+   COPY audio_tee.py /app/audio_tee.py
+   COPY audio_recorder.py /app/audio_recorder.py
+   COPY transcriber.py /app/transcriber.py
+   ```
+4. Create `/data/audio` directory in entrypoint
+5. Update `.env.example` with new configuration options (see Section 14)
+6. Add example `docker-compose.gpu.yml` for combined RDS Guard + remote
    Whisper ASR deployment (see Section 13.9)
-6. Test builds on both x86_64 and arm64 (Pi)
-7. Document remote Whisper setup in README (see Section 13)
+7. Test builds on both x86_64 and arm64 (Pi). Verify `faster-whisper` wheel
+   availability for ARM64 — if unavailable, document that ARM users should
+   use `TRANSCRIPTION_ENGINE=remote` or `none`
+8. Document remote Whisper setup in README (see Section 13)
 
 ---
 
@@ -1007,16 +1085,16 @@ Shared state:
 ### New Python Packages
 
 ```
-faster-whisper>=1.0.0      # Local STT engine (includes CTranslate2)
-numpy>=1.24.0              # Audio resampling
+faster-whisper>=1.0.0      # Local STT engine (includes CTranslate2 + numpy)
 requests>=2.31.0           # Remote Whisper ASR HTTP client
 ```
 
-`numpy` is already a transitive dependency of `faster-whisper`, but listing it
-explicitly for the resampling use case.
-
 `requests` is used by the remote transcription backend to POST audio to the
 Whisper ASR Webservice `/asr` endpoint.
+
+**Note on numpy**: `numpy` is a transitive dependency of `faster-whisper` and
+will be installed automatically. It is not used directly by rds-guard — audio
+resampling is handled by `ffmpeg` subprocess (see Section 2.2).
 
 **Note**: When `TRANSCRIPTION_ENGINE=remote` or `none`, the `faster-whisper`
 package is installed but never imported (lazy-loaded). No model is downloaded
@@ -1102,21 +1180,22 @@ T+5s    RadioText received: "Olycka E4 norrgående"
 T+135s  TA flag → false
         │
         │  [synchronous — in rules engine thread]
-        ├─ recorder.stop()
+        ├─ has_audio = recorder.stop()   → True (recording valid, save thread spawned)
         │    └─ spawns background thread: _save_and_transcribe()
         ├─ event_store.end_event(42, state='end', duration=135)
+        ├─ event_store.update_transcription_status(42, "saving")
         ├─ MQTT: rds/alert
         │    {type:"traffic", state:"end", event_id:42,
         │     started:"…T15:30:00", ended:"…T15:32:15",
         │     duration_sec:135,
         │     radiotext:["Olycka E4 norrgående", "Två fält blockerade"],
         │     audio_available:true,
-        │     transcription_status:"transcribing"}       ← text NOT yet available
+        │     transcription_status:"saving"}              ← audio being processed
         └─ WS broadcast (same payload)
         │
         │  [async — in background thread, ~1-2s later]
-        ├─ Downsample: 171 kHz → 16 kHz  (~4.3 MB)
-        ├─ Write: /data/audio/42.wav
+        ├─ Downsample + encode via ffmpeg: 171 kHz → 16 kHz
+        ├─ Write: /data/audio/42.wav  (~4.3 MB)
         ├─ Encode: /data/audio/42.ogg  (Opus, ~200 KB)
         ├─ event_store.update_event_audio(42, "42.ogg")
         ├─ event_store.update_transcription_status(42, "transcribing")
@@ -1209,7 +1288,7 @@ No recording:  (nothing shown)
 | Very long TA (> 10 min) | Recording capped at `MAX_RECORDING_SEC` |
 | Transcription model fails to load (local) | Status set to "error"; audio still saved and playable |
 | Disk full | Audio write fails; logged as error; RDS event still stored |
-| Multiple simultaneous TAs (different PIs) | Each gets its own recorder buffer (keyed by PI) |
+| Multiple simultaneous TAs (different PIs) | Extremely unlikely on a single frequency. If it occurs, the second TA replaces the first recording (single-buffer design). The first event still has its metadata in SQLite but no audio. |
 | App restart during recording | Stale recordings cleaned up on startup |
 | Audio file deleted externally | API returns 404; UI shows "Audio unavailable" |
 | Whisper model not downloaded yet (local) | Auto-downloads on first use (one-time) |
@@ -1239,8 +1318,8 @@ No recording:  (nothing shown)
 ### CPU Impact
 
 - **AudioTee:** Negligible — memcpy-level operations
-- **Resampling (171→16 kHz):** Brief spike (~1-2s for 2-min recording)
-- **FFmpeg encoding:** Brief spike (~1-2s)
+- **FFmpeg resampling + encoding:** Brief spike (~1-2s for 2-min recording,
+  single ffmpeg subprocess handles both resample and encode)
 - **Local Whisper transcription:** Significant — ~10s per minute of audio on
   x86, ~60s per minute on Pi 4. Runs in dedicated thread, doesn't block
   pipeline.
