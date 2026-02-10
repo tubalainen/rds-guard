@@ -62,6 +62,7 @@ def init_db(db_path=None):
     _migrate_add_column(conn, "audio_path", "TEXT")
     _migrate_add_column(conn, "transcription", "TEXT")
     _migrate_add_column(conn, "transcription_status", "TEXT")
+    _migrate_add_column(conn, "transcription_duration_sec", "REAL")
 
     log.info("Event store initialized at %s", _DB_PATH)
 
@@ -197,14 +198,15 @@ def update_event_audio(event_id, audio_path):
         conn.commit()
 
 
-def update_event_transcription(event_id, transcription, status="done"):
-    """Set the transcription text and status for an event."""
+def update_event_transcription(event_id, transcription, status="done",
+                               duration_sec=None):
+    """Set the transcription text, status, and optional duration for an event."""
     with _lock:
         conn = _conn()
         conn.execute(
-            "UPDATE events SET transcription = ?, transcription_status = ? "
-            "WHERE id = ?",
-            (transcription, status, event_id)
+            "UPDATE events SET transcription = ?, transcription_status = ?, "
+            "transcription_duration_sec = ? WHERE id = ?",
+            (transcription, status, duration_sec, event_id)
         )
         conn.commit()
 

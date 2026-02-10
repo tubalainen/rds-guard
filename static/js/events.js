@@ -10,13 +10,21 @@ const Events = (() => {
     let total = 0;
     let pollTimer = null;
 
-    /** Returns true if any <audio> element on the page is currently playing. */
-    function isAudioPlaying() {
-        const players = document.querySelectorAll('audio');
-        for (const a of players) {
-            if (!a.paused && !a.ended) return true;
+    /**
+     * Detach (not destroy) any event-card that contains a playing <audio>
+     * element from the given container.  Returns { card, eventId } or null.
+     */
+    function detachPlayingCard(container) {
+        const audio = container.querySelector('audio');
+        if (audio && !audio.paused && !audio.ended) {
+            const card = audio.closest('.event-card');
+            if (card) {
+                const eventId = card.dataset.eventId;
+                card.remove();          // detach from DOM, keeps audio alive
+                return { card, eventId };
+            }
         }
-        return false;
+        return null;
     }
 
     function init() {
@@ -48,9 +56,6 @@ const Events = (() => {
 
     async function loadEvents(replace) {
         try {
-            // Skip DOM rebuild while audio is playing to avoid killing playback
-            if (replace && isAudioPlaying()) return;
-
             let url = `/api/events?limit=${LIMIT}&offset=${replace ? 0 : offset}`;
             if (currentFilter) url += `&type=${currentFilter}`;
 
@@ -64,13 +69,26 @@ const Events = (() => {
             const loadMore = document.getElementById('load-more');
 
             if (replace) {
+                // Preserve card with playing audio so playback is not interrupted
+                const saved = detachPlayingCard(list);
                 list.innerHTML = '';
                 offset = 0;
-            }
 
-            if (data.events.length === 0 && replace) {
-                empty.style.display = 'block';
-                loadMore.style.display = 'none';
+                if (data.events.length === 0) {
+                    empty.style.display = 'block';
+                    loadMore.style.display = 'none';
+                } else {
+                    empty.style.display = 'none';
+                    data.events.forEach(ev => {
+                        if (saved && String(ev.id) === saved.eventId) {
+                            list.appendChild(saved.card);
+                        } else {
+                            list.appendChild(renderEventCard(ev, false));
+                        }
+                    });
+                    const shown = list.children.length;
+                    loadMore.style.display = shown < total ? 'block' : 'none';
+                }
             } else {
                 empty.style.display = 'none';
                 data.events.forEach(ev => {
@@ -86,17 +104,20 @@ const Events = (() => {
 
     async function loadActiveEvents() {
         try {
-            // Skip DOM rebuild while audio is playing to avoid killing playback
-            if (isAudioPlaying()) return;
-
             const resp = await fetch('/api/events/active');
             if (!resp.ok) return;
             const data = await resp.json();
 
             const container = document.getElementById('active-events');
+            // Preserve card with playing audio so playback is not interrupted
+            const saved = detachPlayingCard(container);
             container.innerHTML = '';
             data.events.forEach(ev => {
-                container.appendChild(renderEventCard(ev, true));
+                if (saved && String(ev.id) === saved.eventId) {
+                    container.appendChild(saved.card);
+                } else {
+                    container.appendChild(renderEventCard(ev, true));
+                }
             });
         } catch (e) {
             // Server not reachable
@@ -106,6 +127,7 @@ const Events = (() => {
     function renderEventCard(ev, isActive) {
         const card = document.createElement('div');
         card.className = `event-card type-${ev.type}`;
+        card.dataset.eventId = String(ev.id);
         if (isActive) card.classList.add('active');
 
         const typeLabels = {
@@ -167,7 +189,11 @@ const Events = (() => {
         // Transcription
         if (ev.transcription) {
             html += '<div class="event-transcription">';
-            html += '<div class="event-section-label">Transcription</div>';
+            html += '<div class="event-section-label">Transcription';
+            if (ev.transcription_duration_sec != null) {
+                html += `<span class="transcription-duration"> (${formatDuration(ev.transcription_duration_sec)})</span>`;
+            }
+            html += '</div>';
             html += `<p>${escapeHtml(ev.transcription)}</p>`;
             html += '</div>';
         } else if (ev.transcription_status === 'recording') {
@@ -220,9 +246,10 @@ const Events = (() => {
     }
 
     function formatDuration(sec) {
-        if (sec < 60) return `${sec}s`;
-        const m = Math.floor(sec / 60);
-        const s = sec % 60;
+        const rounded = Math.round(sec);
+        if (rounded < 60) return `${rounded}s`;
+        const m = Math.floor(rounded / 60);
+        const s = rounded % 60;
         if (m < 60) return `${m}m ${s}s`;
         const h = Math.floor(m / 60);
         return `${h}h ${m % 60}m`;

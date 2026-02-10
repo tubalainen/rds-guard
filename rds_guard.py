@@ -488,7 +488,7 @@ rules_engine = RulesEngine()
 # Transcription completion callback — called from transcriber thread
 # ---------------------------------------------------------------------------
 
-def _on_transcription_complete(event_id, text, error):
+def _on_transcription_complete(event_id, text, error, duration_sec=None):
     """Handle transcription result — update DB, publish MQTT + WS."""
     if error:
         event_store.update_event_transcription(event_id, None, status="error")
@@ -510,7 +510,8 @@ def _on_transcription_complete(event_id, text, error):
                        "error": str(error), "timestamp": now_iso()})
         return
 
-    event_store.update_event_transcription(event_id, text, status="done")
+    event_store.update_event_transcription(event_id, text, status="done",
+                                           duration_sec=duration_sec)
 
     # Fetch the full event for the MQTT payload
     try:
@@ -561,6 +562,7 @@ def _on_transcription_complete(event_id, text, error):
         "radiotext": radiotext,
         "transcription": text,
         "transcription_status": "done",
+        "transcription_duration_sec": duration_sec,
         "audio_available": True,
         "timestamp": ts,
     }
@@ -586,6 +588,7 @@ def _on_transcription_complete(event_id, text, error):
         "event_id": event_id,
         "transcription": text,
         "transcription_status": "done",
+        "transcription_duration_sec": duration_sec,
         "timestamp": ts,
     })
 

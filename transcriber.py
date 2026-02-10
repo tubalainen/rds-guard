@@ -9,6 +9,7 @@ Supports two modes selected by TRANSCRIPTION_ENGINE config:
 import logging
 import queue
 import threading
+import time
 
 log = logging.getLogger("rds-guard")
 
@@ -70,7 +71,7 @@ class Transcriber:
     def enqueue(self, audio_path, event_id, callback):
         """Add a transcription job to the queue.
 
-        callback(event_id, text, error) is called when done.
+        callback(event_id, text, error, duration_sec) is called when done.
         """
         self._queue.put((audio_path, event_id, callback))
 
@@ -86,19 +87,21 @@ class Transcriber:
                 break  # Shutdown sentinel
             audio_path, event_id, callback = item
             try:
+                t0 = time.monotonic()
                 if self._engine == "remote":
                     text = self._transcribe_remote(audio_path)
                 else:
                     if self._model is None:
                         self._load_local_model()
                     text = self._transcribe_local(audio_path)
-                log.info("Transcription complete for event %d (%d chars)",
-                         event_id, len(text) if text else 0)
-                callback(event_id, text, None)
+                duration_sec = round(time.monotonic() - t0, 1)
+                log.info("Transcription complete for event %d (%d chars, %.1fs)",
+                         event_id, len(text) if text else 0, duration_sec)
+                callback(event_id, text, None, duration_sec)
             except Exception as e:
                 log.error("Transcription failed for event %s: %s",
                           event_id, e)
-                callback(event_id, None, e)
+                callback(event_id, None, e, None)
 
     def _load_local_model(self):
         """Load the faster-whisper model (one-time, may download)."""
