@@ -10,6 +10,15 @@ const Events = (() => {
     let total = 0;
     let pollTimer = null;
 
+    /** Returns true if any <audio> element on the page is currently playing. */
+    function isAudioPlaying() {
+        const players = document.querySelectorAll('audio');
+        for (const a of players) {
+            if (!a.paused && !a.ended) return true;
+        }
+        return false;
+    }
+
     function init() {
         setupFilters();
         loadEvents(true);
@@ -39,6 +48,9 @@ const Events = (() => {
 
     async function loadEvents(replace) {
         try {
+            // Skip DOM rebuild while audio is playing to avoid killing playback
+            if (replace && isAudioPlaying()) return;
+
             let url = `/api/events?limit=${LIMIT}&offset=${replace ? 0 : offset}`;
             if (currentFilter) url += `&type=${currentFilter}`;
 
@@ -74,6 +86,9 @@ const Events = (() => {
 
     async function loadActiveEvents() {
         try {
+            // Skip DOM rebuild while audio is playing to avoid killing playback
+            if (isAudioPlaying()) return;
+
             const resp = await fetch('/api/events/active');
             if (!resp.ok) return;
             const data = await resp.json();
