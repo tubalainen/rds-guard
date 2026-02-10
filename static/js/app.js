@@ -29,13 +29,6 @@ const App = (() => {
 
         document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
         document.getElementById(`view-${view}`).classList.add('active');
-
-        // Connect/disconnect WebSocket based on view
-        if (view === 'console') {
-            Console.connect();
-        } else {
-            Console.disconnect();
-        }
     }
 
     async function pollStatus() {
@@ -169,4 +162,5 @@ document.addEventListener('DOMContentLoaded', () => {
     App.init();
     Events.init();
     Console.init();
+    Console.connect();
 });

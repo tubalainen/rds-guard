@@ -38,8 +38,17 @@
         <section id="view-console" class="view">
             <div class="console-controls">
                 <button id="console-pause" class="console-btn">Pause</button>
+                <button id="console-clear" class="console-btn">Clear</button>
                 <input id="console-filter" type="text" placeholder="Filter messages..." class="console-input">
                 <span id="console-count" class="console-count">0 messages</span>
+            </div>
+            <div class="console-group-bar">
+                <button class="console-group-chip active" data-group="">All</button>
+                <button class="console-group-chip" data-group="0a">PS/Flags</button>
+                <button class="console-group-chip" data-group="2a">RadioText</button>
+                <button class="console-group-chip" data-group="4a">Clock</button>
+                <button class="console-group-chip" data-group="14a">EON</button>
+                <button class="console-group-chip" data-group="alert">Alerts</button>
             </div>
             <div id="console-log" class="console-log"></div>
         </section>
