@@ -245,12 +245,24 @@ const Console = (() => {
             case '1a':
             case '1b': {
                 const parts = [];
-                if (p.pin) parts.push(`<span class="cd-key">PIN</span> ${escapeHtml(String(p.pin))}`);
-                if (p.ecc) parts.push(`ECC: ${escapeHtml(String(p.ecc))}`);
+                if (p.prog_item_number) {
+                    parts.push(`<span class="cd-key">PIN</span> ${escapeHtml(String(p.prog_item_number))}`);
+                }
+                if (p.prog_item_started) {
+                    const s = p.prog_item_started;
+                    if (s.time) parts.push(`<span class="cd-key">Start</span> ${escapeHtml(s.time)}`);
+                }
+                if (p.country) parts.push(`<span class="cd-key">Country</span> ${escapeHtml(p.country)}`);
+                if (p.language) parts.push(`<span class="cd-key">Lang</span> ${escapeHtml(p.language)}`);
+                if (p.ecc) parts.push(`<span class="cd-key">ECC</span> ${escapeHtml(String(p.ecc))}`);
+                if (p.has_linkage != null) parts.push(flag('Linkage', p.has_linkage));
                 return parts.join(' <span class="cd-sep">&middot;</span> ') || raw(payload);
             }
             case '10a': {
-                if (p.ptyn) return `<span class="cd-key">PTYN</span> ${escapeHtml(p.ptyn)}`;
+                const name = (p.pty_name || p.ptyn || '').trim();
+                if (name) return `<span class="cd-key">PTYN</span> ${escapeHtml(name)}`;
+                // No useful PTYN content — show PTY if available
+                if (p.prog_type) return `<span class="cd-key">PTY</span> ${escapeHtml(p.prog_type)}`;
                 return raw(payload);
             }
             case 'transcription': {
