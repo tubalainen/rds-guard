@@ -1,6 +1,6 @@
 """SQLite event store for RDS Guard.
 
-Stores traffic announcements, emergency alerts, TMC messages, and EON traffic
+Stores traffic announcements, emergency alerts, and EON traffic
 events. Traffic announcements are tracked as a single row through their
 lifecycle (start → update → end).
 """
