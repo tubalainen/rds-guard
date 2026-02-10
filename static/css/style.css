@@ -13,7 +13,6 @@
     --accent-orange: #f59e0b;
     --accent-blue: #3b82f6;
     --accent-green: #22c55e;
-    --accent-purple: #a855f7;
     --accent-red-dim: rgba(239, 68, 68, 0.15);
     --accent-orange-dim: rgba(245, 158, 11, 0.15);
     --accent-blue-dim: rgba(59, 130, 246, 0.15);
@@ -198,9 +197,6 @@ main {
 
 .event-card.type-eon_traffic .event-indicator { background: var(--accent-blue); }
 .event-card.type-eon_traffic .event-type { color: var(--accent-blue); }
-
-.event-card.type-tmc .event-indicator { background: var(--accent-purple); }
-.event-card.type-tmc .event-type { color: var(--accent-purple); }
 
 .event-time {
     font-size: 0.8125rem;

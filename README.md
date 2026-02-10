@@ -8,7 +8,7 @@ Built for Sveriges Radio P4, Sweden's primary traffic announcement carrier and e
 
 - Tunes to an FM frequency using an RTL-SDR USB dongle
 - Decodes all RDS (Radio Data System) data in real time
-- Detects traffic announcements, emergency broadcasts, TMC messages, and EON cross-network alerts
+- Detects traffic announcements, emergency broadcasts, and EON cross-network alerts
 - Records broadcast audio during traffic and emergency events, converts to OGG/WAV via ffmpeg
 - Transcribes recorded audio using Whisper (local or remote) for searchable text
 - Stores events in a local SQLite database with 30-day retention
@@ -59,7 +59,6 @@ Single Docker container. One process handles the entire pipeline:
 | TA flag goes false (end) | `traffic` | `info` |
 | RadioText change during active TA | updates existing event | |
 | PTY changes to Alarm | `emergency` | `critical` |
-| TMC message (group 8A) | `tmc` | `warning` |
 | EON linked station TA (group 14A) | `eon_traffic` | `info` |
 
 Events are written to SQLite and optionally published to MQTT. Traffic announcements and emergency broadcasts are tracked through their full lifecycle (start, RadioText updates, end with duration). Audio is automatically recorded during `traffic` and `emergency` events, then transcribed via Whisper.
@@ -232,7 +231,7 @@ rds/{pi}/programme/rt              # RadioText (64-char free text)
 rds/{pi}/station/pty               # Programme Type
 rds/{pi}/eon/{other_pi}/ta         # Linked station TA via EON
 rds/{pi}/{type}/transcription      # Transcription text (retained)
-rds/alert                          # All events (traffic, emergency, tmc, eon)
+rds/alert                          # All events (traffic, emergency, eon)
 rds/system/status                  # Bridge health (periodic)
 ```
 

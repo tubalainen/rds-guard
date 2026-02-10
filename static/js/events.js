@@ -97,7 +97,6 @@ const Events = (() => {
             traffic: 'Traffic Announcement',
             emergency: 'Emergency Broadcast',
             eon_traffic: 'EON Traffic',
-            tmc: 'TMC Message',
         };
 
         const timeStr = formatTime(ev.started_at || ev.created_at);
@@ -131,17 +130,6 @@ const Events = (() => {
                 html += `<p>${escapeHtml(rt)}</p>`;
             });
             html += '</div>';
-        }
-
-        // TMC data
-        if (ev.type === 'tmc') {
-            let data = ev.data;
-            if (typeof data === 'string') {
-                try { data = JSON.parse(data); } catch (e) { data = null; }
-            }
-            if (data && data.tmc) {
-                html += `<div class="event-radiotext"><p>TMC: ${escapeHtml(JSON.stringify(data.tmc))}</p></div>`;
-            }
         }
 
         // EON linked station

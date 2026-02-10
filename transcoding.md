@@ -62,19 +62,18 @@ channels as follows:
 
 ### 1.3 Which Events Trigger Recording
 
-RDS Guard detects four types of events. Only two carry **voice content** on
+RDS Guard detects three types of events. Only two carry **voice content** on
 the tuned frequency — these are the ones worth recording and transcribing:
 
 | Event type | RDS trigger | What happens on-air | Voice content? | Record? |
 |------------|-------------|---------------------|----------------|---------|
 | `traffic` | TA flag → true | Station interrupts regular programming with a **live spoken traffic announcement** read by a presenter. TA flag goes false when done. | **Yes** — the spoken announcement is the primary content | **Yes** (default) |
 | `emergency` | PTY → Alarm | Station activates an **emergency broadcast** (e.g., Swedish VMA — "Viktigt Meddelande till Allmänheten"). A spoken warning message is read. | **Yes** — the spoken emergency message is critical content | **Yes** (default) |
-| `tmc` | RDS Group 8A | A **digital data packet** is embedded in the RDS subcarrier. Carries encoded location/event codes (e.g., "accident on road segment 1234"). | **No** — TMC is pure data. The station's audible audio (music, talk) is unrelated to the TMC data. | **No** |
 | `eon_traffic` | RDS Group 14A | A **data observation** that another station's TA flag changed. The actual traffic announcement is happening on a *different frequency*. | **No** — the voice announcement is on the linked station, not the tuned one. Recording would capture unrelated audio. | **No** |
 
 **Default**: `RECORD_EVENT_TYPES=traffic,emergency`
 
-This default should rarely need changing. TMC and EON events are data-only —
+This default should rarely need changing. EON events are data-only —
 recording them would just capture whatever the station happens to be playing
 (music, a talk show), which has no relation to the event.
 
@@ -889,8 +888,8 @@ consumption.
 ## 3. Integration Points
 
 Recording is triggered only by events that carry voice content on the tuned
-frequency (see Section 1.3). By default: `traffic` and `emergency`. TMC and
-EON events are data-only and never trigger recording.
+frequency (see Section 1.3). By default: `traffic` and `emergency`. EON
+events are data-only and never trigger recording.
 
 ### 3.1 Recording Trigger Flow (Traffic Announcement)
 

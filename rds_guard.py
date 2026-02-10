@@ -202,8 +202,7 @@ class RulesEngine:
       2. TA flag → false: traffic event (end, with collected RT + duration)
       3. RT change during active TA: update existing traffic event
       4. PTY → Alarm type: emergency event
-      5. TMC message (group 8A): tmc event
-      6. EON TA (group 14A): eon_traffic event
+      5. EON TA (group 14A): eon_traffic event
     """
 
     def __init__(self, recorder=None, record_event_types=None):
@@ -428,32 +427,6 @@ class RulesEngine:
         """Check if an emergency broadcast is active for the given PI."""
         with self.lock:
             return pi in self._active_emergency
-
-    def on_tmc(self, mqtt_client, pi, tmc, data):
-        """TMC message received."""
-        ts = msg_ts(data)
-        ctx = self._station_context(pi)
-        payload = {
-            "type": "tmc",
-            "state": "received",
-            "station": ctx,
-            "frequency": config.FM_FREQUENCY,
-            "tmc": tmc,
-            "timestamp": ts,
-        }
-        event_store.insert_event(
-            event_type="tmc",
-            severity="warning",
-            state="received",
-            pi=pi,
-            data_payload=payload,
-            station_ps=ctx.get("ps"),
-            frequency=config.FM_FREQUENCY,
-            started_at=ts,
-        )
-        log.info("EVENT TMC on %s", pi)
-        _mqtt_pub(mqtt_client, "alert", payload)
-        broadcast_ws({"topic": "alert", "payload": payload, "timestamp": ts})
 
     def on_eon_ta(self, mqtt_client, pi, other_pi, ta, data):
         """Linked station TA via EON.
@@ -966,7 +939,7 @@ def process_group(client, data):
         elif rules_engine.is_emergency_active(pi):
             rules_engine.on_pty_normal(client, pi, pty, data)
 
-    # Rule 5: EON Traffic Announcements
+    # Rule 5: EON Traffic Announcements (group 14A)
     if group == "14A":
         on = data.get("other_network")
         if on and on.get("ta") is not None:
@@ -976,14 +949,6 @@ def process_group(client, data):
                     {"active": on["ta"], "timestamp": ts},
                     qos=1, retain=config.MQTT_RETAIN_STATE)
                 rules_engine.on_eon_ta(client, pi, other_pi, on["ta"], data)
-
-    # Rule 6: TMC
-    if group == "8A":
-        tmc = data.get("tmc")
-        if tmc:
-            pub(client, f"{pi}/traffic/tmc", {"tmc": tmc, "timestamp": ts},
-                qos=0, retain=False)
-            rules_engine.on_tmc(client, pi, tmc, data)
 
     # --- Extended topics (only in "all" mode) ---
     publish_all = config.PUBLISH_MODE == "all"
