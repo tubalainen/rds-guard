@@ -435,8 +435,10 @@ class RulesEngine:
     def on_eon_ta(self, mqtt_client, pi, other_pi, ta, data):
         """Linked station TA via EON.
 
-        EON TA is a point-in-time observation (not a lifecycle event).
-        We store it as state="received" so it never shows as "In progress".
+        EON TA is informational only — indicates a linked station on a
+        different frequency has an active TA.  Published to MQTT / WS for
+        Home Assistant but NOT stored in the database (no audio or
+        transcription is available for another frequency).
         """
         ts = msg_ts(data)
         on = data.get("other_network", {})
@@ -454,19 +456,8 @@ class RulesEngine:
             "frequency": config.FM_FREQUENCY,
             "timestamp": ts,
         }
-        event_store.insert_event(
-            event_type="eon_traffic",
-            severity="info",
-            state="received",
-            pi=pi,
-            data_payload=payload,
-            station_ps=ctx.get("ps"),
-            frequency=config.FM_FREQUENCY,
-            started_at=ts,
-            ended_at=ts,
-        )
         label = "active" if ta else "ended"
-        log.info("EVENT EON traffic %s on linked %s via %s", label, other_pi, pi)
+        log.info("EON traffic %s on linked %s via %s", label, other_pi, pi)
         _mqtt_pub(mqtt_client, "alert", payload)
         broadcast_ws({"topic": "alert", "payload": payload, "timestamp": ts})
 
