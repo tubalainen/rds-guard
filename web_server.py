@@ -162,14 +162,26 @@ async def handle_audio(request):
 
 async def handle_ws_console(request):
     """WS /ws/console — live message stream."""
+    import time
     import rds_guard
 
     ws = web.WebSocketResponse()
     await ws.prepare(request)
 
     rds_guard.register_ws(ws)
-    log.info("WebSocket client connected (%d total)",
-             len(rds_guard._ws_clients))
+    client_count = len(rds_guard._ws_clients)
+    log.info("WebSocket client connected (%d total)", client_count)
+
+    # Send a welcome message so the browser can confirm the connection works
+    try:
+        await ws.send_str(json.dumps({
+            "topic": "system/connected",
+            "payload": {"message": "WebSocket connected", "clients": client_count},
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+        }))
+    except Exception:
+        log.warning("Failed to send WebSocket welcome message")
+
     try:
         async for msg in ws:
             # Console is push-only; ignore client messages

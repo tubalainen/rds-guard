@@ -27,6 +27,7 @@ const Console = (() => {
         '14a': 'EON',
         'alert': 'Alert',
         'transcription': 'Transcription',
+        'system': 'System',
     };
 
     function init() {
@@ -77,7 +78,7 @@ const Console = (() => {
                     appendLine(msg);
                 }
             } catch (e) {
-                // Ignore malformed messages
+                console.warn('Console WS message error:', e, event.data);
             }
         };
 
@@ -166,7 +167,9 @@ const Console = (() => {
 
         const topic = msg.topic || '';
         const isAlert = topic === 'alert' || topic.includes('alert');
+        const isSystem = topic.startsWith('system');
         if (isAlert) div.classList.add('is-alert');
+        if (isSystem) div.classList.add('is-system');
 
         const ts = formatTs(msg.timestamp);
         const group = extractGroup(topic);
@@ -186,6 +189,7 @@ const Console = (() => {
         if (!topic) return 'unknown';
         if (topic === 'alert' || topic.startsWith('alert')) return 'alert';
         if (topic === 'transcription') return 'transcription';
+        if (topic.startsWith('system/') || topic === 'system') return 'system';
         const parts = topic.split('/');
         return parts.length > 1 ? parts[parts.length - 1].toLowerCase() : topic.toLowerCase();
     }
@@ -251,6 +255,10 @@ const Console = (() => {
                 if (p.event_id) parts.push(`Event #${p.event_id}`);
                 if (p.transcription) parts.push('"' + escapeHtml(truncate(p.transcription, 120)) + '"');
                 return parts.join(' <span class="cd-sep">&middot;</span> ') || raw(payload);
+            }
+            case 'system': {
+                if (p.message) return escapeHtml(p.message);
+                return raw(payload);
             }
             default:
                 return raw(payload);

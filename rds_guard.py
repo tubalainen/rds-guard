@@ -34,6 +34,7 @@ log = logging.getLogger("rds-guard")
 _ws_clients = set()
 _ws_lock = threading.Lock()
 _event_loop = None  # set by web server on start
+_ws_msg_count = 0
 
 
 def register_ws(ws):
@@ -48,6 +49,7 @@ def unregister_ws(ws):
 
 def broadcast_ws(message):
     """Send a message dict to all WebSocket console clients (non-blocking)."""
+    global _ws_msg_count
     if not _ws_clients or _event_loop is None:
         return
     text = json.dumps(message)
@@ -57,7 +59,13 @@ def broadcast_ws(message):
         try:
             asyncio.run_coroutine_threadsafe(ws.send_str(text), _event_loop)
         except Exception:
-            pass
+            log.debug("Failed to send WS message to client: %s", ws)
+    _ws_msg_count += 1
+    if _ws_msg_count == 1:
+        log.info("WebSocket: first message sent to %d client(s)", len(clients))
+    elif _ws_msg_count % 500 == 0:
+        log.info("WebSocket: %d messages sent so far to %d client(s)",
+                 _ws_msg_count, len(clients))
 
 
 # ---------------------------------------------------------------------------
