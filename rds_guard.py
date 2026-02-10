@@ -1300,4 +1300,11 @@ def main():
 
 
 if __name__ == "__main__":
+    # Register this module under its proper name so that `import rds_guard`
+    # in other modules (e.g. web_server) returns THIS module instance instead
+    # of loading a second copy.  Without this, __main__ and rds_guard would be
+    # two separate objects with independent _ws_clients / _event_loop state.
+    import sys
+    sys.modules["rds_guard"] = sys.modules[__name__]
+
     main()
