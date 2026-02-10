@@ -308,6 +308,11 @@ main {
     animation: blink 1s ease-in-out infinite;
 }
 
+.transcription-duration {
+    color: var(--text-muted);
+    font-weight: normal;
+}
+
 /* Audio player */
 .event-audio {
     margin: 0.5rem 0;

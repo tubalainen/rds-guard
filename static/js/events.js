@@ -189,7 +189,11 @@ const Events = (() => {
         // Transcription
         if (ev.transcription) {
             html += '<div class="event-transcription">';
-            html += '<div class="event-section-label">Transcription</div>';
+            html += '<div class="event-section-label">Transcription';
+            if (ev.transcription_duration_sec != null) {
+                html += `<span class="transcription-duration"> (${formatDuration(ev.transcription_duration_sec)})</span>`;
+            }
+            html += '</div>';
             html += `<p>${escapeHtml(ev.transcription)}</p>`;
             html += '</div>';
         } else if (ev.transcription_status === 'recording') {
@@ -242,9 +246,10 @@ const Events = (() => {
     }
 
     function formatDuration(sec) {
-        if (sec < 60) return `${sec}s`;
-        const m = Math.floor(sec / 60);
-        const s = sec % 60;
+        const rounded = Math.round(sec);
+        if (rounded < 60) return `${rounded}s`;
+        const m = Math.floor(rounded / 60);
+        const s = rounded % 60;
         if (m < 60) return `${m}m ${s}s`;
         const h = Math.floor(m / 60);
         return `${h}h ${m % 60}m`;
