@@ -31,7 +31,8 @@ const Console = (() => {
 
     function init() {
         document.getElementById('console-pause').addEventListener('click', togglePause);
-        document.getElementById('console-clear').addEventListener('click', clearLog);
+        const clearBtn = document.getElementById('console-clear');
+        if (clearBtn) clearBtn.addEventListener('click', clearLog);
         document.getElementById('console-filter').addEventListener('input', (e) => {
             filterText = e.target.value.toLowerCase();
             renderAll();
