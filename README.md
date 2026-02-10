@@ -9,8 +9,10 @@ Built for Sveriges Radio P4, Sweden's primary traffic announcement carrier and e
 - Tunes to an FM frequency using an RTL-SDR USB dongle
 - Decodes all RDS (Radio Data System) data in real time
 - Detects traffic announcements, emergency broadcasts, TMC messages, and EON cross-network alerts
+- Records broadcast audio during traffic and emergency events, converts to OGG/WAV via ffmpeg
+- Transcribes recorded audio using Whisper (local or remote) for searchable text
 - Stores events in a local SQLite database with 30-day retention
-- Serves a dark-themed web dashboard with live event feed and raw console
+- Serves a dark-themed web dashboard with live event feed, audio playback, and transcriptions
 - Optionally forwards events and decoded data to an MQTT broker for Home Assistant or other automation
 
 ## Architecture
@@ -18,35 +20,36 @@ Built for Sveriges Radio P4, Sweden's primary traffic announcement carrier and e
 Single Docker container. One process handles the entire pipeline:
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│  rds-guard container                                     │
-│                                                          │
-│  rtl_fm │ redsea │ rds_guard.py                          │
-│                        │                                 │
-│                   ┌────┴────┐                            │
-│                   │  Rules  │                            │
-│                   │  Engine │                            │
-│                   └──┬───┬──┘                            │
-│               ┌──────┘   └──────┐                        │
-│               ▼                 ▼                        │
-│           SQLite            MQTT publisher               │
-│         /data/events.db     (optional)                   │
-│               │                                          │
-│               ▼                                          │
-│         Web server (aiohttp)                             │
-│           ├── GET  /              → web UI               │
-│           ├── GET  /api/events    → query events         │
-│           ├── GET  /api/status    → decoder status       │
-│           └── WS   /ws/console   → live message stream   │
-│               │                                          │
-├───────────────┼──────────────────────────────────────────┤
-│           port 8022                                      │
-└───────────────┼──────────────────────────────────────────┘
-                ▼
-             Browser
+┌──────────────────────────────────────────────────────────────┐
+│  rds-guard container                                         │
+│                                                              │
+│  rtl_fm ──→ AudioTee ──→ redsea ──→ rds_guard.py            │
+│                │                          │                  │
+│                ▼                     ┌────┴────┐             │
+│          AudioRecorder               │  Rules  │             │
+│            (ffmpeg)                   │  Engine │             │
+│                │                     └──┬───┬──┘             │
+│                ▼                  ┌─────┘   └──────┐         │
+│          Transcriber              ▼                ▼         │
+│       (faster-whisper         SQLite           MQTT          │
+│        or remote ASR)       /data/events.db   (optional)     │
+│                                   │                          │
+│          /data/audio/             ▼                           │
+│           *.ogg / *.wav     Web server (aiohttp)             │
+│                               ├── GET  /              → UI   │
+│                               ├── GET  /api/events    → API  │
+│                               ├── GET  /api/audio/:f  → play │
+│                               ├── GET  /api/status    → info │
+│                               └── WS   /ws/console    → live │
+│                                   │                          │
+├───────────────────────────────────┼──────────────────────────┤
+│                               port 8022                      │
+└───────────────────────────────────┼──────────────────────────┘
+                                    ▼
+                                 Browser
 ```
 
-**Pipeline:** `rtl_fm` demodulates the FM signal, `redsea` decodes RDS groups to JSON, `rds_guard.py` processes everything.
+**Pipeline:** `rtl_fm` demodulates the FM signal, `AudioTee` splits the PCM stream — forwarding to `redsea` for RDS decoding while simultaneously feeding the `AudioRecorder` during active events. `rds_guard.py` processes the decoded JSON, triggers recordings, and dispatches transcriptions.
 
 **Rules engine** evaluates each decoded group against hardcoded rules defined by the RDS standard:
 
@@ -59,7 +62,7 @@ Single Docker container. One process handles the entire pipeline:
 | TMC message (group 8A) | `tmc` | `warning` |
 | EON linked station TA (group 14A) | `eon_traffic` | `info` |
 
-Events are written to SQLite and optionally published to MQTT. Traffic announcements are tracked through their full lifecycle (start, RadioText updates, end with duration).
+Events are written to SQLite and optionally published to MQTT. Traffic announcements and emergency broadcasts are tracked through their full lifecycle (start, RadioText updates, end with duration). Audio is automatically recorded during `traffic` and `emergency` events, then transcribed via Whisper.
 
 ## Requirements
 
@@ -86,7 +89,13 @@ git clone https://github.com/tubalainen/rds-guard.git
 cd rds-guard
 ```
 
-2. Create a `.env` file with your settings. At minimum, set your FM frequency:
+2. Copy the example config and set your FM frequency:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and at minimum set your local P4 frequency:
 
 ```bash
 FM_FREQUENCY=103.3M        # Your local P4 frequency
@@ -161,11 +170,37 @@ All settings are in the `.env` file:
 | `WEB_UI_PORT` | `8022` | HTTP port for the web UI and API |
 | `EVENT_RETENTION_DAYS` | `30` | Auto-delete events older than this |
 
+### Audio recording
+
+Audio is always recorded during traffic and emergency events. Recordings are stored as OGG (Opus) by default.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUDIO_DIR` | `/data/audio` | Directory for recorded audio files |
+| `RECORD_EVENT_TYPES` | `traffic,emergency` | Comma-separated event types to record |
+| `AUDIO_FORMAT` | `ogg` | Output format: `ogg` (Opus) or `wav` |
+| `MAX_RECORDING_SEC` | `600` | Maximum recording duration (safety cutoff) |
+
+### Transcription
+
+Recorded audio is transcribed using Whisper for searchable text. Three engine modes are available:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TRANSCRIPTION_ENGINE` | `local` | `local` = built-in faster-whisper, `remote` = external ASR server, `none` = disable |
+| `TRANSCRIPTION_LANGUAGE` | `sv` | Language code for Whisper (e.g. `sv`, `en`, `de`) |
+| `TRANSCRIPTION_MODEL` | `small` | Whisper model size: `tiny`, `base`, `small`, `medium`, `large-v3` (local only) |
+| `TRANSCRIPTION_DEVICE` | `cpu` | Compute device: `cpu` or `cuda` (local only) |
+| `WHISPER_REMOTE_URL` | | URL of remote Whisper ASR server, e.g. `http://whisper:9000` (remote only) |
+| `WHISPER_REMOTE_TIMEOUT` | `120` | HTTP timeout in seconds for remote ASR requests |
+
+> **Local vs Remote:** Local transcription works out of the box but uses significant CPU/RAM (especially larger models). For Raspberry Pi or low-power hosts, use `TRANSCRIPTION_ENGINE=remote` with a [whisper-asr-webservice](https://github.com/ahmetoner/whisper-asr-webservice) container running on a more powerful machine, or set `TRANSCRIPTION_ENGINE=none` to disable transcription while still recording audio.
+
 ## Web UI
 
 The dashboard has two views:
 
-**Events** — Traffic announcements, emergency broadcasts, and other alerts from the database. Active announcements pulse red. Filter by event type. Polls every 10 seconds.
+**Events** — Traffic announcements, emergency broadcasts, and other alerts from the database. Active announcements pulse red. Filter by event type. Polls every 10 seconds. Events with recorded audio show an inline audio player. Completed transcriptions are displayed below each event card.
 
 **Console** — Live stream of all decoded RDS groups via WebSocket. Pause/resume, text filter, 500-message buffer. Useful for debugging and seeing raw data flow.
 
@@ -180,22 +215,28 @@ The status bar at the bottom shows two rows of live data:
 | `/api/events` | GET | Query events. Params: `type`, `since`, `limit`, `offset` |
 | `/api/events/active` | GET | In-progress announcements only |
 | `/api/status` | GET | Decoder status (uptime, station info, decode rate) |
+| `/api/audio/{filename}` | GET | Stream recorded audio file (OGG/WAV) |
 | `/api/events` | DELETE | Clear all events |
 | `/ws/console` | WS | Live stream of all decoded RDS messages |
+
+Event responses include `audio_url` and `transcription` fields when available.
 
 ## MQTT topics
 
 When MQTT is enabled, decoded data is published to structured topics:
 
 ```
-rds/{pi}/traffic/ta          # Traffic Announcement active (bool)
-rds/{pi}/traffic/tp          # Traffic Programme flag
-rds/{pi}/programme/rt        # RadioText (64-char free text)
-rds/{pi}/station/pty         # Programme Type
-rds/{pi}/eon/{other_pi}/ta   # Linked station TA via EON
-rds/alert                    # All events (traffic, emergency, tmc, eon)
-rds/system/status            # Bridge health (periodic)
+rds/{pi}/traffic/ta                # Traffic Announcement active (bool)
+rds/{pi}/traffic/tp                # Traffic Programme flag
+rds/{pi}/programme/rt              # RadioText (64-char free text)
+rds/{pi}/station/pty               # Programme Type
+rds/{pi}/eon/{other_pi}/ta         # Linked station TA via EON
+rds/{pi}/{type}/transcription      # Transcription text (retained)
+rds/alert                          # All events (traffic, emergency, tmc, eon)
+rds/system/status                  # Bridge health (periodic)
 ```
+
+The `rds/alert` topic carries the full event lifecycle including `state: "transcribed"` when transcription completes asynchronously after an event ends. The `rds/{pi}/{type}/transcription` topic is retained so new subscribers receive the latest transcription immediately.
 
 In `all` mode, additional topics are published for PS, AF, clock, RT+, Long PS, ODA, BLER, and more.
 
@@ -236,6 +277,21 @@ automation:
         data:
           title: "Traffic announcement on P4"
           message: "A traffic announcement is being broadcast"
+```
+
+Send a notification with the transcription when it becomes available:
+
+```yaml
+automation:
+  - alias: "Traffic Transcription Ready"
+    trigger:
+      - platform: mqtt
+        topic: "rds/+/traffic/transcription"
+    action:
+      - service: notify.mobile_app
+        data:
+          title: "Traffic announcement transcription"
+          message: "{{ trigger.payload_json.transcription }}"
 ```
 
 ## P4 regional frequencies
@@ -284,6 +340,9 @@ rds-guard/
 ├── entrypoint.sh
 ├── rds_guard.py          # Supervisor: rules engine, MQTT, WebSocket hub
 ├── pipeline.py           # Subprocess manager for rtl_fm + redsea
+├── audio_tee.py          # PCM stream splitter (rtl_fm → redsea + recorder)
+├── audio_recorder.py     # Recording lifecycle, ffmpeg conversion
+├── transcriber.py        # Whisper STT (local faster-whisper or remote ASR)
 ├── event_store.py        # SQLite wrapper
 ├── web_server.py         # aiohttp REST API + WebSocket + static serving
 └── static/
@@ -292,7 +351,7 @@ rds-guard/
     │   └── style.css
     └── js/
         ├── app.js        # Tab routing, status bar
-        ├── events.js     # Event cards, filters, polling
+        ├── events.js     # Event cards, filters, audio player, transcriptions
         └── console.js    # WebSocket console, pause/filter
 ```
 
