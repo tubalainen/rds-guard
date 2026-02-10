@@ -89,7 +89,13 @@ git clone https://github.com/tubalainen/rds-guard.git
 cd rds-guard
 ```
 
-2. Create a `.env` file with your settings. At minimum, set your FM frequency:
+2. Copy the example config and set your FM frequency:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and at minimum set your local P4 frequency:
 
 ```bash
 FM_FREQUENCY=103.3M        # Your local P4 frequency
