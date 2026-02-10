@@ -503,45 +503,227 @@ def purge_old_events(days):
 
 ### 2.6 MQTT Changes — `rds_guard.py`
 
-When transcription completes, publish an updated event payload that includes
-the transcription text:
+Transcription is **asynchronous** — it completes seconds to minutes after the
+TA ends. This means the `end` alert cannot contain the transcription text. The
+MQTT design must account for this timing gap with a separate `transcribed`
+state published later.
 
-**New topic (essential mode):**
+**Topics overview (essential mode):**
+
 ```
-rds/alert                          ← existing; now includes transcription field
-rds/{pi}/traffic/transcription     ← new; dedicated transcription topic
+rds/alert                          ← existing; all event lifecycle messages
+rds/{pi}/traffic/transcription     ← NEW; dedicated topic for transcription results
 ```
 
-**Updated alert payload structure** (traffic end event):
+#### Stage 1: TA Start (T+0s) — `rds/alert`
+
+Existing payload structure, with two new fields added:
+
+```json
+{
+  "type": "traffic",
+  "state": "start",
+  "station": {
+    "pi": "0x9E04",
+    "ps": "P4 Stockholm"
+  },
+  "frequency": "103.3M",
+  "prog_type": "News",
+  "recording": true,
+  "event_id": 42,
+  "timestamp": "2024-02-10T15:30:00"
+}
+```
+
+| Field | Status | Notes |
+|-------|--------|-------|
+| `recording` | **NEW** | `true` when `RECORDING_ENABLED` and event type in `RECORD_EVENT_TYPES`, otherwise omitted |
+| `event_id` | **NEW** | Database row ID, used to correlate later transcription messages |
+| All others | Existing | Unchanged from current code |
+
+#### Stage 2: RadioText Update (T+5s) — `rds/alert`
+
+Unchanged from current code. No recording/transcription fields — this is a
+real-time RDS data update:
+
+```json
+{
+  "type": "traffic",
+  "state": "update",
+  "station": {
+    "pi": "0x9E04",
+    "ps": "P4 Stockholm"
+  },
+  "frequency": "103.3M",
+  "radiotext": "Olycka E4 norrgående vid Rotebro",
+  "all_radiotext": [
+    "Olycka E4 norrgående vid Rotebro"
+  ],
+  "started": "2024-02-10T15:30:00",
+  "timestamp": "2024-02-10T15:30:05"
+}
+```
+
+#### Stage 3: TA End (T+135s) — `rds/alert`
+
+Published **immediately** when TA flag goes false. Transcription is not yet
+available — the audio has just stopped recording and is being processed:
+
 ```json
 {
   "type": "traffic",
   "state": "end",
-  "station": { "pi": "0x9E04", "ps": "P4 Stockholm" },
+  "station": {
+    "pi": "0x9E04",
+    "ps": "P4 Stockholm"
+  },
   "frequency": "103.3M",
   "started": "2024-02-10T15:30:00",
   "ended": "2024-02-10T15:32:15",
   "duration_sec": 135,
-  "radiotext": ["Olycka E4 norrgående vid Rotebro", "Två fält blockerade"],
-  "transcription": "Trafikmeddelande från P4 Stockholm. Det har inträffat en olycka på E4 norrgående vid Rotebro. Två av tre fält är blockerade. Räkna med längre restid.",
+  "radiotext": [
+    "Olycka E4 norrgående vid Rotebro",
+    "Två fält blockerade"
+  ],
+  "prog_type": "News",
   "audio_available": true,
+  "transcription_status": "transcribing",
+  "event_id": 42,
   "timestamp": "2024-02-10T15:32:15"
 }
 ```
 
-**Separate transcription event** (published when transcription finishes, which
-may be after the TA end event):
+| Field | Status | Notes |
+|-------|--------|-------|
+| `audio_available` | **NEW** | `true` if a recording was saved; `false` or omitted if not |
+| `transcription_status` | **NEW** | `"transcribing"` (in progress), `"none"` (engine disabled), or omitted (no recording) |
+| `event_id` | **NEW** | Same ID from the start event, for correlation |
+| All others | Existing | Unchanged from current code |
+
+**Important**: No `transcription` field is present here — the text is not yet
+available. MQTT consumers that need the transcription must listen for the
+Stage 4 message.
+
+#### Stage 4: Transcription Complete (T+145s) — two publishes
+
+When the transcriber finishes (typically 2-30s after TA end, depending on
+engine and audio length), **two** messages are published:
+
+**4a. `rds/alert` — lifecycle completion:**
+
+```json
+{
+  "type": "traffic",
+  "state": "transcribed",
+  "event_id": 42,
+  "station": {
+    "pi": "0x9E04",
+    "ps": "P4 Stockholm"
+  },
+  "frequency": "103.3M",
+  "started": "2024-02-10T15:30:00",
+  "ended": "2024-02-10T15:32:15",
+  "duration_sec": 135,
+  "radiotext": [
+    "Olycka E4 norrgående vid Rotebro",
+    "Två fält blockerade"
+  ],
+  "transcription": "Trafikmeddelande från P4 Stockholm. Det har inträffat en olycka på E4 norrgående vid Rotebro. Två av tre fält är blockerade. Räkna med längre restid.",
+  "transcription_status": "done",
+  "audio_available": true,
+  "timestamp": "2024-02-10T15:32:45"
+}
 ```
-rds/{pi}/traffic/transcription
-```
+
+This is the **complete** event record — all fields populated. Home Assistant
+automations, Node-RED flows, etc. can trigger on `state == "transcribed"` to
+get the full announcement including the spoken text.
+
+**4b. `rds/{pi}/traffic/transcription` — dedicated topic:**
+
+Published on a per-station topic for consumers that only care about
+transcription results (e.g., a text-to-speech relay, logging pipeline, or
+notification bot):
+
 ```json
 {
   "event_id": 42,
-  "transcription": "Trafikmeddelande från P4 Stockholm...",
+  "station": {
+    "pi": "0x9E04",
+    "ps": "P4 Stockholm"
+  },
+  "transcription": "Trafikmeddelande från P4 Stockholm. Det har inträffat en olycka på E4 norrgående vid Rotebro. Två av tre fält är blockerade. Räkna med längre restid.",
   "language": "sv",
   "duration_sec": 135,
+  "radiotext": [
+    "Olycka E4 norrgående vid Rotebro",
+    "Två fält blockerade"
+  ],
   "timestamp": "2024-02-10T15:32:45"
 }
+```
+
+This topic is **retained** (`retain=true`) so new MQTT subscribers immediately
+get the last transcription for each station.
+
+#### Stage 4 (error): Transcription Failed — `rds/alert`
+
+If transcription fails (model error, remote server unreachable, timeout):
+
+```json
+{
+  "type": "traffic",
+  "state": "transcription_failed",
+  "event_id": 42,
+  "station": {
+    "pi": "0x9E04",
+    "ps": "P4 Stockholm"
+  },
+  "transcription_status": "error",
+  "transcription_error": "Remote server timeout after 120s",
+  "audio_available": true,
+  "timestamp": "2024-02-10T15:34:15"
+}
+```
+
+Audio is still available for manual playback even when transcription fails.
+
+#### MQTT State Machine Summary
+
+```
+state: "start"                → TA flag on  (recording begins)
+state: "update"               → RadioText received during TA
+state: "end"                  → TA flag off (recording stops, transcription queued)
+state: "transcribed"          → Transcription complete (full text available)
+state: "transcription_failed" → Transcription error (audio still available)
+```
+
+For consumers that don't care about transcription, the existing `start` →
+`update` → `end` flow is unchanged. The `transcribed` and
+`transcription_failed` states are additive — ignoring them produces the same
+behavior as the current system.
+
+#### Emergency / PTY Alert Events
+
+Emergency broadcasts follow the same pattern but with `type: "emergency"`:
+
+```json
+{
+  "type": "emergency",
+  "state": "transcribed",
+  "event_id": 57,
+  "station": { "pi": "0x9E04", "ps": "P4 Stockholm" },
+  "prog_type": "Alarm",
+  "transcription": "Viktigt meddelande till allmänheten...",
+  "transcription_status": "done",
+  "audio_available": true,
+  "timestamp": "2024-02-10T16:00:45"
+}
+```
+
+The dedicated transcription topic for emergencies:
+```
+rds/{pi}/emergency/transcription
 ```
 
 ### 2.7 Web Server Changes — `web_server.py`
@@ -839,36 +1021,82 @@ for setup instructions.
 
 ```
 T+0s    TA flag → true
-        ├─ INSERT event (state='start')                      → event_id=42
+        ├─ event_store.insert_event(state='start')           → event_id=42
         ├─ recorder.start(event_id=42)
         │    └─ AudioRecorder begins buffering PCM chunks
         ├─ event_store.update_transcription_status(42, "recording")
-        ├─ MQTT: rds/alert  {type:traffic, state:start, recording:true}
-        └─ WS broadcast: {recording: true}
+        ├─ MQTT: rds/alert
+        │    {type:"traffic", state:"start", event_id:42,
+        │     recording:true, station:{pi:"0x9E04", ps:"P4 Stockholm"},
+        │     frequency:"103.3M", prog_type:"News"}
+        └─ WS broadcast (same payload)
 
 T+5s    RadioText received: "Olycka E4 norrgående"
-        ├─ UPDATE event 42 (radiotext += [...])
-        ├─ MQTT: rds/alert  {type:traffic, state:update}
-        └─ WS broadcast
+        ├─ event_store.update_event_radiotext(42, [...])
+        ├─ MQTT: rds/alert
+        │    {type:"traffic", state:"update",
+        │     radiotext:"Olycka E4 norrgående",
+        │     all_radiotext:["Olycka E4 norrgående"],
+        │     started:"2024-02-10T15:30:00"}
+        └─ WS broadcast (same payload)
 
 T+135s  TA flag → false
+        │
+        │  [synchronous — in rules engine thread]
         ├─ recorder.stop()
-        │    ├─ Raw PCM: 135s × 171000 Hz × 2 bytes = ~46 MB
-        │    ├─ Downsample: 171 kHz → 16 kHz  (~4.3 MB)
-        │    ├─ Write: /data/audio/42.wav  (16 kHz, ~4.3 MB)
-        │    ├─ Encode: /data/audio/42.ogg  (Opus, ~200 KB)
-        │    ├─ event_store.update_event_audio(42, "42.ogg")
-        │    ├─ event_store.update_transcription_status(42, "transcribing")
-        │    └─ transcriber.enqueue(42.wav, callback)
-        ├─ UPDATE event 42 (state='end', duration=135)
-        ├─ MQTT: rds/alert  {type:traffic, state:end, audio_available:true}
-        └─ WS broadcast
+        │    └─ spawns background thread: _save_and_transcribe()
+        ├─ event_store.end_event(42, state='end', duration=135)
+        ├─ MQTT: rds/alert
+        │    {type:"traffic", state:"end", event_id:42,
+        │     started:"…T15:30:00", ended:"…T15:32:15",
+        │     duration_sec:135,
+        │     radiotext:["Olycka E4 norrgående", "Två fält blockerade"],
+        │     audio_available:true,
+        │     transcription_status:"transcribing"}       ← text NOT yet available
+        └─ WS broadcast (same payload)
+        │
+        │  [async — in background thread, ~1-2s later]
+        ├─ Downsample: 171 kHz → 16 kHz  (~4.3 MB)
+        ├─ Write: /data/audio/42.wav
+        ├─ Encode: /data/audio/42.ogg  (Opus, ~200 KB)
+        ├─ event_store.update_event_audio(42, "42.ogg")
+        ├─ event_store.update_transcription_status(42, "transcribing")
+        └─ transcriber.enqueue(42.wav, callback)
 
-T+145s  Transcription complete (~10s processing for 135s audio)
-        ├─ event_store.update_event_transcription(42, "Trafikmeddelande...")
-        ├─ MQTT: rds/{pi}/traffic/transcription  {event_id:42, text:...}
-        ├─ MQTT: rds/alert  {type:traffic, state:transcribed, text:...}
-        └─ WS broadcast: {event_id:42, transcription:"..."}
+T+145s  Transcription complete (~10s for 135s audio on x86;
+        ~2-3s via remote GPU)
+        │
+        │  [in transcriber worker thread]
+        ├─ event_store.update_event_transcription(42,
+        │    "Trafikmeddelande från P4 Stockholm...", status="done")
+        ├─ MQTT: rds/alert
+        │    {type:"traffic", state:"transcribed", event_id:42,
+        │     station:{pi:"0x9E04", ps:"P4 Stockholm"},
+        │     started:"…T15:30:00", ended:"…T15:32:15",
+        │     duration_sec:135,
+        │     radiotext:["Olycka E4 norrgående", "Två fält blockerade"],
+        │     transcription:"Trafikmeddelande från P4 Stockholm. Det har
+        │       inträffat en olycka på E4 norrgående vid Rotebro. Två av
+        │       tre fält är blockerade. Räkna med längre restid.",
+        │     transcription_status:"done",
+        │     audio_available:true}
+        ├─ MQTT: rds/0x9E04/traffic/transcription  (retain=true)
+        │    {event_id:42, station:{…},
+        │     transcription:"Trafikmeddelande...",
+        │     language:"sv", duration_sec:135,
+        │     radiotext:[...]}
+        └─ WS broadcast: {topic:"transcription", event_id:42,
+             transcription:"Trafikmeddelande..."}
+
+T+145s  (alternate — transcription FAILED)
+        ├─ event_store.update_event_transcription(42, null, status="error")
+        ├─ MQTT: rds/alert
+        │    {type:"traffic", state:"transcription_failed", event_id:42,
+        │     transcription_status:"error",
+        │     transcription_error:"Remote server timeout after 120s",
+        │     audio_available:true}
+        └─ WS broadcast: {topic:"transcription_error", event_id:42,
+             error:"Remote server timeout after 120s"}
 ```
 
 ---
