@@ -46,6 +46,14 @@ RTL-SDR → rtl_fm (stdout=PCM @ 171 kHz)
                                     ▼
                             Transcriber (async)
                                     │
+                       ┌────────────┴────────────┐
+                       ▼                         ▼
+                engine = "local"          engine = "remote"
+                faster-whisper            HTTP POST → /asr
+                (CPU, built-in)           (GPU server, LAN)
+                       │                         │
+                       └────────────┬────────────┘
+                                    │
                             ┌───────┴───────┐
                             ▼               ▼
                       event_store        MQTT pub
@@ -237,9 +245,11 @@ Transcription input (16 kHz WAV)
 
 ### 2.3 Transcription Engine — `transcriber.py` (new module)
 
-Converts recorded audio to text using a speech-to-text engine.
+Converts recorded audio to text using a speech-to-text engine. Supports two
+modes: **local** (built-in `faster-whisper`) and **remote** (external Whisper
+ASR server with GPU acceleration).
 
-**Primary choice: `faster-whisper`**
+#### 2.3.1 Mode A: Local — `faster-whisper` (default)
 
 Rationale:
 - Uses CTranslate2 — 4x faster than original Whisper, lower memory
@@ -247,36 +257,81 @@ Rationale:
 - Excellent Swedish language support (Whisper was trained on Swedish data)
 - Quantized models (int8) reduce memory to ~1 GB for `small` model
 - Apache 2.0 license
+- Zero network dependencies — fully self-contained
 
-**Alternative options** (configurable):
+#### 2.3.2 Mode B: Remote — Whisper ASR Webservice (`/asr` endpoint)
 
-| Engine | Pros | Cons |
-|--------|------|------|
-| `faster-whisper` (default) | Fast, accurate, local, Swedish | ~1 GB RAM for `small` model |
-| `whisper.cpp` (via subprocess) | Very lightweight, C++ | Requires separate binary build |
-| `vosk` | Very lightweight (~50 MB) | Less accurate for Swedish |
-| External API (webhook) | Offload to cloud/other service | Network dependency, privacy |
+For deployments where the RDS Guard host lacks CPU power (e.g., Raspberry Pi)
+or where GPU acceleration is available on another machine, transcription can
+be offloaded to a **remote Whisper ASR server** running on a separate Docker
+host — typically a machine with an NVIDIA GPU.
 
-**Design:**
+The remote server exposes the standard Whisper ASR Webservice `/asr` HTTP
+endpoint (see [onerahmet/openai-whisper-asr-webservice](https://github.com/ahmetoner/whisper-asr-webservice)).
+RDS Guard sends audio files via multipart POST and receives transcription text
+in the response.
+
+**Why remote?**
+- GPU acceleration: `large-v3` model transcribes 2 minutes of audio in ~2-3
+  seconds on an NVIDIA GPU vs. ~120+ seconds on a Pi 4 CPU
+- Larger models: The `large-v3` model is too heavy for most SBCs but trivial
+  on a GPU host, producing near-perfect Swedish transcription
+- Shared resource: One GPU Whisper server can serve multiple RDS Guard
+  instances (or other services)
+- Keeps the RDS Guard container lightweight — no ML dependencies needed
+
+**`/asr` API contract** (Whisper ASR Webservice):
+
+```
+POST /asr?encode=true&task=transcribe&language=sv&output=json
+Content-Type: multipart/form-data
+
+audio_file=@recording.wav
+```
+
+Response:
+```json
+{
+  "text": "Trafikmeddelande från P4 Stockholm..."
+}
+```
+
+#### 2.3.3 Engine Comparison
+
+| Engine | Where it runs | Pros | Cons |
+|--------|--------------|------|------|
+| `local` (default) | RDS Guard container | Self-contained, no network | CPU-bound, limited model size |
+| `remote` | Separate Docker host | GPU-accelerated, large models | Network dependency, extra infra |
+
+#### 2.3.4 Design — Unified Transcriber with Backend Abstraction
 
 ```python
 class Transcriber:
-    """Speech-to-text engine with async job queue."""
+    """Speech-to-text engine with async job queue.
 
-    def __init__(self, model_size="small", language="sv", device="cpu"):
-        self._model_size = model_size
+    Supports two backends selected by TRANSCRIPTION_ENGINE config:
+      - "local"  → built-in faster-whisper (CPU)
+      - "remote" → external Whisper ASR server via /asr HTTP endpoint
+    """
+
+    def __init__(self, engine, language, model_size=None, device=None,
+                 remote_url=None, remote_timeout=120):
+        self._engine = engine          # "local" or "remote"
         self._language = language
-        self._device = device
+        self._model_size = model_size  # local only
+        self._device = device          # local only
+        self._remote_url = remote_url  # remote only (e.g. "http://gpu-host:9000")
+        self._remote_timeout = remote_timeout
         self._queue = queue.Queue()
-        self._model = None  # lazy-loaded on first use
+        self._model = None             # lazy-loaded for local engine
 
-    def _load_model(self):
-        """Load the Whisper model (one-time, ~10-30s on first call)."""
+    def _load_local_model(self):
+        """Load the faster-whisper model (one-time, ~10-30s on first call)."""
         from faster_whisper import WhisperModel
         self._model = WhisperModel(
             self._model_size,
             device=self._device,
-            compute_type="int8",  # quantized for CPU
+            compute_type="int8" if self._device == "cpu" else "float16",
         )
 
     def enqueue(self, audio_path, event_id, callback):
@@ -288,30 +343,58 @@ class Transcriber:
         while True:
             audio_path, event_id, callback = self._queue.get()
             try:
-                if self._model is None:
-                    self._load_model()
-                text = self._transcribe(audio_path)
+                if self._engine == "remote":
+                    text = self._transcribe_remote(audio_path)
+                else:
+                    if self._model is None:
+                        self._load_local_model()
+                    text = self._transcribe_local(audio_path)
                 callback(event_id, text, None)
             except Exception as e:
+                log.error("Transcription failed for event %s: %s", event_id, e)
                 callback(event_id, None, e)
 
-    def _transcribe(self, audio_path):
-        """Run transcription on a single file."""
+    def _transcribe_local(self, audio_path):
+        """Run transcription locally via faster-whisper."""
         segments, info = self._model.transcribe(
             str(audio_path),
             language=self._language,
             beam_size=5,
-            vad_filter=True,       # skip silence
-            vad_parameters=dict(
-                min_silence_duration_ms=500,
-            ),
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=500),
         )
-        # Combine all segments into a single string
         texts = [seg.text.strip() for seg in segments if seg.text.strip()]
         return " ".join(texts)
+
+    def _transcribe_remote(self, audio_path):
+        """Send audio to remote Whisper ASR server via /asr endpoint."""
+        import requests
+
+        url = f"{self._remote_url.rstrip('/')}/asr"
+        params = {
+            "encode": "true",
+            "task": "transcribe",
+            "language": self._language,
+            "output": "json",
+        }
+
+        with open(audio_path, "rb") as f:
+            files = {"audio_file": (audio_path.name, f, "audio/wav")}
+            resp = requests.post(
+                url,
+                params=params,
+                files=files,
+                timeout=self._remote_timeout,
+            )
+
+        resp.raise_for_status()
+        result = resp.json()
+        return result.get("text", "").strip()
 ```
 
-**Model selection guidance** (for `TRANSCRIPTION_MODEL` config):
+#### 2.3.5 Model Selection Guidance
+
+**Local mode** (`TRANSCRIPTION_ENGINE=local`):
 
 | Model | Size | RAM | Accuracy | Speed (Pi 4) | Speed (x86) |
 |-------|------|-----|----------|---------------|--------------|
@@ -322,10 +405,23 @@ class Transcriber:
 
 Recommendation: `small` for x86/NUC, `base` or `tiny` for Raspberry Pi 4.
 
+**Remote mode** (`TRANSCRIPTION_ENGINE=remote`):
+
+The model is selected on the **remote server**, not in RDS Guard. This allows
+using `large-v3` (best accuracy) without impacting the RDS Guard host:
+
+| Model | VRAM | Accuracy | Speed (RTX 3060) | Speed (RTX 4090) |
+|-------|------|----------|-------------------|-------------------|
+| `small` | ~2 GB | Very good | ~15x real-time | ~30x |
+| `medium` | ~5 GB | Excellent | ~8x real-time | ~20x |
+| `large-v3` | ~10 GB | Near-perfect | ~5x real-time | ~15x |
+
+Recommendation: `large-v3` on GPU for best Swedish transcription quality.
+
 ### 2.4 Configuration — `config.py` additions
 
 ```python
-# --- Voice Recording & Transcription ---
+# --- Voice Recording ---
 RECORDING_ENABLED = _bool(os.environ.get("RECORDING_ENABLED", "false"))
 AUDIO_DIR = os.environ.get("AUDIO_DIR", "/data/audio")
 
@@ -333,20 +429,36 @@ AUDIO_DIR = os.environ.get("AUDIO_DIR", "/data/audio")
 # Comma-separated: traffic,emergency,eon_traffic,tmc
 RECORD_EVENT_TYPES = os.environ.get("RECORD_EVENT_TYPES", "traffic,emergency")
 
-# Transcription engine: "faster-whisper", "whisper-cpp", "vosk", "none"
-TRANSCRIPTION_ENGINE = os.environ.get("TRANSCRIPTION_ENGINE", "faster-whisper")
-TRANSCRIPTION_MODEL = os.environ.get("TRANSCRIPTION_MODEL", "small")
-TRANSCRIPTION_LANGUAGE = os.environ.get("TRANSCRIPTION_LANGUAGE", "sv")
-
-# "cpu" or "cuda" (if GPU available)
-TRANSCRIPTION_DEVICE = os.environ.get("TRANSCRIPTION_DEVICE", "cpu")
-
 # Web playback format: "ogg", "wav", "mp3"
 AUDIO_FORMAT = os.environ.get("AUDIO_FORMAT", "ogg")
 
 # Max recording duration in seconds (safety cap)
 MAX_RECORDING_SEC = _int(os.environ.get("MAX_RECORDING_SEC"), 600)
 
+# --- Transcription Engine ---
+# Engine mode: "local" (built-in faster-whisper) or "remote" (external /asr server)
+# Set to "none" to disable transcription (recording-only mode)
+TRANSCRIPTION_ENGINE = os.environ.get("TRANSCRIPTION_ENGINE", "local")
+
+# Language hint for Whisper (ISO 639-1 code)
+TRANSCRIPTION_LANGUAGE = os.environ.get("TRANSCRIPTION_LANGUAGE", "sv")
+
+# --- Local engine settings (TRANSCRIPTION_ENGINE=local) ---
+TRANSCRIPTION_MODEL = os.environ.get("TRANSCRIPTION_MODEL", "small")
+
+# "cpu" or "cuda" (if GPU available on the RDS Guard host itself)
+TRANSCRIPTION_DEVICE = os.environ.get("TRANSCRIPTION_DEVICE", "cpu")
+
+# --- Remote engine settings (TRANSCRIPTION_ENGINE=remote) ---
+# Base URL of the Whisper ASR Webservice (including port, no trailing slash)
+# Example: "http://192.168.1.50:9000" or "http://whisper-asr:9000"
+WHISPER_REMOTE_URL = os.environ.get("WHISPER_REMOTE_URL", "")
+
+# HTTP timeout in seconds for remote transcription requests
+# Should be generous — large files on slow networks or busy GPUs may take time
+WHISPER_REMOTE_TIMEOUT = _int(os.environ.get("WHISPER_REMOTE_TIMEOUT"), 120)
+
+# --- MQTT ---
 # Publish transcription to MQTT
 MQTT_PUBLISH_TRANSCRIPTION = _bool(os.environ.get("MQTT_PUBLISH_TRANSCRIPTION", "true"))
 ```
@@ -586,16 +698,22 @@ Shared state:
 ### Phase 3: Transcription Engine
 
 **New files:**
-- `transcriber.py` — STT engine abstraction + worker thread
+- `transcriber.py` — STT engine abstraction with local + remote backends
 
 **Tasks:**
-1. Implement `Transcriber` class with `faster-whisper` backend
-2. Add lazy model loading (first transcription triggers download/load)
-3. Implement job queue with callback mechanism
-4. Wire transcription completion to `event_store.update_event_transcription()`
-5. Wire transcription completion to MQTT publish
-6. Wire transcription completion to WebSocket broadcast
-7. Start transcriber worker thread in `main()`
+1. Implement `Transcriber` class with backend selection (`local` / `remote`)
+2. Implement local backend: `_transcribe_local()` using `faster-whisper` with
+   lazy model loading (first transcription triggers download/load)
+3. Implement remote backend: `_transcribe_remote()` using HTTP POST to the
+   Whisper ASR Webservice `/asr` endpoint
+4. Validate `WHISPER_REMOTE_URL` on startup when `TRANSCRIPTION_ENGINE=remote`
+   (log warning if unreachable, but don't block startup)
+5. Implement job queue with callback mechanism
+6. Wire transcription completion to `event_store.update_event_transcription()`
+7. Wire transcription completion to MQTT publish
+8. Wire transcription completion to WebSocket broadcast
+9. Add retry logic for remote backend (1 retry with backoff on network errors)
+10. Start transcriber worker thread in `main()`
 
 ### Phase 4: Web API + Audio Serving
 
@@ -631,10 +749,13 @@ Shared state:
 
 **Tasks:**
 1. Add `ffmpeg` to Dockerfile runtime stage (for audio encoding)
-2. Add Python deps: `faster-whisper`, `numpy` (for resampling)
+2. Add Python deps: `faster-whisper`, `numpy`, `requests`
 3. Create `/data/audio` directory in entrypoint
-4. Update `.env.example` with new configuration options
-5. Test builds on both x86_64 and arm64 (Pi)
+4. Update `.env.example` with new configuration options (see Section 14)
+5. Add example `docker-compose.gpu.yml` for combined RDS Guard + remote
+   Whisper ASR deployment (see Section 13.9)
+6. Test builds on both x86_64 and arm64 (Pi)
+7. Document remote Whisper setup in README (see Section 13)
 
 ---
 
@@ -643,12 +764,22 @@ Shared state:
 ### New Python Packages
 
 ```
-faster-whisper>=1.0.0      # STT engine (includes CTranslate2)
+faster-whisper>=1.0.0      # Local STT engine (includes CTranslate2)
 numpy>=1.24.0              # Audio resampling
+requests>=2.31.0           # Remote Whisper ASR HTTP client
 ```
 
 `numpy` is already a transitive dependency of `faster-whisper`, but listing it
 explicitly for the resampling use case.
+
+`requests` is used by the remote transcription backend to POST audio to the
+Whisper ASR Webservice `/asr` endpoint.
+
+**Note on conditional dependencies**: When `TRANSCRIPTION_ENGINE=remote`, the
+`faster-whisper` package is never imported (lazy-loaded). This means remote-only
+deployments pay no memory/startup cost for the local model. However, the package
+is still installed in the Docker image to support both modes without rebuilding.
+A future optimization could offer a slim image variant without `faster-whisper`.
 
 ### New System Packages (Dockerfile)
 
@@ -659,32 +790,48 @@ ffmpeg          # Audio encoding (PCM → OGG/Opus)
 `ffmpeg` is used via subprocess for encoding — no Python binding needed. This
 keeps the approach simple and avoids complex native library builds.
 
-### Optional (for alternative engines)
-
-```
-# whisper.cpp — if chosen instead of faster-whisper
-# Built from source in Dockerfile, similar to redsea
-
-# vosk — if chosen for lightweight deployment
-vosk>=0.3.45
-```
-
 ---
 
 ## 6. Configuration Reference
+
+### Recording
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RECORDING_ENABLED` | `false` | Enable voice recording during events |
 | `AUDIO_DIR` | `/data/audio` | Directory for audio files |
-| `RECORD_EVENT_TYPES` | `traffic,emergency` | Event types that trigger recording |
-| `TRANSCRIPTION_ENGINE` | `faster-whisper` | STT engine (`faster-whisper`, `whisper-cpp`, `vosk`, `none`) |
-| `TRANSCRIPTION_MODEL` | `small` | Whisper model size (`tiny`, `base`, `small`, `medium`) |
-| `TRANSCRIPTION_LANGUAGE` | `sv` | Language hint for transcription |
-| `TRANSCRIPTION_DEVICE` | `cpu` | Compute device (`cpu` or `cuda`) |
+| `RECORD_EVENT_TYPES` | `traffic,emergency` | Comma-separated event types that trigger recording |
 | `AUDIO_FORMAT` | `ogg` | Web playback format (`ogg`, `wav`, `mp3`) |
-| `MAX_RECORDING_SEC` | `600` | Maximum recording duration (seconds) |
+| `MAX_RECORDING_SEC` | `600` | Maximum recording duration in seconds |
+
+### Transcription — Engine Selection
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TRANSCRIPTION_ENGINE` | `local` | Engine mode: `local`, `remote`, or `none` |
+| `TRANSCRIPTION_LANGUAGE` | `sv` | Language hint (ISO 639-1 code) |
 | `MQTT_PUBLISH_TRANSCRIPTION` | `true` | Include transcription in MQTT payloads |
+
+### Transcription — Local Mode (`TRANSCRIPTION_ENGINE=local`)
+
+Uses the built-in `faster-whisper` library. Good for x86/NUC hosts. For
+Raspberry Pi, use `tiny` or `base` models, or switch to remote mode.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TRANSCRIPTION_MODEL` | `small` | Whisper model size: `tiny`, `base`, `small`, `medium` |
+| `TRANSCRIPTION_DEVICE` | `cpu` | Compute device: `cpu` or `cuda` |
+
+### Transcription — Remote Mode (`TRANSCRIPTION_ENGINE=remote`)
+
+Offloads transcription to an external Whisper ASR Webservice with GPU
+acceleration. See [Section 13](#13-remote-whisper-asr-server-deployment-guide)
+for setup instructions.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WHISPER_REMOTE_URL` | _(empty)_ | Base URL of the Whisper ASR server (e.g., `http://192.168.1.50:9000`) |
+| `WHISPER_REMOTE_TIMEOUT` | `120` | HTTP timeout in seconds for remote requests |
 
 ---
 
@@ -773,13 +920,19 @@ No recording:  (nothing shown)
 | RTL-SDR produces silence | Transcription returns empty string; stored as-is |
 | Very short TA (< 2s) | Recording discarded; no audio file created |
 | Very long TA (> 10 min) | Recording capped at `MAX_RECORDING_SEC` |
-| Transcription model fails to load | Status set to "error"; event still has audio |
+| Transcription model fails to load (local) | Status set to "error"; event still has audio for playback |
 | Disk full | Audio write fails; logged as error; event unaffected |
 | `RECORDING_ENABLED=false` | Entire feature disabled; no overhead |
 | Multiple simultaneous TAs (different PIs) | Each gets its own recorder buffer (keyed by PI) |
 | App restart during recording | Stale recordings cleaned up on startup |
 | Audio file deleted externally | API returns 404; UI shows "Audio unavailable" |
-| Whisper model not downloaded yet | Auto-downloads on first use (one-time) |
+| Whisper model not downloaded yet (local) | Auto-downloads on first use (one-time) |
+| Remote Whisper server unreachable | 1 retry with 5s backoff; status set to "error"; audio still available |
+| Remote Whisper server returns HTTP error | Logged; status set to "error"; retry on 5xx, fail on 4xx |
+| Remote Whisper server times out | After `WHISPER_REMOTE_TIMEOUT` seconds; status "error" |
+| `WHISPER_REMOTE_URL` empty when engine=remote | Log error on startup; transcription disabled; recording still works |
+| Remote server returns unexpected JSON | Graceful fallback; log raw response; status "error" |
+| Network partition during transcription | Request times out; audio preserved; can re-transcribe later |
 
 ---
 
@@ -790,7 +943,8 @@ No recording:  (nothing shown)
 - **AudioTee overhead (not recording):** ~zero (one boolean check per chunk)
 - **AudioTee overhead (recording):** raw PCM buffer grows at ~342 KB/s
   (171 kHz × 2 bytes). A 2-minute TA ≈ 41 MB in memory.
-- **Whisper model resident:** ~1 GB for `small`, ~500 MB for `base`
+- **Local Whisper model resident:** ~1 GB for `small`, ~500 MB for `base`
+- **Remote mode:** ~zero additional memory (no model loaded; only HTTP client)
 - **Mitigation:** Lazy-load model only on first transcription; unload after
   idle timeout (configurable)
 
@@ -799,8 +953,12 @@ No recording:  (nothing shown)
 - **AudioTee:** Negligible — memcpy-level operations
 - **Resampling (171→16 kHz):** Brief spike (~1-2s for 2-min recording)
 - **FFmpeg encoding:** Brief spike (~1-2s)
-- **Whisper transcription:** Significant — ~10s per minute of audio on x86,
-  ~60s per minute on Pi 4. Runs in dedicated thread, doesn't block pipeline.
+- **Local Whisper transcription:** Significant — ~10s per minute of audio on
+  x86, ~60s per minute on Pi 4. Runs in dedicated thread, doesn't block
+  pipeline.
+- **Remote Whisper transcription:** Near-zero CPU on RDS Guard host. Only
+  the HTTP POST transfer + JSON parsing. All heavy computation runs on the
+  remote GPU server.
 
 ### Disk Impact
 
@@ -810,6 +968,14 @@ No recording:  (nothing shown)
 - **Mitigation:** Configurable retention; WAV can be optional (OGG sufficient
   for playback; Whisper can read OGG directly)
 
+### Network Impact (remote mode only)
+
+- **Upload per event:** ~4.3 MB WAV for 1 minute of audio (16 kHz mono)
+- **Download:** ~1 KB JSON response
+- **Latency:** Typically 2-5 seconds for a 2-minute recording on a local
+  network with GPU. Budget for up to `WHISPER_REMOTE_TIMEOUT` seconds.
+- **Bandwidth:** Negligible for typical TA frequency (~5/day)
+
 ---
 
 ## 11. Testing Strategy
@@ -818,7 +984,10 @@ No recording:  (nothing shown)
 
 - `test_audio_tee.py` — Verify chunks forwarded correctly; recording toggle
 - `test_audio_recorder.py` — Start/stop lifecycle; WAV output; duration limits
-- `test_transcriber.py` — Mock STT model; queue processing; error handling
+- `test_transcriber.py` — Mock STT model; queue processing; error handling;
+  test both `_transcribe_local()` and `_transcribe_remote()` paths
+- `test_transcriber_remote.py` — Mock HTTP responses; test error handling for
+  timeouts, HTTP errors, malformed JSON, unreachable server
 - `test_event_store.py` — Schema migration; new columns; audio/transcription updates
 
 ### Integration Tests
@@ -827,11 +996,14 @@ No recording:  (nothing shown)
 - MQTT payload verification with transcription fields
 - Web API: audio file serving with correct headers
 - Web UI: manual testing of player and transcription display
+- Remote transcription: start a local Whisper ASR container and verify the
+  full POST → response → DB update cycle
 
 ### Performance Tests
 
 - AudioTee throughput: verify no dropped samples under load
-- Transcription latency benchmarks per model size
+- Transcription latency benchmarks per model size (local)
+- Remote transcription latency over LAN vs. localhost
 - Memory profiling during long recordings
 
 ---
@@ -842,7 +1014,337 @@ No recording:  (nothing shown)
    existing users
 2. **Incremental deployment**: Audio recording can work without transcription
    (`TRANSCRIPTION_ENGINE=none`)
-3. **Model download**: First transcription triggers model download;
+3. **Model download** (local mode): First transcription triggers model download;
    alternatively, pre-download during `docker build`
-4. **Documentation**: Update README with new config options, hardware
+4. **Remote mode**: Can be used from day one — no model download needed on the
+   RDS Guard host. Just point `WHISPER_REMOTE_URL` at an existing Whisper ASR
+   server.
+5. **Documentation**: Update README with new config options, hardware
    recommendations, and example `.env` additions
+
+---
+
+## 13. Remote Whisper ASR Server — Deployment Guide
+
+This section covers how to set up a GPU-accelerated Whisper ASR server on a
+separate Docker host for use with `TRANSCRIPTION_ENGINE=remote`.
+
+### 13.1 Overview
+
+The remote server runs the
+[openai-whisper-asr-webservice](https://github.com/ahmetoner/whisper-asr-webservice)
+Docker image. This provides a REST API with the `/asr` endpoint that accepts
+audio files and returns transcribed text. It supports NVIDIA GPU acceleration
+via CUDA, enabling the use of larger, more accurate Whisper models that would
+be impractical on the RDS Guard host.
+
+```
+┌─────────────────────┐         HTTP POST          ┌──────────────────────┐
+│   RDS Guard Host    │  ──── /asr?language=sv ──▶  │  GPU Host (Whisper)  │
+│   (Pi / NUC)        │  ◀── JSON response ──────  │  (NVIDIA GPU)        │
+│                     │                             │                      │
+│  TRANSCRIPTION_     │                             │  whisper-asr-        │
+│  ENGINE=remote      │                             │  webservice:latest-  │
+│  WHISPER_REMOTE_    │                             │  gpu                 │
+│  URL=http://gpu:9k  │                             │  ASR_MODEL=large-v3  │
+└─────────────────────┘                             └──────────────────────┘
+```
+
+### 13.2 Prerequisites
+
+On the GPU host:
+- **Docker** (with Docker Compose v2)
+- **NVIDIA GPU** with at least 10 GB VRAM (for `large-v3` model, less for
+  smaller models)
+- **NVIDIA Container Toolkit** (`nvidia-container-toolkit`) installed and
+  configured so Docker can access the GPU
+
+Verify GPU access from Docker:
+```bash
+docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi
+```
+
+### 13.3 Docker Compose — GPU Whisper Server
+
+Create a `docker-compose.yml` on the GPU host:
+
+```yaml
+# docker-compose.yml — Whisper ASR Server (GPU)
+# Place this on your GPU-equipped Docker host
+
+services:
+  whisper-asr:
+    image: onerahmet/openai-whisper-asr-webservice:latest-gpu
+    container_name: whisper-asr
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    environment:
+      # Whisper model to use — larger = more accurate, more VRAM
+      # Options: tiny, base, small, medium, large-v3
+      - ASR_MODEL=large-v3
+
+      # Inference engine: faster_whisper (recommended) or openai_whisper
+      - ASR_ENGINE=faster_whisper
+
+      # Default language (can be overridden per-request via ?language= param)
+      - ASR_MODEL_PATH=/data/whisper-models
+    volumes:
+      # Persist downloaded models across container restarts
+      - whisper-models:/data/whisper-models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  whisper-models:
+```
+
+### 13.4 Starting the Remote Whisper Server
+
+```bash
+# On the GPU host:
+cd /path/to/whisper-compose
+docker compose up -d
+
+# Watch logs (model downloads on first start — may take a few minutes)
+docker compose logs -f whisper-asr
+
+# Verify it's running
+curl http://localhost:9000/docs
+```
+
+The first startup downloads the Whisper model (~3 GB for `large-v3`). This is
+cached in the `whisper-models` volume and persists across restarts.
+
+### 13.5 Verifying the `/asr` Endpoint
+
+Test with a sample audio file:
+
+```bash
+# Quick test with a WAV file
+curl -X POST "http://localhost:9000/asr?encode=true&task=transcribe&language=sv&output=json" \
+  -H "Content-Type: multipart/form-data" \
+  -F "audio_file=@test_recording.wav"
+
+# Expected response:
+# {"text": "Trafikmeddelande från P4 Stockholm..."}
+```
+
+The server also exposes interactive API docs at `http://<gpu-host>:9000/docs`
+(Swagger UI) for testing directly in the browser.
+
+### 13.6 Configuring RDS Guard to Use the Remote Server
+
+On the RDS Guard host, add these to your `.env` file:
+
+```bash
+# Enable recording + remote transcription
+RECORDING_ENABLED=true
+TRANSCRIPTION_ENGINE=remote
+WHISPER_REMOTE_URL=http://192.168.1.50:9000
+WHISPER_REMOTE_TIMEOUT=120
+TRANSCRIPTION_LANGUAGE=sv
+```
+
+Replace `192.168.1.50` with the IP or hostname of your GPU host. If both
+containers are on the same Docker network, use the service name instead
+(e.g., `http://whisper-asr:9000`).
+
+### 13.7 Model Selection for Remote Server
+
+The model is configured on the **remote server** via the `ASR_MODEL`
+environment variable, not on the RDS Guard side.
+
+| ASR_MODEL | VRAM Required | Accuracy | Best For |
+|-----------|---------------|----------|----------|
+| `tiny` | ~1 GB | Fair | Testing, low-end GPUs |
+| `base` | ~1 GB | Good | Quick results, older GPUs |
+| `small` | ~2 GB | Very good | Good balance |
+| `medium` | ~5 GB | Excellent | Most use cases |
+| `large-v3` | ~10 GB | Near-perfect | Best Swedish quality (recommended) |
+
+For Swedish traffic announcements, `large-v3` is recommended — it handles
+Swedish names, road numbers, and traffic terminology with high accuracy.
+
+### 13.8 Network & Security Considerations
+
+- The `/asr` endpoint has **no authentication** by default. Only expose it
+  on a trusted network (LAN) or behind a reverse proxy with auth.
+- Use a firewall to restrict access to port 9000 to the RDS Guard host only:
+  ```bash
+  # On the GPU host (iptables example)
+  iptables -A INPUT -p tcp --dport 9000 -s 192.168.1.100 -j ACCEPT
+  iptables -A INPUT -p tcp --dport 9000 -j DROP
+  ```
+- For cross-network deployments, consider a VPN or SSH tunnel.
+- Audio data is sent unencrypted over HTTP. For sensitive deployments, use
+  HTTPS via a reverse proxy (e.g., Caddy, nginx).
+
+### 13.9 Running Both Services on the Same Docker Host
+
+If the GPU host also runs RDS Guard (e.g., a desktop with both an RTL-SDR
+dongle and an NVIDIA GPU), both services can share a Docker network:
+
+```yaml
+# docker-compose.yml — Combined RDS Guard + Whisper ASR
+
+services:
+  rds-guard:
+    image: ghcr.io/tubalainen/rds-guard:latest
+    container_name: rds-guard
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "${WEB_UI_PORT:-8022}:8022"
+    volumes:
+      - ./rds-data:/data
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+    depends_on:
+      - whisper-asr
+
+  whisper-asr:
+    image: onerahmet/openai-whisper-asr-webservice:latest-gpu
+    container_name: whisper-asr
+    restart: unless-stopped
+    environment:
+      - ASR_MODEL=large-v3
+      - ASR_ENGINE=faster_whisper
+      - ASR_MODEL_PATH=/data/whisper-models
+    volumes:
+      - whisper-models:/data/whisper-models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  whisper-models:
+```
+
+In this case, use the Docker service name as the URL in `.env`:
+
+```bash
+WHISPER_REMOTE_URL=http://whisper-asr:9000
+```
+
+### 13.10 CPU-Only Remote Server (No GPU)
+
+If no NVIDIA GPU is available but you still want to offload transcription to a
+more powerful x86 machine (e.g., a NAS or server), use the CPU image:
+
+```yaml
+services:
+  whisper-asr:
+    image: onerahmet/openai-whisper-asr-webservice:latest
+    # Note: 'latest' instead of 'latest-gpu'
+    container_name: whisper-asr
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    environment:
+      - ASR_MODEL=small
+      # Use a smaller model for CPU — large-v3 is too slow without GPU
+      - ASR_ENGINE=faster_whisper
+      - ASR_MODEL_PATH=/data/whisper-models
+    volumes:
+      - whisper-models:/data/whisper-models
+
+volumes:
+  whisper-models:
+```
+
+This is useful for offloading from a Raspberry Pi to a more capable x86 NAS,
+even without GPU acceleration.
+
+---
+
+## 14. Example `.env` Configurations
+
+### 14.1 Recording Disabled (default — existing behavior)
+
+```bash
+# .env — No recording, no transcription (default)
+FM_FREQUENCY=103.3M
+RTL_GAIN=8
+MQTT_ENABLED=true
+MQTT_HOST=192.168.1.100
+PUBLISH_MODE=essential
+# RECORDING_ENABLED is false by default — nothing else needed
+```
+
+### 14.2 Recording + Local Transcription (self-contained)
+
+```bash
+# .env — Built-in Whisper on the RDS Guard host (x86/NUC recommended)
+FM_FREQUENCY=103.3M
+RTL_GAIN=8
+MQTT_ENABLED=true
+MQTT_HOST=192.168.1.100
+PUBLISH_MODE=essential
+
+# Voice recording
+RECORDING_ENABLED=true
+RECORD_EVENT_TYPES=traffic,emergency
+AUDIO_FORMAT=ogg
+MAX_RECORDING_SEC=600
+
+# Local transcription (faster-whisper on CPU)
+TRANSCRIPTION_ENGINE=local
+TRANSCRIPTION_MODEL=small
+TRANSCRIPTION_DEVICE=cpu
+TRANSCRIPTION_LANGUAGE=sv
+
+MQTT_PUBLISH_TRANSCRIPTION=true
+```
+
+### 14.3 Recording + Remote GPU Transcription (recommended for Pi)
+
+```bash
+# .env — Offload transcription to GPU server
+FM_FREQUENCY=103.3M
+RTL_GAIN=8
+MQTT_ENABLED=true
+MQTT_HOST=192.168.1.100
+PUBLISH_MODE=essential
+
+# Voice recording
+RECORDING_ENABLED=true
+RECORD_EVENT_TYPES=traffic,emergency
+AUDIO_FORMAT=ogg
+MAX_RECORDING_SEC=600
+
+# Remote transcription (Whisper ASR server with GPU)
+TRANSCRIPTION_ENGINE=remote
+WHISPER_REMOTE_URL=http://192.168.1.50:9000
+WHISPER_REMOTE_TIMEOUT=120
+TRANSCRIPTION_LANGUAGE=sv
+
+MQTT_PUBLISH_TRANSCRIPTION=true
+```
+
+### 14.4 Recording Only — No Transcription
+
+```bash
+# .env — Record audio for playback, but skip transcription
+FM_FREQUENCY=103.3M
+RTL_GAIN=8
+MQTT_ENABLED=true
+MQTT_HOST=192.168.1.100
+
+# Voice recording
+RECORDING_ENABLED=true
+RECORD_EVENT_TYPES=traffic,emergency
+AUDIO_FORMAT=ogg
+
+# Transcription disabled — audio files are still saved and playable
+TRANSCRIPTION_ENGINE=none
+```
