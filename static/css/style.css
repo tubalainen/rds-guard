@@ -534,6 +534,15 @@ main {
     font-weight: 600;
 }
 
+.console-line.is-system {
+    opacity: 0.6;
+    font-style: italic;
+}
+
+.console-line.is-system .console-group {
+    color: var(--text-muted);
+}
+
 /* Status bar (footer) — two-row info panel */
 footer {
     display: flex;
