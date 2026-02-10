@@ -3,18 +3,64 @@
 ## Objective
 
 When a Traffic Announcement (TA), Emergency Broadcast, or similar RDS event
-occurs, **record the FM audio**, **transcribe it to text** using speech-to-text,
-and make both the transcription and the audio clip available via:
-
-- The SQLite event store (new columns)
-- MQTT (if enabled) — transcription text in event payloads
-- The web UI — transcription text display + audio playback button
+occurs, **record the FM audio**, **transcribe it to text**, and make both the
+transcription and the audio clip available through all output channels.
 
 ---
 
 ## 1. Architecture Overview
 
-### Current Pipeline
+### 1.1 Output Architecture
+
+Every recordable RDS event produces three artefacts: the **event metadata**
+(RDS data, timestamps, RadioText), the **audio recording** (OGG/WAV), and the
+**transcription** (speech-to-text). These flow into the system's output
+channels as follows:
+
+```
+                        ┌─────────────────────────────────┐
+                        │  RDS Event (TA / Emergency)     │
+                        │  + Audio Recording               │
+                        │  + Transcription                 │
+                        └────────────┬────────────────────┘
+                                     │
+              ┌──────────────────────┼──────────────────────┐
+              ▼                      ▼                      ▼
+     ┌─── SQLite + Web UI ───┐  ┌── MQTT ──────────┐  ┌── Audio Files ──┐
+     │  Always on             │  │  Optional         │  │  Always on      │
+     │  Not configurable      │  │  If enabled:      │  │  /data/audio/   │
+     │                        │  │  alerts ALWAYS    │  │                 │
+     │  • Event metadata      │  │  include the      │  │  • OGG for web  │
+     │  • Transcription text  │  │  transcription    │  │    playback     │
+     │  • Audio playback      │  │  text             │  │  • WAV for STT  │
+     │    (via web player)    │  │                   │  │    input        │
+     └────────────────────────┘  └───────────────────┘  └─────────────────┘
+```
+
+**Design principles:**
+- **Recording + playback is always on.** Every recordable event (traffic
+  announcement, emergency broadcast) gets its audio saved. No toggle.
+- **Transcription is on by default.** Local CPU Whisper runs out of the box.
+  Can be switched to a remote GPU server for better performance, or disabled
+  with `TRANSCRIPTION_ENGINE=none`.
+- **MQTT is all-or-nothing for alerts.** If MQTT is enabled, alert payloads
+  always include the transcription text (when available). There is no option
+  to receive alerts without transcription — it is part of the event data.
+- **SQLite + Web UI always shows everything.** Event metadata, transcription
+  text, and audio playback are always present in the web interface.
+
+### 1.2 What the User Configures
+
+| Concern | Config needed? | Default |
+|---------|---------------|---------|
+| Audio recording | None — always on | Enabled |
+| Audio playback in web UI | None — always on | Enabled |
+| Transcription engine | Optional | `local` (CPU Whisper) |
+| Remote Whisper server | Only if `TRANSCRIPTION_ENGINE=remote` | — |
+| MQTT | Same as today (`MQTT_ENABLED`, `MQTT_HOST`, etc.) | Disabled |
+| Which event types to record | Optional | `traffic,emergency` |
+
+### 1.3 Current Pipeline
 
 ```
 RTL-SDR → rtl_fm (stdout=PCM @ 171 kHz) → redsea (stdin) → JSON → Python
@@ -25,7 +71,7 @@ little-endian PCM at 171 kHz. The `redsea` decoder reads this stream to extract
 RDS data from the 57 kHz subcarrier. The audible voice content (0–15 kHz) is
 present in the same stream but is currently discarded after RDS extraction.
 
-### Proposed Pipeline
+### 1.4 Proposed Pipeline
 
 ```
 RTL-SDR → rtl_fm (stdout=PCM @ 171 kHz)
@@ -35,39 +81,40 @@ RTL-SDR → rtl_fm (stdout=PCM @ 171 kHz)
             │                       │
             ▼                       ▼
      redsea (stdin)         AudioRecorder
-     JSON → Python          (conditional)
+     JSON → Python        (always active)
             │                       │
             ▼                       ▼
      RulesEngine ──trigger──▶ start/stop
                                     │
                                     ▼
-                            PCM buffer → WAV file
+                            PCM buffer → WAV + OGG
                                     │
-                                    ▼
-                            Transcriber (async)
-                                    │
-                       ┌────────────┴────────────┐
-                       ▼                         ▼
-                engine = "local"          engine = "remote"
-                faster-whisper            HTTP POST → /asr
-                (CPU, built-in)           (GPU server, LAN)
-                       │                         │
-                       └────────────┬────────────┘
-                                    │
-                            ┌───────┴───────┐
-                            ▼               ▼
-                      event_store        MQTT pub
-                      (update row)    (transcription)
-                            │
-                            ▼
-                         Web UI
-                    (text + playback)
+                    ┌───────────────┼───────────────┐
+                    ▼               ▼               ▼
+              SQLite + Web UI   Transcriber      Audio files
+              (event row +      (async)          /data/audio/
+               audio_path)         │
+                                   │
+                      ┌────────────┴────────────┐
+                      ▼                         ▼
+               engine = "local"          engine = "remote"
+               faster-whisper            HTTP POST → /asr
+               (CPU, default)            (GPU server, LAN)
+                      │                         │
+                      └────────────┬────────────┘
+                                   │
+                    ┌──────────────┼──────────────┐
+                    ▼              ▼              ▼
+              SQLite + Web UI   MQTT pub      WebSocket
+              (update row       (if enabled)  broadcast
+               with text)
 ```
 
 **Key change**: Instead of connecting `rtl_fm.stdout` directly to
 `redsea.stdin`, Python sits in the middle as a **tee**. Every chunk read from
-`rtl_fm` is forwarded to `redsea` AND, when a recordable event is active,
-simultaneously written to an audio buffer.
+`rtl_fm` is forwarded to `redsea` AND, when a recordable event is active
+(TA or emergency), simultaneously written to an audio buffer. Recording is
+always enabled — there is no toggle to disable it.
 
 ---
 
@@ -420,48 +467,37 @@ Recommendation: `large-v3` on GPU for best Swedish transcription quality.
 
 ### 2.4 Configuration — `config.py` additions
 
+Recording and web playback are always on — no enable/disable toggle. The only
+user-facing configuration is which transcription engine to use and, if remote,
+where to find it.
+
 ```python
-# --- Voice Recording ---
-RECORDING_ENABLED = _bool(os.environ.get("RECORDING_ENABLED", "false"))
+# --- Audio Recording (always on) ---
 AUDIO_DIR = os.environ.get("AUDIO_DIR", "/data/audio")
-
-# Which event types trigger recording
-# Comma-separated: traffic,emergency,eon_traffic,tmc
 RECORD_EVENT_TYPES = os.environ.get("RECORD_EVENT_TYPES", "traffic,emergency")
-
-# Web playback format: "ogg", "wav", "mp3"
 AUDIO_FORMAT = os.environ.get("AUDIO_FORMAT", "ogg")
-
-# Max recording duration in seconds (safety cap)
 MAX_RECORDING_SEC = _int(os.environ.get("MAX_RECORDING_SEC"), 600)
 
-# --- Transcription Engine ---
-# Engine mode: "local" (built-in faster-whisper) or "remote" (external /asr server)
-# Set to "none" to disable transcription (recording-only mode)
+# --- Transcription ---
+# "local"  = built-in faster-whisper on CPU (default, works out of the box)
+# "remote" = external Whisper ASR server via HTTP /asr endpoint
+# "none"   = disable transcription (audio is still recorded and playable)
 TRANSCRIPTION_ENGINE = os.environ.get("TRANSCRIPTION_ENGINE", "local")
-
-# Language hint for Whisper (ISO 639-1 code)
 TRANSCRIPTION_LANGUAGE = os.environ.get("TRANSCRIPTION_LANGUAGE", "sv")
 
-# --- Local engine settings (TRANSCRIPTION_ENGINE=local) ---
+# Local engine settings (only used when TRANSCRIPTION_ENGINE=local)
 TRANSCRIPTION_MODEL = os.environ.get("TRANSCRIPTION_MODEL", "small")
-
-# "cpu" or "cuda" (if GPU available on the RDS Guard host itself)
 TRANSCRIPTION_DEVICE = os.environ.get("TRANSCRIPTION_DEVICE", "cpu")
 
-# --- Remote engine settings (TRANSCRIPTION_ENGINE=remote) ---
-# Base URL of the Whisper ASR Webservice (including port, no trailing slash)
-# Example: "http://192.168.1.50:9000" or "http://whisper-asr:9000"
+# Remote engine settings (only used when TRANSCRIPTION_ENGINE=remote)
 WHISPER_REMOTE_URL = os.environ.get("WHISPER_REMOTE_URL", "")
-
-# HTTP timeout in seconds for remote transcription requests
-# Should be generous — large files on slow networks or busy GPUs may take time
 WHISPER_REMOTE_TIMEOUT = _int(os.environ.get("WHISPER_REMOTE_TIMEOUT"), 120)
-
-# --- MQTT ---
-# Publish transcription to MQTT
-MQTT_PUBLISH_TRANSCRIPTION = _bool(os.environ.get("MQTT_PUBLISH_TRANSCRIPTION", "true"))
 ```
+
+**Note on MQTT**: Transcription text is always included in MQTT alert payloads
+when MQTT is enabled. There is no separate toggle — if you receive alerts, you
+receive transcriptions. This matches the principle that transcription is simply
+part of the event data, not a separate opt-in feature.
 
 ### 2.5 Database Schema Changes — `event_store.py`
 
@@ -503,10 +539,13 @@ def purge_old_events(days):
 
 ### 2.6 MQTT Changes — `rds_guard.py`
 
+If MQTT is enabled, alert payloads **always** include transcription data — there
+is no separate opt-in. Transcription is part of the event, just like RadioText.
+
 Transcription is **asynchronous** — it completes seconds to minutes after the
 TA ends. This means the `end` alert cannot contain the transcription text. The
-MQTT design must account for this timing gap with a separate `transcribed`
-state published later.
+MQTT design accounts for this timing gap with a separate `transcribed` state
+published later.
 
 **Topics overview (essential mode):**
 
@@ -517,7 +556,7 @@ rds/{pi}/traffic/transcription     ← NEW; dedicated topic for transcription re
 
 #### Stage 1: TA Start (T+0s) — `rds/alert`
 
-Existing payload structure, with two new fields added:
+Existing payload structure, with one new field added:
 
 ```json
 {
@@ -529,7 +568,6 @@ Existing payload structure, with two new fields added:
   },
   "frequency": "103.3M",
   "prog_type": "News",
-  "recording": true,
   "event_id": 42,
   "timestamp": "2024-02-10T15:30:00"
 }
@@ -537,7 +575,6 @@ Existing payload structure, with two new fields added:
 
 | Field | Status | Notes |
 |-------|--------|-------|
-| `recording` | **NEW** | `true` when `RECORDING_ENABLED` and event type in `RECORD_EVENT_TYPES`, otherwise omitted |
 | `event_id` | **NEW** | Database row ID, used to correlate later transcription messages |
 | All others | Existing | Unchanged from current code |
 
@@ -595,8 +632,8 @@ available — the audio has just stopped recording and is being processed:
 
 | Field | Status | Notes |
 |-------|--------|-------|
-| `audio_available` | **NEW** | `true` if a recording was saved; `false` or omitted if not |
-| `transcription_status` | **NEW** | `"transcribing"` (in progress), `"none"` (engine disabled), or omitted (no recording) |
+| `audio_available` | **NEW** | `true` — recording is always saved for recordable event types |
+| `transcription_status` | **NEW** | `"transcribing"` (in progress) or `"none"` (if `TRANSCRIPTION_ENGINE=none`) |
 | `event_id` | **NEW** | Same ID from the start event, for correlation |
 | All others | Existing | Unchanged from current code |
 
@@ -854,7 +891,8 @@ Shared state:
 - `audio_recorder.py` — Recording lifecycle manager
 
 **Tasks:**
-1. Add new config variables to `config.py`
+1. Add new config variables to `config.py` (transcription engine settings,
+   audio dir, format, etc. — no recording toggle)
 2. Add `audio_path`, `transcription`, `transcription_status` columns to
    `event_store.py` with migration
 3. Add `update_event_audio()`, `update_event_transcription()`,
@@ -862,7 +900,8 @@ Shared state:
 4. Create `audio_tee.py` with the `AudioTee` class
 5. Create `audio_recorder.py` with the `AudioRecorder` class (PCM buffering,
    WAV writing, downsampling)
-6. Modify `pipeline.py` to use `AudioTee` when `RECORDING_ENABLED=true`
+6. Modify `pipeline.py` to use `AudioTee` (always active — recording is
+   unconditional)
 7. Update retention purge to delete audio files
 
 ### Phase 2: Rules Engine Integration
@@ -957,11 +996,10 @@ explicitly for the resampling use case.
 `requests` is used by the remote transcription backend to POST audio to the
 Whisper ASR Webservice `/asr` endpoint.
 
-**Note on conditional dependencies**: When `TRANSCRIPTION_ENGINE=remote`, the
-`faster-whisper` package is never imported (lazy-loaded). This means remote-only
-deployments pay no memory/startup cost for the local model. However, the package
-is still installed in the Docker image to support both modes without rebuilding.
-A future optimization could offer a slim image variant without `faster-whisper`.
+**Note**: When `TRANSCRIPTION_ENGINE=remote` or `none`, the `faster-whisper`
+package is installed but never imported (lazy-loaded). No model is downloaded
+and no memory is used. The package is included in all image variants so users
+can switch between `local` and `remote` without rebuilding.
 
 ### New System Packages (Dockerfile)
 
@@ -976,44 +1014,43 @@ keeps the approach simple and avoids complex native library builds.
 
 ## 6. Configuration Reference
 
-### Recording
+Audio recording and web playback are **always on** — no configuration needed.
+Transcription is **on by default** (local CPU Whisper). The only decisions
+the user makes are:
+
+1. Do I want to use a remote GPU server for transcription? → Set
+   `TRANSCRIPTION_ENGINE=remote` and `WHISPER_REMOTE_URL`.
+2. Do I want to disable transcription entirely? → Set
+   `TRANSCRIPTION_ENGINE=none` (audio is still recorded and playable).
+
+### New Variables (all optional)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RECORDING_ENABLED` | `false` | Enable voice recording during events |
-| `AUDIO_DIR` | `/data/audio` | Directory for audio files |
-| `RECORD_EVENT_TYPES` | `traffic,emergency` | Comma-separated event types that trigger recording |
-| `AUDIO_FORMAT` | `ogg` | Web playback format (`ogg`, `wav`, `mp3`) |
-| `MAX_RECORDING_SEC` | `600` | Maximum recording duration in seconds |
-
-### Transcription — Engine Selection
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TRANSCRIPTION_ENGINE` | `local` | Engine mode: `local`, `remote`, or `none` |
-| `TRANSCRIPTION_LANGUAGE` | `sv` | Language hint (ISO 639-1 code) |
-| `MQTT_PUBLISH_TRANSCRIPTION` | `true` | Include transcription in MQTT payloads |
-
-### Transcription — Local Mode (`TRANSCRIPTION_ENGINE=local`)
-
-Uses the built-in `faster-whisper` library. Good for x86/NUC hosts. For
-Raspberry Pi, use `tiny` or `base` models, or switch to remote mode.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
+| **Transcription engine** | | |
+| `TRANSCRIPTION_ENGINE` | `local` | `local` = built-in Whisper (default), `remote` = GPU server, `none` = disabled |
+| `TRANSCRIPTION_LANGUAGE` | `sv` | Language hint for Whisper (ISO 639-1 code) |
+| **Local mode** (`local`) | | |
 | `TRANSCRIPTION_MODEL` | `small` | Whisper model size: `tiny`, `base`, `small`, `medium` |
 | `TRANSCRIPTION_DEVICE` | `cpu` | Compute device: `cpu` or `cuda` |
-
-### Transcription — Remote Mode (`TRANSCRIPTION_ENGINE=remote`)
-
-Offloads transcription to an external Whisper ASR Webservice with GPU
-acceleration. See [Section 13](#13-remote-whisper-asr-server-deployment-guide)
-for setup instructions.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
+| **Remote mode** (`remote`) | | |
 | `WHISPER_REMOTE_URL` | _(empty)_ | Base URL of the Whisper ASR server (e.g., `http://192.168.1.50:9000`) |
 | `WHISPER_REMOTE_TIMEOUT` | `120` | HTTP timeout in seconds for remote requests |
+| **Advanced / rarely changed** | | |
+| `AUDIO_DIR` | `/data/audio` | Directory for audio files |
+| `RECORD_EVENT_TYPES` | `traffic,emergency` | Which RDS event types trigger recording |
+| `AUDIO_FORMAT` | `ogg` | Web playback format: `ogg`, `wav`, `mp3` |
+| `MAX_RECORDING_SEC` | `600` | Safety cap on recording duration (seconds) |
+
+### What Is NOT Configurable
+
+| Feature | Behavior |
+|---------|----------|
+| Audio recording | Always on for configured event types |
+| Audio playback in web UI | Always available when audio file exists |
+| Transcription in MQTT alerts | Always included if MQTT is enabled (no opt-out) |
+| Transcription in web UI | Always displayed when transcription exists |
+| Events in SQLite | Always stored (existing behavior) |
 
 ---
 
@@ -1027,7 +1064,7 @@ T+0s    TA flag → true
         ├─ event_store.update_transcription_status(42, "recording")
         ├─ MQTT: rds/alert
         │    {type:"traffic", state:"start", event_id:42,
-        │     recording:true, station:{pi:"0x9E04", ps:"P4 Stockholm"},
+        │     station:{pi:"0x9E04", ps:"P4 Stockholm"},
         │     frequency:"103.3M", prog_type:"News"}
         └─ WS broadcast (same payload)
 
@@ -1148,19 +1185,20 @@ No recording:  (nothing shown)
 | RTL-SDR produces silence | Transcription returns empty string; stored as-is |
 | Very short TA (< 2s) | Recording discarded; no audio file created |
 | Very long TA (> 10 min) | Recording capped at `MAX_RECORDING_SEC` |
-| Transcription model fails to load (local) | Status set to "error"; event still has audio for playback |
-| Disk full | Audio write fails; logged as error; event unaffected |
-| `RECORDING_ENABLED=false` | Entire feature disabled; no overhead |
+| Transcription model fails to load (local) | Status set to "error"; audio still saved and playable |
+| Disk full | Audio write fails; logged as error; RDS event still stored |
 | Multiple simultaneous TAs (different PIs) | Each gets its own recorder buffer (keyed by PI) |
 | App restart during recording | Stale recordings cleaned up on startup |
 | Audio file deleted externally | API returns 404; UI shows "Audio unavailable" |
 | Whisper model not downloaded yet (local) | Auto-downloads on first use (one-time) |
+| `TRANSCRIPTION_ENGINE=none` | No transcription; audio is still recorded and playable |
 | Remote Whisper server unreachable | 1 retry with 5s backoff; status set to "error"; audio still available |
 | Remote Whisper server returns HTTP error | Logged; status set to "error"; retry on 5xx, fail on 4xx |
 | Remote Whisper server times out | After `WHISPER_REMOTE_TIMEOUT` seconds; status "error" |
 | `WHISPER_REMOTE_URL` empty when engine=remote | Log error on startup; transcription disabled; recording still works |
 | Remote server returns unexpected JSON | Graceful fallback; log raw response; status "error" |
 | Network partition during transcription | Request times out; audio preserved; can re-transcribe later |
+| MQTT disabled | Events still stored in SQLite with transcription; web UI unaffected |
 
 ---
 
@@ -1238,17 +1276,23 @@ No recording:  (nothing shown)
 
 ## 12. Rollout Plan
 
-1. **Feature flag**: `RECORDING_ENABLED=false` by default — zero impact on
-   existing users
-2. **Incremental deployment**: Audio recording can work without transcription
-   (`TRANSCRIPTION_ENGINE=none`)
-3. **Model download** (local mode): First transcription triggers model download;
-   alternatively, pre-download during `docker build`
-4. **Remote mode**: Can be used from day one — no model download needed on the
-   RDS Guard host. Just point `WHISPER_REMOTE_URL` at an existing Whisper ASR
-   server.
-5. **Documentation**: Update README with new config options, hardware
-   recommendations, and example `.env` additions
+1. **Works out of the box**: Recording + local transcription are on by default.
+   Existing users upgrading get the new features without changing their `.env`.
+   The Whisper model downloads automatically on first TA event (~500 MB for
+   `small`), so the first transcription may be delayed by the download.
+2. **Graceful degradation**: If the local Whisper model is too heavy for the
+   host (e.g., Pi with <1 GB free RAM), users can switch to remote
+   (`TRANSCRIPTION_ENGINE=remote`) or disable (`TRANSCRIPTION_ENGINE=none`).
+   Audio recording and playback work regardless.
+3. **MQTT is unchanged**: Existing MQTT users get transcription text in their
+   alerts automatically — no new config needed. The `transcribed` state is
+   additive; ignoring it preserves existing automation behavior.
+4. **Docker image grows**: The image includes `faster-whisper` + `ffmpeg` +
+   `numpy` even for remote-only users. A future slim image variant could omit
+   these. Document the size increase in release notes.
+5. **Documentation**: Update README with transcription engine options, remote
+   Whisper setup guide (Section 13), and hardware recommendations per model
+   size.
 
 ---
 
@@ -1371,12 +1415,9 @@ The server also exposes interactive API docs at `http://<gpu-host>:9000/docs`
 On the RDS Guard host, add these to your `.env` file:
 
 ```bash
-# Enable recording + remote transcription
-RECORDING_ENABLED=true
+# Use remote transcription instead of the default local CPU Whisper
 TRANSCRIPTION_ENGINE=remote
 WHISPER_REMOTE_URL=http://192.168.1.50:9000
-WHISPER_REMOTE_TIMEOUT=120
-TRANSCRIPTION_LANGUAGE=sv
 ```
 
 Replace `192.168.1.50` with the IP or hostname of your GPU host. If both
@@ -1497,82 +1538,58 @@ even without GPU acceleration.
 
 ## 14. Example `.env` Configurations
 
-### 14.1 Recording Disabled (default — existing behavior)
+### 14.1 Zero-config (everything works out of the box)
 
 ```bash
-# .env — No recording, no transcription (default)
+# .env — Minimal setup. Recording, transcription (local CPU), and
+# web UI all work with zero additional configuration.
 FM_FREQUENCY=103.3M
 RTL_GAIN=8
-MQTT_ENABLED=true
-MQTT_HOST=192.168.1.100
-PUBLISH_MODE=essential
-# RECORDING_ENABLED is false by default — nothing else needed
+
+# That's it. Audio recording, local Whisper transcription, and the
+# web UI (with playback + transcription text) are all on by default.
+# MQTT is off since MQTT_ENABLED defaults to false.
 ```
 
-### 14.2 Recording + Local Transcription (self-contained)
+### 14.2 With MQTT (typical Home Assistant setup)
 
 ```bash
-# .env — Built-in Whisper on the RDS Guard host (x86/NUC recommended)
+# .env — Add MQTT to get alerts with transcription text.
+# Alerts always include transcription — no separate toggle needed.
 FM_FREQUENCY=103.3M
 RTL_GAIN=8
+
 MQTT_ENABLED=true
 MQTT_HOST=192.168.1.100
 PUBLISH_MODE=essential
-
-# Voice recording
-RECORDING_ENABLED=true
-RECORD_EVENT_TYPES=traffic,emergency
-AUDIO_FORMAT=ogg
-MAX_RECORDING_SEC=600
-
-# Local transcription (faster-whisper on CPU)
-TRANSCRIPTION_ENGINE=local
-TRANSCRIPTION_MODEL=small
-TRANSCRIPTION_DEVICE=cpu
-TRANSCRIPTION_LANGUAGE=sv
-
-MQTT_PUBLISH_TRANSCRIPTION=true
 ```
 
-### 14.3 Recording + Remote GPU Transcription (recommended for Pi)
+### 14.3 Remote GPU transcription (recommended for Raspberry Pi)
 
 ```bash
-# .env — Offload transcription to GPU server
+# .env — Offload transcription to a GPU server on the LAN.
+# The only additional config needed beyond the basics.
 FM_FREQUENCY=103.3M
 RTL_GAIN=8
+
 MQTT_ENABLED=true
 MQTT_HOST=192.168.1.100
 PUBLISH_MODE=essential
 
-# Voice recording
-RECORDING_ENABLED=true
-RECORD_EVENT_TYPES=traffic,emergency
-AUDIO_FORMAT=ogg
-MAX_RECORDING_SEC=600
-
-# Remote transcription (Whisper ASR server with GPU)
+# Point transcription at the remote Whisper ASR server
 TRANSCRIPTION_ENGINE=remote
 WHISPER_REMOTE_URL=http://192.168.1.50:9000
-WHISPER_REMOTE_TIMEOUT=120
-TRANSCRIPTION_LANGUAGE=sv
-
-MQTT_PUBLISH_TRANSCRIPTION=true
 ```
 
-### 14.4 Recording Only — No Transcription
+### 14.4 Disable transcription (audio-only)
 
 ```bash
-# .env — Record audio for playback, but skip transcription
+# .env — Record and play back audio, but don't transcribe.
+# Useful if no CPU/GPU budget for Whisper, or for testing.
 FM_FREQUENCY=103.3M
 RTL_GAIN=8
-MQTT_ENABLED=true
-MQTT_HOST=192.168.1.100
 
-# Voice recording
-RECORDING_ENABLED=true
-RECORD_EVENT_TYPES=traffic,emergency
-AUDIO_FORMAT=ogg
-
-# Transcription disabled — audio files are still saved and playable
 TRANSCRIPTION_ENGINE=none
+# Audio is still recorded and playable in the web UI.
+# MQTT alerts will have audio_available=true but no transcription text.
 ```
