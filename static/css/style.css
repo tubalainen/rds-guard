@@ -257,6 +257,78 @@ main {
     color: var(--text-muted);
 }
 
+/* Transcription block */
+.event-transcription {
+    margin: 0.625rem 0;
+}
+
+.event-section-label {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    margin-bottom: 0.25rem;
+}
+
+.event-transcription p {
+    font-size: 0.9375rem;
+    color: var(--text-secondary);
+    padding: 0.375rem 0.75rem;
+    border-left: 2px solid var(--accent-green);
+    background: var(--accent-green-dim);
+    border-radius: 0 4px 4px 0;
+    line-height: 1.5;
+}
+
+/* Transcription status indicators */
+.event-transcription-status {
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+    margin: 0.5rem 0;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.event-transcription-status.error {
+    color: var(--accent-orange);
+}
+
+.status-indicator {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.status-indicator.recording {
+    background: var(--accent-red);
+    animation: pulse 1.5s ease-in-out infinite;
+}
+
+.status-indicator.transcribing {
+    background: var(--accent-blue);
+    animation: blink 1s ease-in-out infinite;
+}
+
+/* Audio player */
+.event-audio {
+    margin: 0.5rem 0;
+}
+
+.event-audio audio {
+    width: 100%;
+    height: 36px;
+    border-radius: 6px;
+    outline: none;
+}
+
+/* Dark theme audio player (Webkit) */
+.event-audio audio::-webkit-media-controls-panel {
+    background: var(--bg-hover);
+}
+
 /* Pulsing indicator for active events */
 .event-card.active .event-indicator {
     animation: pulse 1.5s ease-in-out infinite;

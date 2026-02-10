@@ -39,6 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libsndfile1 \
         python3 \
         python3-pip \
+        ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy redsea binary from builder
@@ -54,6 +55,9 @@ COPY event_store.py /app/event_store.py
 COPY web_server.py /app/web_server.py
 COPY pipeline.py /app/pipeline.py
 COPY rds_guard.py /app/rds_guard.py
+COPY audio_tee.py /app/audio_tee.py
+COPY audio_recorder.py /app/audio_recorder.py
+COPY transcriber.py /app/transcriber.py
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 

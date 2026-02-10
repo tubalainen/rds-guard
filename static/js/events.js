@@ -161,6 +161,33 @@ const Events = (() => {
             }
         }
 
+        // Transcription
+        if (ev.transcription) {
+            html += '<div class="event-transcription">';
+            html += '<div class="event-section-label">Transcription</div>';
+            html += `<p>${escapeHtml(ev.transcription)}</p>`;
+            html += '</div>';
+        } else if (ev.transcription_status === 'recording') {
+            html += '<div class="event-transcription-status">';
+            html += '<span class="status-indicator recording"></span> Recording...';
+            html += '</div>';
+        } else if (ev.transcription_status === 'saving' || ev.transcription_status === 'transcribing') {
+            html += '<div class="event-transcription-status">';
+            html += '<span class="status-indicator transcribing"></span> Transcribing...';
+            html += '</div>';
+        } else if (ev.transcription_status === 'error') {
+            html += '<div class="event-transcription-status error">';
+            html += 'Transcription failed';
+            html += '</div>';
+        }
+
+        // Audio player
+        if (ev.audio_url) {
+            html += '<div class="event-audio">';
+            html += `<audio controls preload="none" src="${escapeHtml(ev.audio_url)}"></audio>`;
+            html += '</div>';
+        }
+
         // Footer
         html += '<div class="event-footer">';
         if (ev.duration_sec != null) {
@@ -170,7 +197,7 @@ const Events = (() => {
         }
         if (isActive) {
             html += '<span class="event-badge badge-active">In progress</span>';
-        } else if (ev.state === 'end') {
+        } else if (ev.state === 'end' || ev.state === 'transcribed') {
             html += '<span class="event-badge badge-ended">Ended</span>';
         }
         html += '</div>';

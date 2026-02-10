@@ -57,7 +57,28 @@ def init_db(db_path=None):
         CREATE INDEX IF NOT EXISTS idx_events_state ON events(state);
     """)
     conn.commit()
+
+    # Schema migration: add audio/transcription columns (idempotent)
+    _migrate_add_column(conn, "audio_path", "TEXT")
+    _migrate_add_column(conn, "transcription", "TEXT")
+    _migrate_add_column(conn, "transcription_status", "TEXT")
+
     log.info("Event store initialized at %s", _DB_PATH)
+
+
+def _migrate_add_column(conn, column_name, column_type):
+    """Add a column to the events table if it doesn't exist."""
+    try:
+        conn.execute(
+            f"ALTER TABLE events ADD COLUMN {column_name} {column_type}"
+        )
+        conn.commit()
+        log.info("Migrated: added column '%s' to events table", column_name)
+    except sqlite3.OperationalError as e:
+        if "duplicate column" in str(e).lower():
+            pass  # Column already exists
+        else:
+            raise
 
 
 def insert_event(event_type, severity, state, pi, data_payload,
@@ -165,21 +186,86 @@ def get_active_traffic_event(pi):
     return dict(row) if row else None
 
 
+def update_event_audio(event_id, audio_path):
+    """Set the audio file path for an event."""
+    with _lock:
+        conn = _conn()
+        conn.execute(
+            "UPDATE events SET audio_path = ? WHERE id = ?",
+            (audio_path, event_id)
+        )
+        conn.commit()
+
+
+def update_event_transcription(event_id, transcription, status="done"):
+    """Set the transcription text and status for an event."""
+    with _lock:
+        conn = _conn()
+        conn.execute(
+            "UPDATE events SET transcription = ?, transcription_status = ? "
+            "WHERE id = ?",
+            (transcription, status, event_id)
+        )
+        conn.commit()
+
+
+def update_event_transcription_status(event_id, status):
+    """Update just the transcription status (recording/saving/transcribing/error)."""
+    with _lock:
+        conn = _conn()
+        conn.execute(
+            "UPDATE events SET transcription_status = ? WHERE id = ?",
+            (status, event_id)
+        )
+        conn.commit()
+
+
 def purge_old_events(days):
-    """Delete events older than the given number of days."""
+    """Delete events older than the given number of days.
+
+    Also deletes associated audio files from disk.
+    """
+    import pathlib
+
     cutoff = time.strftime(
         "%Y-%m-%dT%H:%M:%S",
         time.gmtime(time.time() - days * 86400)
     )
+    deleted = 0
+    audio_paths = []
     with _lock:
         conn = _conn()
+        # Collect audio paths before deleting rows
+        rows = conn.execute(
+            "SELECT audio_path FROM events WHERE created_at < ? "
+            "AND audio_path IS NOT NULL",
+            (cutoff,)
+        ).fetchall()
+        audio_paths = [r[0] for r in rows if r[0]]
+
         cur = conn.execute(
             "DELETE FROM events WHERE created_at < ?", (cutoff,)
         )
         conn.commit()
-        if cur.rowcount > 0:
-            log.info("Purged %d events older than %d days", cur.rowcount, days)
-        return cur.rowcount
+        deleted = cur.rowcount
+        if deleted > 0:
+            log.info("Purged %d events older than %d days", deleted, days)
+
+    # Delete audio files outside the lock
+    if audio_paths:
+        import config as cfg
+        audio_dir = pathlib.Path(cfg.AUDIO_DIR)
+        for audio_rel in audio_paths:
+            base = audio_rel.rsplit(".", 1)[0] if "." in audio_rel else audio_rel
+            for ext in (".ogg", ".wav"):
+                path = audio_dir / (base + ext)
+                try:
+                    if path.exists():
+                        path.unlink()
+                except OSError:
+                    pass
+
+    return deleted
 
 
 def close_stale_events():

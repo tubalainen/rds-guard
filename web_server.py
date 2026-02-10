@@ -62,6 +62,9 @@ async def handle_events(request):
                 row["data"] = json.loads(row["data"])
             except (json.JSONDecodeError, TypeError):
                 pass
+        # Add audio URL if audio_path exists
+        if row.get("audio_path"):
+            row["audio_url"] = f"/api/audio/{row['audio_path']}"
 
     return web.json_response({"events": rows, "total": total})
 
@@ -82,6 +85,8 @@ async def handle_events_active(request):
                 row["data"] = json.loads(row["data"])
             except (json.JSONDecodeError, TypeError):
                 pass
+        if row.get("audio_path"):
+            row["audio_url"] = f"/api/audio/{row['audio_path']}"
 
     return web.json_response({"events": rows})
 
@@ -117,6 +122,38 @@ async def handle_delete_events(request):
         None, event_store.delete_all_events
     )
     return web.json_response({"deleted": count})
+
+
+async def handle_audio(request):
+    """GET /api/audio/{filename} — serve audio file."""
+    import config as cfg
+
+    filename = request.match_info["filename"]
+
+    # Security: prevent path traversal
+    if "/" in filename or "\\" in filename or ".." in filename:
+        return web.Response(status=400, text="Invalid filename")
+
+    audio_dir = pathlib.Path(cfg.AUDIO_DIR)
+    file_path = audio_dir / filename
+
+    if not file_path.exists():
+        return web.Response(status=404, text="Audio file not found")
+
+    # Determine content type
+    suffix = file_path.suffix.lower()
+    content_types = {
+        ".ogg": "audio/ogg",
+        ".wav": "audio/wav",
+        ".mp3": "audio/mpeg",
+        ".opus": "audio/opus",
+    }
+    content_type = content_types.get(suffix, "application/octet-stream")
+
+    return web.FileResponse(file_path, headers={
+        "Content-Type": content_type,
+        "Cache-Control": "public, max-age=86400",
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +205,7 @@ def create_app():
     app.router.add_get("/api/events/active", handle_events_active)
     app.router.add_get("/api/status", handle_status)
     app.router.add_delete("/api/events", handle_delete_events)
+    app.router.add_get("/api/audio/{filename}", handle_audio)
 
     # WebSocket
     app.router.add_get("/ws/console", handle_ws_console)

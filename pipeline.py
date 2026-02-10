@@ -184,13 +184,15 @@ def _stderr_reader(stream, prefix):
 # Pipeline runner — main function, designed to run in a thread
 # ---------------------------------------------------------------------------
 
-def run_pipeline(on_line_callback, status, stop_event):
+def run_pipeline(on_line_callback, status, stop_event, recorder=None):
     """Spawn rtl_fm | redsea and feed redsea's JSON output to the callback.
 
     Args:
         on_line_callback: Called with each bytes line from redsea's stdout.
         status: PipelineStatus instance to update.
         stop_event: threading.Event — set to request shutdown.
+        recorder: AudioRecorder instance (optional).  If provided, an
+                  AudioTee sits between rtl_fm and redsea to capture audio.
 
     This function blocks until the pipeline exits or stop_event is set.
     It does NOT auto-restart.  Docker's restart policy handles that.
@@ -208,7 +210,7 @@ def run_pipeline(on_line_callback, status, stop_event):
         log.info("  rtl_fm:  %s", " ".join(rtl_cmd))
         log.info("  redsea:  %s", " ".join(redsea_cmd))
 
-        # Spawn rtl_fm: stdout → pipe to redsea, stderr → captured for logging
+        # Spawn rtl_fm: stdout → pipe (read by Python or AudioTee)
         rtl_proc = subprocess.Popen(
             rtl_cmd,
             stdout=subprocess.PIPE,
@@ -216,19 +218,15 @@ def run_pipeline(on_line_callback, status, stop_event):
         )
         log.info("rtl_fm started (PID: %d)", rtl_proc.pid)
 
-        # Spawn redsea: stdin ← rtl_fm stdout, stdout → pipe to Python, stderr → captured
+        # Spawn redsea: stdin ← PIPE (fed by AudioTee or direct),
+        # stdout → pipe to Python, stderr → captured
         redsea_proc = subprocess.Popen(
             redsea_cmd,
-            stdin=rtl_proc.stdout,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
         log.info("redsea started (PID: %d)", redsea_proc.pid)
-
-        # Close rtl_fm's stdout in the parent process.
-        # This is critical: it ensures redsea gets SIGPIPE if rtl_fm dies,
-        # and rtl_fm gets SIGPIPE if redsea dies.
-        rtl_proc.stdout.close()
 
         # Start stderr reader threads for both processes
         rtl_stderr_thread = threading.Thread(
@@ -249,9 +247,6 @@ def run_pipeline(on_line_callback, status, stop_event):
         log.info("Pipeline running — reading RDS data...")
 
         # Start a watchdog thread that kills subprocesses when stop_event is set.
-        # This is necessary because readline() below blocks and cannot be
-        # interrupted.  Killing the subprocesses closes the pipe, which
-        # causes readline() to return b"" (EOF) and exit the loop.
         def _shutdown_watchdog():
             stop_event.wait()
             log.info("Shutdown requested — killing pipeline subprocesses...")
@@ -261,15 +256,29 @@ def run_pipeline(on_line_callback, status, stop_event):
         watchdog = threading.Thread(target=_shutdown_watchdog, daemon=True)
         watchdog.start()
 
-        # Read redsea's stdout line by line (JSON lines).
-        # iter(readline, b"") blocks until data is available, returns b"" on EOF.
-        # EOF occurs when redsea exits (naturally or killed by the watchdog).
-        for raw_line in iter(redsea_proc.stdout.readline, b""):
-            if stop_event.is_set():
-                break
-            on_line_callback(raw_line)
+        # AudioTee: Python sits between rtl_fm and redsea to capture audio
+        from audio_tee import AudioTee
 
-        # If we get here, either stop was requested or redsea's stdout closed
+        if recorder is None:
+            # Create a no-op recorder stub so AudioTee still works
+            from audio_recorder import AudioRecorder
+            recorder = _NoopRecorder()
+
+        tee = AudioTee(rtl_proc.stdout, redsea_proc.stdin, recorder)
+
+        # Run the redsea JSON reader in a separate thread
+        redsea_reader = threading.Thread(
+            target=_read_redsea_output,
+            args=(redsea_proc.stdout, on_line_callback, stop_event),
+            daemon=True,
+        )
+        redsea_reader.start()
+
+        # Run AudioTee in this thread (blocks until rtl_fm EOF or error)
+        tee.run()
+
+        # Wait for redsea reader to finish
+        redsea_reader.join(timeout=5)
 
     except FileNotFoundError as e:
         msg = f"Binary not found: {e.filename}"
@@ -308,6 +317,28 @@ def run_pipeline(on_line_callback, status, stop_event):
         else:
             log.warning("Pipeline ended unexpectedly")
             status.set_stopped("Pipeline ended")
+
+
+def _read_redsea_output(stdout, on_line_callback, stop_event):
+    """Read redsea's stdout line by line and call the callback.
+
+    Runs in a dedicated thread.  Exits on EOF or when stop_event is set.
+    """
+    try:
+        for raw_line in iter(stdout.readline, b""):
+            if stop_event.is_set():
+                break
+            on_line_callback(raw_line)
+    except Exception:
+        log.exception("Error reading redsea output")
+
+
+class _NoopRecorder:
+    """Stub recorder when no real recorder is configured."""
+    is_recording = False
+
+    def feed(self, chunk):
+        pass
 
 
 def _terminate_process(proc, name):

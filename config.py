@@ -46,3 +46,24 @@ STATUS_INTERVAL = _int(os.environ.get("STATUS_INTERVAL"), 30)
 # Web UI
 WEB_UI_PORT = _int(os.environ.get("WEB_UI_PORT"), 8022)
 EVENT_RETENTION_DAYS = _int(os.environ.get("EVENT_RETENTION_DAYS"), 30)
+
+# --- Audio Recording (always on) ---
+AUDIO_DIR = os.environ.get("AUDIO_DIR", "/data/audio")
+RECORD_EVENT_TYPES = os.environ.get("RECORD_EVENT_TYPES", "traffic,emergency")
+AUDIO_FORMAT = os.environ.get("AUDIO_FORMAT", "ogg")
+MAX_RECORDING_SEC = _int(os.environ.get("MAX_RECORDING_SEC"), 600)
+
+# --- Transcription ---
+# "local"  = built-in faster-whisper on CPU (default, works out of the box)
+# "remote" = external Whisper ASR server via HTTP /asr endpoint
+# "none"   = disable transcription (audio is still recorded and playable)
+TRANSCRIPTION_ENGINE = os.environ.get("TRANSCRIPTION_ENGINE", "local")
+TRANSCRIPTION_LANGUAGE = os.environ.get("TRANSCRIPTION_LANGUAGE", "sv")
+
+# Local engine settings (only used when TRANSCRIPTION_ENGINE=local)
+TRANSCRIPTION_MODEL = os.environ.get("TRANSCRIPTION_MODEL", "small")
+TRANSCRIPTION_DEVICE = os.environ.get("TRANSCRIPTION_DEVICE", "cpu")
+
+# Remote engine settings (only used when TRANSCRIPTION_ENGINE=remote)
+WHISPER_REMOTE_URL = os.environ.get("WHISPER_REMOTE_URL", "")
+WHISPER_REMOTE_TIMEOUT = _int(os.environ.get("WHISPER_REMOTE_TIMEOUT"), 120)
