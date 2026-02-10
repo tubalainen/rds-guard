@@ -195,9 +195,6 @@ main {
 .event-card.type-emergency .event-type { color: var(--accent-orange); }
 .event-card.type-emergency { border-left: 3px solid var(--accent-orange); }
 
-.event-card.type-eon_traffic .event-indicator { background: var(--accent-blue); }
-.event-card.type-eon_traffic .event-type { color: var(--accent-blue); }
-
 .event-time {
     font-size: 0.8125rem;
     color: var(--text-muted);

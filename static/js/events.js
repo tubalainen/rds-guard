@@ -133,7 +133,6 @@ const Events = (() => {
         const typeLabels = {
             traffic: 'Traffic Announcement',
             emergency: 'Emergency Broadcast',
-            eon_traffic: 'EON Traffic',
         };
 
         const timeStr = formatTime(ev.started_at || ev.created_at);
@@ -167,23 +166,6 @@ const Events = (() => {
                 html += `<p>${escapeHtml(rt)}</p>`;
             });
             html += '</div>';
-        }
-
-        // EON linked station
-        if (ev.type === 'eon_traffic') {
-            let data = ev.data;
-            if (typeof data === 'string') {
-                try { data = JSON.parse(data); } catch (e) { data = null; }
-            }
-            if (data && data.linked_station) {
-                const ls = data.linked_station;
-                const lsParts = [];
-                if (ls.ps) lsParts.push(ls.ps);
-                if (ls.pi) lsParts.push(ls.pi);
-                if (lsParts.length) {
-                    html += `<div class="event-station">Linked: ${escapeHtml(lsParts.join(' \u00b7 '))}</div>`;
-                }
-            }
         }
 
         // Transcription
