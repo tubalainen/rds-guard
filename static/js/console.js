@@ -222,9 +222,12 @@ const Console = (() => {
             }
             case '2a':
             case '2b': {
-                const rt = p.radiotext || p.partial_radiotext;
-                if (rt) return `<span class="cd-key">RT</span> ${escapeHtml(rt)}`;
-                return raw(payload);
+                if (p.radiotext) return `<span class="cd-key">RT</span> ${escapeHtml(p.radiotext)}`;
+                // Fallback: show available fields instead of raw JSON
+                const parts2 = [];
+                if (p.tp != null) parts2.push(flag('TP', p.tp));
+                if (p.prog_type) parts2.push(`<span class="cd-key">PTY</span> ${escapeHtml(p.prog_type)}`);
+                return parts2.join(' <span class="cd-sep">&middot;</span> ') || raw(payload);
             }
             case '4a': {
                 if (p.clock_time) return `<span class="cd-key">Time</span> ${escapeHtml(p.clock_time)}`;
@@ -260,8 +263,16 @@ const Console = (() => {
                 if (p.message) return escapeHtml(p.message);
                 return raw(payload);
             }
-            default:
+            default: {
+                // Extract any common fields instead of raw JSON dump
+                const dflt = [];
+                if (p.tp != null) dflt.push(flag('TP', p.tp));
+                if (p.ta != null) dflt.push(flag('TA', p.ta));
+                if (p.prog_type) dflt.push(`<span class="cd-key">PTY</span> ${escapeHtml(p.prog_type)}`);
+                if (p.ps) dflt.push(`<span class="cd-key">PS</span> ${escapeHtml(p.ps)}`);
+                if (dflt.length) return dflt.join(' <span class="cd-sep">&middot;</span> ');
                 return raw(payload);
+            }
         }
     }
 

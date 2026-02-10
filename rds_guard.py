@@ -35,6 +35,7 @@ _ws_clients = set()
 _ws_lock = threading.Lock()
 _event_loop = None  # set by web server on start
 _ws_msg_count = 0
+_ws_last_broadcast = {}  # deduplication: pi/group → content hash
 
 
 def register_ws(ws):
@@ -66,6 +67,36 @@ def broadcast_ws(message):
     elif _ws_msg_count % 500 == 0:
         log.info("WebSocket: %d messages sent so far to %d client(s)",
                  _ws_msg_count, len(clients))
+
+
+def _ws_should_broadcast(pi, group, data):
+    """Decide whether to broadcast this RDS group to WebSocket console.
+
+    Filters out noise:
+    - Skip partial-only RadioText/PS (wait for complete decode).
+    - Deduplicate: suppress groups identical to the last broadcast.
+    """
+    gl = group.lower() if group else ""
+
+    # Skip RadioText groups that only have partial text
+    if gl in ("2a", "2b"):
+        if "radiotext" not in data:
+            return False
+
+    # Skip PS groups that only have partial name
+    if gl in ("0a", "0b"):
+        if "ps" not in data and "partial_ps" in data:
+            return False
+
+    # Deduplicate: compare payload (minus timing/quality fields) to last sent
+    key = f"{pi}/{gl}"
+    relevant = {k: v for k, v in data.items()
+                if k not in ("rx_time", "timestamp", "bler")}
+    content = json.dumps(relevant, sort_keys=True)
+    if _ws_last_broadcast.get(key) == content:
+        return False
+    _ws_last_broadcast[key] = content
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -897,9 +928,10 @@ def process_group(client, data):
     group = data.get("group", "")
     ts = msg_ts(data)
 
-    # --- Broadcast raw group to WebSocket console ---
+    # --- Broadcast to WebSocket console (filtered + deduplicated) ---
     topic_hint = group.lower() if group else "unknown"
-    broadcast_ws({"topic": f"{pi}/{topic_hint}", "payload": data, "timestamp": ts})
+    if _ws_should_broadcast(pi, group, data):
+        broadcast_ws({"topic": f"{pi}/{topic_hint}", "payload": data, "timestamp": ts})
 
     # --- Rules engine: evaluate all rules ---
 
