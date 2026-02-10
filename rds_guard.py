@@ -69,6 +69,7 @@ class StationState:
 
     def __init__(self):
         self._state = {}
+        self._start_time = time.time()
 
     def changed(self, pi, key, value):
         full_key = f"{pi}/{key}"
@@ -76,6 +77,11 @@ class StationState:
             return False
         self._state[full_key] = value
         return True
+
+    @property
+    def uptime(self):
+        """Seconds since this state tracker was created."""
+        return time.time() - self._start_time
 
 
 state = StationState()
@@ -943,6 +949,9 @@ def process_group(client, data):
             rules_engine.on_pty_normal(client, pi, pty, data)
 
     # Rule 5: EON Traffic Announcements (group 14A)
+    # Skip during the first 30s after startup — the state tracker has no
+    # baseline yet, so every first-seen EON TA value looks like a "change"
+    # and would generate spurious events.
     if group == "14A":
         on = data.get("other_network")
         if on and on.get("ta") is not None:
@@ -951,7 +960,8 @@ def process_group(client, data):
                 pub(client, f"{pi}/eon/{other_pi}/ta",
                     {"active": on["ta"], "timestamp": ts},
                     qos=1, retain=config.MQTT_RETAIN_STATE)
-                rules_engine.on_eon_ta(client, pi, other_pi, on["ta"], data)
+                if state.uptime >= 30:
+                    rules_engine.on_eon_ta(client, pi, other_pi, on["ta"], data)
 
     # --- Extended topics (only in "all" mode) ---
     publish_all = config.PUBLISH_MODE == "all"
