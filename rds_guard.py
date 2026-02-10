@@ -69,7 +69,6 @@ class StationState:
 
     def __init__(self):
         self._state = {}
-        self._start_time = time.time()
 
     def changed(self, pi, key, value):
         full_key = f"{pi}/{key}"
@@ -78,10 +77,9 @@ class StationState:
         self._state[full_key] = value
         return True
 
-    @property
-    def uptime(self):
-        """Seconds since this state tracker was created."""
-        return time.time() - self._start_time
+    def is_known(self, pi, key):
+        """Return True if a value has been recorded for this key before."""
+        return f"{pi}/{key}" in self._state
 
 
 state = StationState()
@@ -949,18 +947,19 @@ def process_group(client, data):
             rules_engine.on_pty_normal(client, pi, pty, data)
 
     # Rule 5: EON Traffic Announcements (group 14A)
-    # Skip during the first 30s after startup — the state tracker has no
-    # baseline yet, so every first-seen EON TA value looks like a "change"
-    # and would generate spurious events.
+    # Only create events for genuine TA state transitions, not for the
+    # first observation of a linked station (startup or new PI code).
     if group == "14A":
         on = data.get("other_network")
         if on and on.get("ta") is not None:
             other_pi = on.get("pi", "unknown")
-            if state.changed(pi, f"eon/{other_pi}/ta", on["ta"]):
+            eon_key = f"eon/{other_pi}/ta"
+            was_known = state.is_known(pi, eon_key)
+            if state.changed(pi, eon_key, on["ta"]):
                 pub(client, f"{pi}/eon/{other_pi}/ta",
                     {"active": on["ta"], "timestamp": ts},
                     qos=1, retain=config.MQTT_RETAIN_STATE)
-                if state.uptime >= 30:
+                if was_known:
                     rules_engine.on_eon_ta(client, pi, other_pi, on["ta"], data)
 
     # --- Extended topics (only in "all" mode) ---
