@@ -74,7 +74,10 @@ def _ws_should_broadcast(pi, group, data):
 
     Filters out noise:
     - Skip partial-only RadioText/PS (wait for complete decode).
+    - Skip empty PTYN.
     - Deduplicate: suppress groups identical to the last broadcast.
+      For 1A (PIN/Slow), dedup on core fields only since slow labeling
+      codes (country/language/ews) rotate across successive groups.
     """
     gl = group.lower() if group else ""
 
@@ -88,8 +91,26 @@ def _ws_should_broadcast(pi, group, data):
         if "ps" not in data and "partial_ps" in data:
             return False
 
-    # Deduplicate: compare payload (minus timing/quality fields) to last sent
+    # Skip PTYN groups with empty/whitespace-only name
+    if gl == "10a":
+        name = data.get("pty_name", data.get("ptyn", ""))
+        if not name or not name.strip():
+            return False
+
+    # --- Deduplication ---
     key = f"{pi}/{gl}"
+
+    # 1A/1B: deduplicate on core fields only (PIN + start time)
+    # because slow labeling codes rotate across groups
+    if gl in ("1a", "1b"):
+        core = (data.get("prog_item_number"),
+                json.dumps(data.get("prog_item_started"), sort_keys=True))
+        if _ws_last_broadcast.get(key) == core:
+            return False
+        _ws_last_broadcast[key] = core
+        return True
+
+    # General: compare full payload (minus timing/quality fields)
     relevant = {k: v for k, v in data.items()
                 if k not in ("rx_time", "timestamp", "bler")}
     content = json.dumps(relevant, sort_keys=True)
