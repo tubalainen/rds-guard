@@ -350,6 +350,14 @@ class RulesEngine:
                             event_id, "saving")
 
                 duration = self._duration(ann.get("since"), ts)
+
+                # Discard very short events (<10s) — likely RDS noise
+                if duration < 10 and event_id:
+                    event_store.delete_event(event_id)
+                    log.info("Discarded short traffic event #%d on %s "
+                             "(%ds < 10s minimum)", event_id, pi, duration)
+                    return
+
                 payload = {
                     "type": "traffic",
                     "state": "end",
@@ -463,6 +471,14 @@ class RulesEngine:
                     event_id, "saving")
 
         duration = self._duration(em.get("since"), ts)
+
+        # Discard very short events (<10s) — likely RDS noise
+        if duration < 10:
+            event_store.delete_event(event_id)
+            log.info("Discarded short emergency event #%d on %s "
+                     "(%ds < 10s minimum)", event_id, pi, duration)
+            return
+
         event_store.end_event(
             event_id=event_id,
             ended_at=ts,

@@ -222,6 +222,18 @@ def update_event_transcription_status(event_id, status):
         conn.commit()
 
 
+def delete_event(event_id):
+    """Delete a single event by ID. Returns True if a row was deleted."""
+    with _lock:
+        conn = _conn()
+        cur = conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
+        conn.commit()
+        deleted = cur.rowcount > 0
+        if deleted:
+            log.info("Deleted event %d", event_id)
+        return deleted
+
+
 def purge_old_events(days):
     """Delete events older than the given number of days.
 

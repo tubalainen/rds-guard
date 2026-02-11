@@ -27,7 +27,7 @@ class AudioRecorder:
     CHANNELS = 1            # mono
 
     # Recording limits
-    MIN_DURATION_SEC = 2    # discard very short recordings
+    MIN_DURATION_SEC = 10   # discard recordings shorter than 10s
 
     def __init__(self, audio_dir, transcriber, on_transcription_complete,
                  max_duration_sec=600):
