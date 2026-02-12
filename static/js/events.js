@@ -171,9 +171,9 @@ const Events = (() => {
         // Transcription
         if (ev.transcription) {
             html += '<div class="event-transcription">';
-            html += '<div class="event-section-label">Transcription';
+            html += '<div class="event-section-label">Whisper Transcription';
             if (ev.transcription_duration_sec != null) {
-                html += `<span class="transcription-duration"> (${formatDuration(ev.transcription_duration_sec)})</span>`;
+                html += `<span class="transcription-duration"> (processed in ${formatDuration(ev.transcription_duration_sec)})</span>`;
             }
             html += '</div>';
             html += `<p>${escapeHtml(ev.transcription)}</p>`;
@@ -202,7 +202,7 @@ const Events = (() => {
         // Footer
         html += '<div class="event-footer">';
         if (ev.duration_sec != null) {
-            html += `<span class="event-duration">Duration: ${formatDuration(ev.duration_sec)}</span>`;
+            html += `<span class="event-duration">Broadcast Duration: ${formatDuration(ev.duration_sec)}</span>`;
         } else {
             html += '<span class="event-duration"></span>';
         }
