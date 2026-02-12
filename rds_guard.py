@@ -301,11 +301,12 @@ class RulesEngine:
             if ta:
                 # --- Traffic announcement START ---
                 payload = {
-                    "type": "traffic",
+                    "event_type": "traffic_announcement",
                     "state": "start",
                     "station": ctx,
                     "frequency": freq,
                     "prog_type": data.get("prog_type", ""),
+                    "transcribed_text": None,
                     "timestamp": ts,
                 }
                 event_id = event_store.insert_event(
@@ -333,7 +334,7 @@ class RulesEngine:
                         event_id, "recording")
 
                 log.info("EVENT traffic start on %s (event #%d)", pi, event_id)
-                _mqtt_pub(mqtt_client, "alert", payload)
+                # Alert is deferred until event ends + transcription completes
                 broadcast_ws({"topic": "alert", "payload": payload, "timestamp": ts})
 
             else:
@@ -359,7 +360,7 @@ class RulesEngine:
                     return
 
                 payload = {
-                    "type": "traffic",
+                    "event_type": "traffic_announcement",
                     "state": "end",
                     "station": ctx,
                     "frequency": freq,
@@ -369,6 +370,7 @@ class RulesEngine:
                     "radiotext": ann.get("radiotext", []),
                     "prog_type": data.get("prog_type", ""),
                     "audio_available": has_audio,
+                    "transcribed_text": None,
                     "transcription_status": "saving" if has_audio else "none",
                     "event_id": event_id,
                     "timestamp": ts,
@@ -383,7 +385,12 @@ class RulesEngine:
                     )
                 log.info("EVENT traffic end on %s (%d RT messages)",
                          pi, len(payload["radiotext"]))
-                _mqtt_pub(mqtt_client, "alert", payload)
+                # Defer alert until transcription completes (or timeout)
+                if has_audio and event_id:
+                    _defer_alert(event_id, payload)
+                else:
+                    # No audio → send alert immediately
+                    _mqtt_pub(mqtt_client, "alert", payload)
                 broadcast_ws({"topic": "alert", "payload": payload, "timestamp": ts})
 
     def on_radiotext(self, mqtt_client, pi, rt, data):
@@ -398,17 +405,18 @@ class RulesEngine:
             event_id = self._active[pi]["event_id"]
             event_store.update_event_radiotext(event_id, list(collected))
             payload = {
-                "type": "traffic",
+                "event_type": "traffic_announcement",
                 "state": "update",
                 "station": self._station_context(pi),
                 "frequency": config.FM_FREQUENCY,
                 "radiotext": rt,
                 "all_radiotext": list(collected),
                 "started": self._active[pi]["since"],
+                "transcribed_text": None,
                 "timestamp": ts,
             }
             log.info("EVENT traffic update on %s: %s", pi, rt[:80])
-            _mqtt_pub(mqtt_client, "alert", payload)
+            # Alert is deferred until event ends + transcription completes
             broadcast_ws({"topic": "alert", "payload": payload, "timestamp": ts})
 
     def on_pty_alert(self, mqtt_client, pi, pty, data):
@@ -416,11 +424,12 @@ class RulesEngine:
         ts = msg_ts(data)
         ctx = self._station_context(pi)
         payload = {
-            "type": "emergency",
+            "event_type": "emergency_broadcast",
             "state": "active",
             "station": ctx,
             "frequency": config.FM_FREQUENCY,
             "prog_type": pty,
+            "transcribed_text": None,
             "timestamp": ts,
         }
         event_id = event_store.insert_event(
@@ -449,7 +458,7 @@ class RulesEngine:
                 event_id, "recording")
 
         log.warning("EVENT emergency PTY alarm on %s: %s", pi, pty)
-        _mqtt_pub(mqtt_client, "alert", payload)
+        # Alert is deferred until event ends + transcription completes
         broadcast_ws({"topic": "alert", "payload": payload, "timestamp": ts})
 
     def on_pty_normal(self, mqtt_client, pi, pty, data):
@@ -487,7 +496,7 @@ class RulesEngine:
 
         ctx = self._station_context(pi)
         payload = {
-            "type": "emergency",
+            "event_type": "emergency_broadcast",
             "state": "end",
             "station": ctx,
             "frequency": config.FM_FREQUENCY,
@@ -495,12 +504,18 @@ class RulesEngine:
             "ended": ts,
             "duration_sec": duration,
             "audio_available": has_audio,
+            "transcribed_text": None,
             "transcription_status": "saving" if has_audio else "none",
             "event_id": event_id,
             "timestamp": ts,
         }
         log.info("EVENT emergency end on %s (PTY → %s)", pi, pty)
-        _mqtt_pub(mqtt_client, "alert", payload)
+        # Defer alert until transcription completes (or timeout)
+        if has_audio and event_id:
+            _defer_alert(event_id, payload)
+        else:
+            # No audio → send alert immediately
+            _mqtt_pub(mqtt_client, "alert", payload)
         broadcast_ws({"topic": "alert", "payload": payload, "timestamp": ts})
 
     def is_emergency_active(self, pi):
@@ -515,12 +530,16 @@ class RulesEngine:
         different frequency has an active TA.  Published to MQTT / WS for
         Home Assistant but NOT stored in the database (no audio or
         transcription is available for another frequency).
+
+        In "essential" PUBLISH_MODE, EON events are NOT published to the
+        alert topic — only traffic announcements and emergencies are.
+        In "all" mode, EON events are included.
         """
         ts = msg_ts(data)
         on = data.get("other_network", {})
         ctx = self._station_context(pi)
         payload = {
-            "type": "eon_traffic",
+            "event_type": "eon_traffic",
             "state": "received",
             "ta_active": ta,
             "station": ctx,
@@ -534,7 +553,9 @@ class RulesEngine:
         }
         label = "active" if ta else "ended"
         log.info("EON traffic %s on linked %s via %s", label, other_pi, pi)
-        _mqtt_pub(mqtt_client, "alert", payload)
+        # Only publish EON to alert topic in "all" mode
+        if config.PUBLISH_MODE == "all":
+            _mqtt_pub(mqtt_client, "alert", payload)
         broadcast_ws({"topic": "alert", "payload": payload, "timestamp": ts})
 
     def is_active(self, pi):
@@ -556,27 +577,85 @@ rules_engine = RulesEngine()
 
 
 # ---------------------------------------------------------------------------
+# Deferred alert publishing — holds alert until transcription completes
+# ---------------------------------------------------------------------------
+
+# Maximum time (seconds) to wait for transcription before sending alert without it
+ALERT_TRANSCRIPTION_TIMEOUT = 120
+
+_pending_alerts = {}        # event_id → payload dict
+_pending_alerts_lock = threading.Lock()
+_pending_alert_timers = {}  # event_id → Timer
+
+
+def _defer_alert(event_id, payload):
+    """Hold an alert payload, waiting for transcription to complete.
+
+    Starts a timeout timer — if transcription hasn't finished within
+    ALERT_TRANSCRIPTION_TIMEOUT seconds, the alert is sent without it.
+    """
+    with _pending_alerts_lock:
+        _pending_alerts[event_id] = payload
+        # Cancel any existing timer for this event (shouldn't happen)
+        old_timer = _pending_alert_timers.pop(event_id, None)
+        if old_timer:
+            old_timer.cancel()
+        timer = threading.Timer(
+            ALERT_TRANSCRIPTION_TIMEOUT,
+            _fire_deferred_alert_timeout,
+            args=(event_id,),
+        )
+        timer.daemon = True
+        timer.start()
+        _pending_alert_timers[event_id] = timer
+    log.info("Alert deferred for event #%d (waiting for transcription, "
+             "timeout %ds)", event_id, ALERT_TRANSCRIPTION_TIMEOUT)
+
+
+def _fire_deferred_alert_timeout(event_id):
+    """Timer callback — send alert without transcription text."""
+    with _pending_alerts_lock:
+        payload = _pending_alerts.pop(event_id, None)
+        _pending_alert_timers.pop(event_id, None)
+    if payload:
+        payload["transcription_status"] = "timeout"
+        log.warning("Alert timeout for event #%d — sending without "
+                    "transcription", event_id)
+        _mqtt_pub(mqtt_client, "alert", payload)
+
+
+def _fire_deferred_alert(event_id, transcribed_text, error=False):
+    """Fire a deferred alert with transcription result (or error).
+
+    Returns True if a pending alert was found and published.
+    """
+    with _pending_alerts_lock:
+        payload = _pending_alerts.pop(event_id, None)
+        timer = _pending_alert_timers.pop(event_id, None)
+        if timer:
+            timer.cancel()
+    if payload:
+        if error:
+            payload["transcribed_text"] = None
+            payload["transcription_status"] = "error"
+        else:
+            payload["transcribed_text"] = transcribed_text
+            payload["transcription_status"] = "done"
+        _mqtt_pub(mqtt_client, "alert", payload)
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Transcription completion callback — called from transcriber thread
 # ---------------------------------------------------------------------------
 
 def _on_transcription_complete(event_id, text, error, duration_sec=None):
-    """Handle transcription result — update DB, publish MQTT + WS."""
+    """Handle transcription result — update DB, fire deferred alert, publish WS."""
     if error:
         event_store.update_event_transcription(event_id, None, status="error")
-        payload = {
-            "type": "transcription_update",
-            "event_id": event_id,
-            "transcription_status": "error",
-            "transcription_error": str(error),
-        }
-        _mqtt_pub(mqtt_client, "alert", {
-            "state": "transcription_failed",
-            "event_id": event_id,
-            "transcription_status": "error",
-            "transcription_error": str(error),
-            "audio_available": True,
-            "timestamp": now_iso(),
-        })
+        # Fire deferred alert without transcription text
+        _fire_deferred_alert(event_id, None, error=True)
         broadcast_ws({"topic": "transcription_error", "event_id": event_id,
                        "error": str(error), "timestamp": now_iso()})
         return
@@ -584,7 +663,10 @@ def _on_transcription_complete(event_id, text, error, duration_sec=None):
     event_store.update_event_transcription(event_id, text, status="done",
                                            duration_sec=duration_sec)
 
-    # Fetch the full event for the MQTT payload
+    # Fire deferred alert with transcription text
+    _fire_deferred_alert(event_id, text)
+
+    # Fetch event context for the retained per-station transcription topic
     try:
         rows, _ = event_store.query_events(limit=1, offset=0)
         event = None
@@ -619,25 +701,6 @@ def _on_transcription_complete(event_id, text, error, duration_sec=None):
             radiotext = _json.loads(radiotext)
         except Exception:
             radiotext = []
-
-    # Publish to rds/alert with state=transcribed
-    alert_payload = {
-        "type": evt_type,
-        "state": "transcribed",
-        "event_id": event_id,
-        "station": station,
-        "frequency": event.get("frequency", ""),
-        "started": event.get("started_at", ""),
-        "ended": event.get("ended_at", ""),
-        "duration_sec": event.get("duration_sec"),
-        "radiotext": radiotext,
-        "transcription": text,
-        "transcription_status": "done",
-        "transcription_duration_sec": duration_sec,
-        "audio_available": True,
-        "timestamp": ts,
-    }
-    _mqtt_pub(mqtt_client, "alert", alert_payload)
 
     # Publish to rds/{pi}/{type}/transcription (retained)
     if pi:

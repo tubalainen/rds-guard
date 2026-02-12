@@ -201,7 +201,7 @@ const Console = (() => {
 
         if (isAlert) {
             const parts = [];
-            if (p.type) parts.push(`<span class="cd-key">${escapeHtml(p.type)}</span>`);
+            if (p.event_type) parts.push(`<span class="cd-key">${escapeHtml(p.event_type)}</span>`);
             if (p.state) parts.push(escapeHtml(p.state));
             if (p.station && p.station.ps) parts.push(escapeHtml(p.station.ps));
             if (p.transcription) parts.push('"' + escapeHtml(truncate(p.transcription, 80)) + '"');
