@@ -112,6 +112,7 @@ async def handle_status(request):
     else:
         snap["pipeline"] = {"state": "unknown"}
 
+    snap["version"] = cfg.BUILD_VERSION
     snap["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     return web.json_response(snap)
 
