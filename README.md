@@ -158,7 +158,7 @@ All settings are in the `.env` file:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PUBLISH_MODE` | `essential` | `essential` = traffic, RadioText, PTY, EON TA only. `all` = every decoded RDS field. |
+| `PUBLISH_MODE` | `essential` | `essential` = alert topic carries only traffic announcements and emergencies. `all` = every decoded RDS field + EON on alert topic. |
 | `PUBLISH_RAW` | `false` | Publish raw RDS groups to `system/raw` (high volume) |
 | `STATUS_INTERVAL` | `30` | Seconds between status messages |
 
@@ -231,13 +231,35 @@ rds/{pi}/programme/rt              # RadioText (64-char free text)
 rds/{pi}/station/pty               # Programme Type
 rds/{pi}/eon/{other_pi}/ta         # Linked station TA via EON
 rds/{pi}/{type}/transcription      # Transcription text (retained)
-rds/alert                          # All events (traffic, emergency, eon)
+rds/alert                          # Traffic & emergency events (see below)
 rds/system/status                  # Bridge health (periodic)
 ```
 
-The `rds/alert` topic carries the full event lifecycle including `state: "transcribed"` when transcription completes asynchronously after an event ends. The `rds/{pi}/{type}/transcription` topic is retained so new subscribers receive the latest transcription immediately.
+### Alert topic (`rds/alert`)
 
-In `all` mode, additional topics are published for PS, AF, clock, RT+, Long PS, ODA, BLER, and more.
+A single MQTT message is published to `rds/alert` when an event is fully complete. The alert is held until audio transcription finishes (up to 2 minutes), so subscribers receive the transcribed text in the same message. If transcription fails or times out, the alert is sent without it.
+
+Each alert message includes:
+
+| Field | Description |
+|-------|-------------|
+| `type` | Event type: `traffic` or `emergency` |
+| `event_type` | Classification: `traffic_announcement` or `emergency_broadcast` |
+| `state` | `end` |
+| `transcribed_text` | Speech-to-text of the broadcast audio, or `null` if transcription failed/timed out |
+| `transcription_status` | `done`, `error`, `timeout`, or `none` (no audio) |
+| `station` | Station context (PI code, PS name, etc.) |
+| `duration_sec` | Event duration in seconds |
+| `radiotext` | RadioText messages collected during the event |
+| `audio_available` | Whether recorded audio is available for playback |
+| `timestamp` | ISO 8601 timestamp |
+
+**Publish mode behavior:**
+
+- **`essential`** (default) — Only traffic announcements and emergency broadcasts are published to `rds/alert`. EON (Enhanced Other Networks) events and other decoded RDS data are excluded.
+- **`all`** — Everything published to `rds/alert`, including EON linked station traffic events (`event_type: "eon_traffic"`). Additional per-field topics are also published for PS, AF, clock, RT+, Long PS, ODA, BLER, and more.
+
+The `rds/{pi}/{type}/transcription` topic is retained so new subscribers receive the latest transcription immediately.
 
 ## Home Assistant
 
@@ -278,19 +300,27 @@ automation:
           message: "A traffic announcement is being broadcast"
 ```
 
-Send a notification with the transcription when it becomes available:
+Send a notification with transcription when a traffic announcement ends:
 
 ```yaml
 automation:
-  - alias: "Traffic Transcription Ready"
+  - alias: "Traffic Alert with Transcription"
     trigger:
       - platform: mqtt
-        topic: "rds/+/traffic/transcription"
+        topic: "rds/alert"
+    condition:
+      - condition: template
+        value_template: "{{ trigger.payload_json.event_type == 'traffic_announcement' }}"
     action:
       - service: notify.mobile_app
         data:
-          title: "Traffic announcement transcription"
-          message: "{{ trigger.payload_json.transcription }}"
+          title: "Traffic announcement on P4"
+          message: >
+            {% if trigger.payload_json.transcribed_text %}
+              {{ trigger.payload_json.transcribed_text }}
+            {% else %}
+              Traffic announcement ({{ trigger.payload_json.duration_sec }}s, no transcription)
+            {% endif %}
 ```
 
 ## P4 regional frequencies

@@ -37,8 +37,9 @@ MQTT_QOS = _int(os.environ.get("MQTT_QOS"), 1)
 MQTT_RETAIN_STATE = _bool(os.environ.get("MQTT_RETAIN_STATE", "true"))
 
 # Publishing control
-#   "essential" = only traffic (TA/TP), RadioText, PTY changes, and EON TA
-#   "all"       = every decoded RDS field gets its own topic
+#   "essential" = alert topic carries only traffic announcements and emergencies
+#                 (EON and other decoded RDS data are excluded from the alert topic)
+#   "all"       = every decoded RDS field gets its own topic, alert topic includes EON
 PUBLISH_MODE = os.environ.get("PUBLISH_MODE", "essential").lower()
 PUBLISH_RAW = _bool(os.environ.get("PUBLISH_RAW", "false"))
 STATUS_INTERVAL = _int(os.environ.get("STATUS_INTERVAL"), 30)
