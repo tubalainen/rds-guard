@@ -301,7 +301,6 @@ class RulesEngine:
             if ta:
                 # --- Traffic announcement START ---
                 payload = {
-                    "type": "traffic",
                     "event_type": "traffic_announcement",
                     "state": "start",
                     "station": ctx,
@@ -361,7 +360,6 @@ class RulesEngine:
                     return
 
                 payload = {
-                    "type": "traffic",
                     "event_type": "traffic_announcement",
                     "state": "end",
                     "station": ctx,
@@ -407,7 +405,6 @@ class RulesEngine:
             event_id = self._active[pi]["event_id"]
             event_store.update_event_radiotext(event_id, list(collected))
             payload = {
-                "type": "traffic",
                 "event_type": "traffic_announcement",
                 "state": "update",
                 "station": self._station_context(pi),
@@ -427,7 +424,6 @@ class RulesEngine:
         ts = msg_ts(data)
         ctx = self._station_context(pi)
         payload = {
-            "type": "emergency",
             "event_type": "emergency_broadcast",
             "state": "active",
             "station": ctx,
@@ -500,7 +496,6 @@ class RulesEngine:
 
         ctx = self._station_context(pi)
         payload = {
-            "type": "emergency",
             "event_type": "emergency_broadcast",
             "state": "end",
             "station": ctx,
@@ -544,7 +539,6 @@ class RulesEngine:
         on = data.get("other_network", {})
         ctx = self._station_context(pi)
         payload = {
-            "type": "eon_traffic",
             "event_type": "eon_traffic",
             "state": "received",
             "ta_active": ta,

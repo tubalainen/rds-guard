@@ -243,8 +243,7 @@ Each alert message includes:
 
 | Field | Description |
 |-------|-------------|
-| `type` | Event type: `traffic` or `emergency` |
-| `event_type` | Classification: `traffic_announcement` or `emergency_broadcast` |
+| `event_type` | `traffic_announcement`, `emergency_broadcast`, or `eon_traffic` (all mode only) |
 | `state` | `end` |
 | `transcribed_text` | Speech-to-text of the broadcast audio, or `null` if transcription failed/timed out |
 | `transcription_status` | `done`, `error`, `timeout`, or `none` (no audio) |
