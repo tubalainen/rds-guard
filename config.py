@@ -14,6 +14,9 @@ def _int(val, default):
         return default
 
 
+# Build version (injected at Docker build time, defaults to "dev")
+BUILD_VERSION = os.environ.get("BUILD_VERSION", "dev")
+
 # RTL-SDR
 FM_FREQUENCY = os.environ.get("FM_FREQUENCY", "103.5M")
 RTL_GAIN = os.environ.get("RTL_GAIN", "8")

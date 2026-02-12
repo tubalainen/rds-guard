@@ -106,6 +106,12 @@ const App = (() => {
         };
         pipeEl.title = pipeLabels[pipeState] || 'Pipeline: ' + pipeState;
 
+        // Version
+        const versionEl = document.getElementById('status-version');
+        if (data.version) {
+            versionEl.textContent = data.version;
+        }
+
         // --- Row 2: RadioText + Now Playing ---
 
         if (station) {

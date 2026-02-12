@@ -655,6 +655,18 @@ footer {
     50% { opacity: 0.3; }
 }
 
+/* Version link in status bar */
+.status-version {
+    font-size: 0.6875rem;
+    color: var(--text-muted);
+    text-decoration: none;
+    transition: color 0.15s;
+}
+
+.status-version:hover {
+    color: var(--accent-blue);
+}
+
 /* RadioText display in status bar */
 .status-rt-area {
     display: flex;

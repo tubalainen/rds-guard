@@ -67,6 +67,9 @@ COPY static/ /app/static/
 # Data volume for SQLite database
 VOLUME /data
 
+ARG BUILD_VERSION=dev
+ENV BUILD_VERSION=${BUILD_VERSION}
+
 WORKDIR /app
 
 EXPOSE 8022
