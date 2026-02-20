@@ -1,8 +1,13 @@
 """Radio pipeline manager — spawns and monitors rtl_fm + redsea subprocesses.
 
-This module manages the radio pipeline as two connected subprocesses:
+Single-station (FM_FREQUENCY):
+    rtl_fm (stdout=PCM) → AudioTee → redsea (stdout=ndjson) → Python callback
 
-    rtl_fm (stdout=raw IQ) → redsea (stdout=ndjson) → Python callback
+Multi-station (FM_FREQUENCIES with 2-4 entries):
+    rtl_sdr (stdout=IQ) → Channelizer thread
+                              ├─ pipe 0 → AudioTee → redsea → callback[0]
+                              ├─ pipe 1 → AudioTee → redsea → callback[1]
+                              └─ ...
 
 No FIFOs, no shell pipes — just subprocess.Popen with stdout=PIPE.
 Each process's stderr is captured by a dedicated reader thread and
@@ -83,7 +88,7 @@ pipeline_status = PipelineStatus()
 # ---------------------------------------------------------------------------
 
 def _build_rtl_fm_cmd():
-    """Build the rtl_fm command array from config."""
+    """Build the rtl_fm command array from config (single-station path)."""
     device_index = _resolve_device_serial()
     cmd = [
         "rtl_fm",
@@ -98,6 +103,19 @@ def _build_rtl_fm_cmd():
         "-f", str(config.FM_FREQUENCY),
     ]
     return cmd
+
+
+def _build_rtl_sdr_cmd(center_freq_hz: int, device_index) -> list:
+    """Build the rtl_sdr command array for wideband IQ capture (multi-station)."""
+    return [
+        "rtl_sdr",
+        "-f", str(center_freq_hz),
+        "-s", str(config.RTL_SAMPLE_RATE),
+        "-g", str(config.RTL_GAIN),
+        "-p", str(config.PPM_CORRECTION),
+        "-d", str(device_index),
+        "-",   # write IQ to stdout
+    ]
 
 
 def _build_redsea_cmd():
@@ -316,6 +334,157 @@ def run_pipeline(on_line_callback, status, stop_event, recorder=None):
             status.set_error(msg)
         else:
             log.warning("Pipeline ended unexpectedly")
+            status.set_stopped("Pipeline ended")
+
+
+def run_pipeline_multi(station_configs, on_line_callbacks, status, stop_event):
+    """Wideband IQ path: rtl_sdr → Channelizer → N × (AudioTee + redsea).
+
+    Args:
+        station_configs: list of dicts with keys:
+            frequency (str): frequency string, e.g. "103.5M"
+            freq_hz (int):   frequency in Hz
+            recorder:        AudioRecorder instance for this station
+        on_line_callbacks: list of callables, one per station.  Each is called
+            with a bytes line from its redsea process's stdout.
+        status: PipelineStatus instance to update.
+        stop_event: threading.Event — set to request shutdown.
+
+    Blocks until all subprocesses exit or stop_event is set.
+    """
+    from channelizer import Channelizer
+    from audio_tee import AudioTee
+
+    rtl_proc = None
+    redsea_procs = []
+    tee_threads = []
+    reader_threads = []
+
+    try:
+        status.set_starting()
+
+        device_index = _resolve_device_serial()
+        center_freq_hz = config.RTL_CENTER_FREQ_HZ
+        rtl_cmd = _build_rtl_sdr_cmd(center_freq_hz, device_index)
+        redsea_cmd = _build_redsea_cmd()
+
+        log.info("Pipeline starting (multi-station: %d stations, centre %s Hz)",
+                 len(station_configs), center_freq_hz)
+        log.info("  rtl_sdr:  %s", " ".join(rtl_cmd))
+        log.info("  redsea:   %s", " ".join(redsea_cmd))
+        log.info("  stations: %s",
+                 ", ".join(sc["frequency"] for sc in station_configs))
+
+        # Spawn rtl_sdr
+        rtl_proc = subprocess.Popen(
+            rtl_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        log.info("rtl_sdr started (PID: %d)", rtl_proc.pid)
+
+        # Stderr reader for rtl_sdr
+        threading.Thread(
+            target=_stderr_reader,
+            args=(rtl_proc.stderr, "rtl_sdr"),
+            daemon=True,
+        ).start()
+
+        # Start Channelizer: parses IQ and writes PCM to per-station pipes
+        freq_hz_list = [sc["freq_hz"] for sc in station_configs]
+        channelizer = Channelizer(rtl_proc.stdout, freq_hz_list, center_freq_hz)
+        channelizer.start()
+        pipe_fds = channelizer.pipe_read_fds
+
+        # Spawn one redsea per station, wired to the channelizer pipe
+        for i, sc in enumerate(station_configs):
+            redsea_proc = subprocess.Popen(
+                redsea_cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            redsea_procs.append(redsea_proc)
+            log.info("redsea[%d] started (PID: %d) for %s",
+                     i, redsea_proc.pid, sc["frequency"])
+
+            # Stderr reader for this redsea
+            threading.Thread(
+                target=_stderr_reader,
+                args=(redsea_proc.stderr, f"redsea[{sc['frequency']}]"),
+                daemon=True,
+            ).start()
+
+            # AudioTee: pipe_r → redsea.stdin + recorder
+            pipe_r_file = os.fdopen(pipe_fds[i], "rb")
+            recorder = sc.get("recorder") or _NoopRecorder()
+            tee = AudioTee(pipe_r_file, redsea_proc.stdin, recorder)
+
+            tee_t = threading.Thread(target=tee.run, daemon=True)
+            tee_t.start()
+            tee_threads.append(tee_t)
+
+            # Reader thread: redsea stdout → station callback
+            callback = on_line_callbacks[i]
+            reader_t = threading.Thread(
+                target=_read_redsea_output,
+                args=(redsea_proc.stdout, callback, stop_event),
+                daemon=True,
+            )
+            reader_t.start()
+            reader_threads.append(reader_t)
+
+        # Collect PIDs for the status object (use first redsea as representative)
+        redsea_pid0 = redsea_procs[0].pid if redsea_procs else None
+        status.set_running(rtl_proc.pid, redsea_pid0)
+        log.info("Multi-station pipeline running — %d decoders active",
+                 len(redsea_procs))
+
+        # Shutdown watchdog
+        def _shutdown_watchdog():
+            stop_event.wait()
+            log.info("Shutdown requested — killing multi-station pipeline...")
+            _terminate_process(rtl_proc, "rtl_sdr")
+            for j, rp in enumerate(redsea_procs):
+                _terminate_process(rp, f"redsea[{j}]")
+
+        threading.Thread(target=_shutdown_watchdog, daemon=True).start()
+
+        # Block until rtl_sdr exits (Channelizer will then reach EOF and stop)
+        rtl_proc.wait()
+
+        # Wait for tee threads and reader threads to finish
+        for t in tee_threads + reader_threads:
+            t.join(timeout=5)
+
+    except FileNotFoundError as e:
+        msg = f"Binary not found: {e.filename}"
+        log.error("Pipeline error: %s", msg)
+        status.set_error(msg)
+        return
+
+    except Exception as e:
+        msg = str(e)
+        log.error("Pipeline error: %s", msg)
+        status.set_error(msg)
+        return
+
+    finally:
+        _terminate_process(rtl_proc, "rtl_sdr")
+        for j, rp in enumerate(redsea_procs):
+            _terminate_process(rp, f"redsea[{j}]")
+
+    if stop_event.is_set():
+        log.info("Multi-station pipeline stopped (shutdown requested)")
+        status.set_stopped("Shutdown requested")
+    else:
+        rtl_code = rtl_proc.returncode if rtl_proc else None
+        if rtl_code is not None and rtl_code != 0:
+            msg = f"rtl_sdr exited with code {rtl_code}"
+            log.error("Pipeline failed: %s", msg)
+            status.set_error(msg)
+        else:
+            log.warning("Multi-station pipeline ended unexpectedly")
             status.set_stopped("Pipeline ended")
 
 

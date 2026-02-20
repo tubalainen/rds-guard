@@ -23,18 +23,23 @@ Single Docker container. One process handles the entire pipeline:
 ┌──────────────────────────────────────────────────────────────┐
 │  rds-guard container                                         │
 │                                                              │
+│  Single-station (FM_FREQUENCY):                              │
 │  rtl_fm ──→ AudioTee ──→ redsea ──→ rds_guard.py            │
 │                │                          │                  │
-│                ▼                     ┌────┴────┐             │
-│          AudioRecorder               │  Rules  │             │
-│            (ffmpeg)                   │  Engine │             │
-│                │                     └──┬───┬──┘             │
-│                ▼                  ┌─────┘   └──────┐         │
-│          Transcriber              ▼                ▼         │
-│       (faster-whisper         SQLite           MQTT          │
-│        or remote ASR)       /data/events.db   (optional)     │
-│                                   │                          │
-│          /data/audio/             ▼                           │
+│  Multi-station (FM_FREQUENCIES):          │                  │
+│  rtl_sdr ──→ Channelizer ─┬─ pipe ──→ redsea[0] ──→        │
+│                            ├─ pipe ──→ redsea[1] ──→ rds_guard.py
+│                            └─ ...                     │      │
+│                                                  ┌────┴────┐ │
+│          AudioRecorder                           │  Rules  │ │
+│            (ffmpeg)                              │  Engine │ │
+│                │                                 └──┬───┬──┘ │
+│                ▼                            ┌───────┘   └──┐ │
+│          Transcriber                        ▼              ▼ │
+│       (faster-whisper                   SQLite           MQTT │
+│        or remote ASR)              /data/events.db  (optional)│
+│                                         │                    │
+│          /data/audio/                   ▼                    │
 │           *.ogg / *.wav     Web server (aiohttp)             │
 │                               ├── GET  /              → UI   │
 │                               ├── GET  /api/events    → API  │
@@ -49,7 +54,9 @@ Single Docker container. One process handles the entire pipeline:
                                  Browser
 ```
 
-**Pipeline:** `rtl_fm` demodulates the FM signal, `AudioTee` splits the PCM stream — forwarding to `redsea` for RDS decoding while simultaneously feeding the `AudioRecorder` during active events. `rds_guard.py` processes the decoded JSON, triggers recordings, and dispatches transcriptions.
+**Single-station pipeline:** `rtl_fm` demodulates the FM signal, `AudioTee` splits the PCM stream — forwarding to `redsea` for RDS decoding while simultaneously feeding the `AudioRecorder` during active events.
+
+**Multi-station pipeline:** `rtl_sdr` captures raw wideband IQ, `Channelizer` (numpy DSP) extracts and demodulates each station to its own 171 kHz PCM pipe, and N independent `redsea` + `AudioRecorder` instances run in parallel. `rds_guard.py` processes the decoded JSON, triggers recordings, and dispatches transcriptions.
 
 **Rules engine** evaluates each decoded group against hardcoded rules defined by the RDS standard:
 
@@ -134,7 +141,8 @@ All settings are in the `.env` file:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `FM_FREQUENCY` | `103.5M` | FM frequency to tune (P4 Varmland) |
+| `FM_FREQUENCY` | `103.5M` | FM frequency to tune (single-station mode) |
+| `FM_FREQUENCIES` | | Comma-separated 2–4 frequencies for multi-station mode, e.g. `103.5M,102.9M` (see [Multi-station monitoring](#multi-station-monitoring)) |
 | `RTL_GAIN` | `8` | Tuner gain in dB (0-50) |
 | `PPM_CORRECTION` | `0` | Frequency correction for your dongle |
 | `RTL_DEVICE_INDEX` | `0` | Device index if multiple dongles |
@@ -367,7 +375,8 @@ rds-guard/
 ├── requirements.txt
 ├── entrypoint.sh
 ├── rds_guard.py          # Supervisor: rules engine, MQTT, WebSocket hub
-├── pipeline.py           # Subprocess manager for rtl_fm + redsea
+├── pipeline.py           # Subprocess manager for rtl_fm + redsea (+ multi-station path)
+├── channelizer.py        # Wideband IQ → N×PCM (numpy DSP, multi-station only)
 ├── audio_tee.py          # PCM stream splitter (rtl_fm → redsea + recorder)
 ├── audio_recorder.py     # Recording lifecycle, ffmpeg conversion
 ├── transcriber.py        # Whisper STT (local faster-whisper or remote ASR)
@@ -430,6 +439,54 @@ curl http://localhost:8022/api/status
 | Events show as "In progress" after restart | Normal — stale events from the previous run | They are automatically closed on startup. Do a clean rebuild with `-v` to clear old data |
 | MQTT not publishing | MQTT disabled or broker unreachable | Set `MQTT_ENABLED=true` in `.env` and verify broker IP/port. Check logs for MQTT connection errors |
 | Low decode rate (< 5 grp/s) | Weak signal or wrong frequency | Try increasing `RTL_GAIN`. Verify `FM_FREQUENCY` matches a nearby P4 transmitter |
+
+## Multi-station monitoring
+
+A single RTL-SDR dongle covers up to ~2.4 MHz of instantaneous bandwidth, which is enough to capture 4 FM stations at once (each channel is 200 kHz wide, and 4 channels spaced within 2 MHz fit comfortably).
+
+Set `FM_FREQUENCIES` to a comma-separated list of 2–4 stations to enable simultaneous monitoring:
+
+```bash
+FM_FREQUENCIES=103.5M,102.9M,101.3M
+```
+
+### How it works
+
+When `FM_FREQUENCIES` is set with 2 or more values, the pipeline switches to a wideband capture mode:
+
+1. `rtl_sdr` captures raw IQ at 2 394 000 samples/sec centred between all target frequencies
+2. A Python channelizer thread (numpy DSP) extracts each station, demodulates FM, and writes 171 kHz PCM to a dedicated pipe per station
+3. One `redsea` process and one audio recorder run independently per station
+
+Station names are decoded live from the RDS Programme Service (PS) field — no configuration needed.
+
+### Constraints
+
+- **Maximum 4 stations** — hardware and CPU limit
+- **All frequencies must be within 2.0 MHz of each other** — this is the usable bandwidth at the chosen sample rate. Startup will abort with a clear error if this constraint is violated.
+- Adequate on any x86_64 host and Raspberry Pi 4. Not tested on Raspberry Pi 3.
+
+### API changes in multi-station mode
+
+`GET /api/status` returns a `stations[]` array instead of a single `station` object:
+
+```json
+{
+  "pipeline": { "state": "running", ... },
+  "stations": [
+    { "frequency": "103.5M", "pi": "C404", "ps": "P4 Värmland", "groups_per_sec": 11.3 },
+    { "frequency": "102.9M", "pi": "C502", "ps": "P4 Sjuharad", "groups_per_sec": 11.1 }
+  ]
+}
+```
+
+Events in the database and web UI are always tagged with `frequency` and `station_ps`, so the Events tab works identically regardless of mode.
+
+### Backward compatibility
+
+- `FM_FREQUENCIES` unset → single-station mode using `FM_FREQUENCY` (unchanged)
+- `FM_FREQUENCIES` with exactly 1 value → also single-station mode
+- `FM_FREQUENCIES` with 2–4 values → wideband multi-station mode
 
 ## Multiple RTL-SDR dongles
 

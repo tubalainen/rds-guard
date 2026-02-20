@@ -1,6 +1,7 @@
 """Configuration from environment variables with defaults."""
 
 import os
+import sys
 
 
 def _bool(val):
@@ -14,6 +15,16 @@ def _int(val, default):
         return default
 
 
+def _parse_freq_hz(freq_str: str) -> int:
+    """Convert a frequency string like '103.5M' or '103500000' to Hz (int)."""
+    s = freq_str.strip().upper()
+    if s.endswith("M"):
+        return int(float(s[:-1]) * 1_000_000)
+    if s.endswith("K"):
+        return int(float(s[:-1]) * 1_000)
+    return int(float(s))
+
+
 # Build version (injected at Docker build time, defaults to "dev")
 BUILD_VERSION = os.environ.get("BUILD_VERSION", "dev")
 
@@ -23,6 +34,53 @@ RTL_GAIN = os.environ.get("RTL_GAIN", "8")
 PPM_CORRECTION = os.environ.get("PPM_CORRECTION", "0")
 RTL_DEVICE_SERIAL = os.environ.get("RTL_DEVICE_SERIAL", "")
 RTL_DEVICE_INDEX = os.environ.get("RTL_DEVICE_INDEX", "0")
+
+# Multi-station support
+# FM_FREQUENCIES: comma-separated list of up to 4 frequencies, e.g. "103.5M,102.9M"
+# If unset, falls back to single-station FM_FREQUENCY.
+_freqs_raw = os.environ.get("FM_FREQUENCIES", "").strip()
+if _freqs_raw:
+    STATION_FREQS = [f.strip() for f in _freqs_raw.split(",") if f.strip()]
+else:
+    STATION_FREQS = [FM_FREQUENCY]
+
+# Validate: max 4 stations
+if len(STATION_FREQS) > 4:
+    print(
+        f"ERROR: FM_FREQUENCIES contains {len(STATION_FREQS)} frequencies — maximum is 4. "
+        "Aborting.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+# Validate: all frequencies must fit within 2.0 MHz of each other
+if len(STATION_FREQS) > 1:
+    _freq_hz_list = [_parse_freq_hz(f) for f in STATION_FREQS]
+    _span = max(_freq_hz_list) - min(_freq_hz_list)
+    if _span > 2_000_000:
+        print(
+            f"ERROR: FM_FREQUENCIES span {_span/1e6:.2f} MHz exceeds the 2.0 MHz "
+            "usable bandwidth limit. All frequencies must be within 2 MHz of each "
+            "other. Aborting.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+# True when 2 or more stations are configured — activates wideband IQ path
+MULTI_STATION: bool = len(STATION_FREQS) > 1
+
+# RTL-SDR sample rate and centre frequency for multi-station wideband capture
+# 2 394 000 = 171 000 × 14 (exact integer decimation ratio)
+RTL_SAMPLE_RATE = 2_394_000
+# Centre frequency: override via env or auto-computed as midpoint of all freqs
+_rtl_center_raw = os.environ.get("RTL_CENTER_FREQ", "").strip()
+if _rtl_center_raw:
+    RTL_CENTER_FREQ_HZ: int = _parse_freq_hz(_rtl_center_raw)
+elif MULTI_STATION:
+    _freq_hz_list = [_parse_freq_hz(f) for f in STATION_FREQS]
+    RTL_CENTER_FREQ_HZ = (_min := min(_freq_hz_list)) + (max(_freq_hz_list) - _min) // 2
+else:
+    RTL_CENTER_FREQ_HZ = _parse_freq_hz(FM_FREQUENCY)
 
 # Redsea
 REDSEA_SHOW_PARTIAL = _bool(os.environ.get("REDSEA_SHOW_PARTIAL", "true"))

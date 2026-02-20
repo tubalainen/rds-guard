@@ -157,7 +157,7 @@ class StationInfo:
         self._identified = set()   # PI codes we've already logged as "locked on"
         self._ps_logged = set()    # PI codes whose PS name we've logged
 
-    def update(self, pi, data):
+    def update(self, pi, data, frequency=None):
         with self.lock:
             new_pi = pi not in self._info
             if new_pi:
@@ -203,7 +203,8 @@ class StationInfo:
             # --- Station identification logging ---
             if new_pi and pi not in self._identified:
                 self._identified.add(pi)
-                log.info("╔══ New PI code detected: %s on %s", pi, config.FM_FREQUENCY)
+                freq_str = frequency if frequency else config.FM_FREQUENCY
+                log.info("╔══ New PI code detected: %s on %s", pi, freq_str)
 
             # Log when PS (station name) first resolves for this PI
             if not had_ps and "ps" in info and pi not in self._ps_logged:
@@ -269,7 +270,7 @@ class RulesEngine:
       5. EON TA (group 14A): eon_traffic event
     """
 
-    def __init__(self, recorder=None, record_event_types=None):
+    def __init__(self, recorder=None, record_event_types=None, frequency=None):
         self.lock = threading.Lock()
         # Per-PI active traffic announcement: pi -> {event_id, since, radiotext, prog_type}
         self._active = {}
@@ -280,6 +281,8 @@ class RulesEngine:
         self._record_types = set(
             t.strip() for t in (record_event_types or "traffic,emergency").split(",")
         )
+        # Frequency this engine is responsible for (used in event payloads)
+        self.frequency = frequency or config.FM_FREQUENCY
 
     def _station_context(self, pi):
         si = station_info.snapshot()
@@ -295,7 +298,7 @@ class RulesEngine:
         ts = msg_ts(data)
         ctx = self._station_context(pi)
         ps = ctx.get("ps")
-        freq = config.FM_FREQUENCY
+        freq = self.frequency
 
         with self.lock:
             if ta:
@@ -408,7 +411,7 @@ class RulesEngine:
                 "event_type": "traffic_announcement",
                 "state": "update",
                 "station": self._station_context(pi),
-                "frequency": config.FM_FREQUENCY,
+                "frequency": self.frequency,
                 "radiotext": rt,
                 "all_radiotext": list(collected),
                 "started": self._active[pi]["since"],
@@ -427,7 +430,7 @@ class RulesEngine:
             "event_type": "emergency_broadcast",
             "state": "active",
             "station": ctx,
-            "frequency": config.FM_FREQUENCY,
+            "frequency": self.frequency,
             "prog_type": pty,
             "transcribed_text": None,
             "timestamp": ts,
@@ -439,7 +442,7 @@ class RulesEngine:
             pi=pi,
             data_payload=payload,
             station_ps=ctx.get("ps"),
-            frequency=config.FM_FREQUENCY,
+            frequency=self.frequency,
             started_at=ts,
         )
         payload["event_id"] = event_id
@@ -499,7 +502,7 @@ class RulesEngine:
             "event_type": "emergency_broadcast",
             "state": "end",
             "station": ctx,
-            "frequency": config.FM_FREQUENCY,
+            "frequency": self.frequency,
             "started": em.get("since", ""),
             "ended": ts,
             "duration_sec": duration,
@@ -548,7 +551,7 @@ class RulesEngine:
                 "ps": (on.get("ps") or "").strip(),
                 "kilohertz": on.get("kilohertz"),
             },
-            "frequency": config.FM_FREQUENCY,
+            "frequency": self.frequency,
             "timestamp": ts,
         }
         label = "active" if ta else "ended"
@@ -574,6 +577,79 @@ class RulesEngine:
 
 
 rules_engine = RulesEngine()
+
+
+# ---------------------------------------------------------------------------
+# Multi-station: per-station stats and PI→frequency mapping
+# ---------------------------------------------------------------------------
+
+# Populated by main() in multi-station mode:
+#   _station_stats[freq_str] = Stats()  — per-station decode rate
+#   _pi_to_freq[pi]         = freq_str  — reverse lookup (PI → frequency)
+#   _freq_to_pi[freq_str]   = pi        — forward lookup (frequency → PI)
+_station_stats: dict = {}
+_pi_to_freq: dict = {}
+_freq_to_pi: dict = {}
+
+
+def _make_station_callback(freq: str, station_rules_engine, station_stats_obj):
+    """Create a per-station _on_pipeline_line callback for multi-station mode.
+
+    Captures freq, station_rules_engine, and station_stats_obj so each
+    redsea reader thread independently processes its own station.
+    """
+    line_count = [0]
+    error_count = [0]
+    first_group = [True]
+    last_stats_log = [0.0]
+
+    def callback(raw_line):
+        line = raw_line.decode("utf-8", errors="replace").strip()
+        if not line:
+            return
+        try:
+            data = json.loads(line)
+            pi = data.get("pi")
+            if pi:
+                pi = str(pi)
+                # Update PI↔frequency mapping
+                if pi not in _pi_to_freq:
+                    _pi_to_freq[pi] = freq
+                    _freq_to_pi[freq] = pi
+                # Per-station decode counter
+                station_stats_obj.inc()
+                # Accumulate station info (shared, PI-keyed)
+                station_info.update(pi, data, frequency=freq)
+            # Log notable field changes
+            if pi:
+                _log_field_changes(pi, data)
+            # Route through rules engine and MQTT (using per-station engine)
+            process_group(mqtt_client, data, _rules_engine=station_rules_engine)
+            line_count[0] += 1
+
+            if first_group[0] and pi:
+                log.info("════════════════════════════════════════════")
+                log.info("  First RDS group on %s — decoder running", freq)
+                log.info("  PI: %s  Frequency: %s", pi, freq)
+                log.info("════════════════════════════════════════════")
+                first_group[0] = False
+
+            now = time.time()
+            if now - last_stats_log[0] >= 60:
+                snap = station_stats_obj.snapshot()
+                log.info("[%s] %d groups, %.1f grp/s, uptime %ds",
+                         freq, snap["groups_total"], snap["groups_per_sec"],
+                         snap["uptime_sec"])
+                last_stats_log[0] = now
+
+        except json.JSONDecodeError:
+            error_count[0] += 1
+            if error_count[0] <= 5:
+                log.warning("[%s] Invalid JSON: %s", freq, line[:100])
+        except Exception:
+            log.exception("[%s] Error processing group", freq)
+
+    return callback
 
 
 # ---------------------------------------------------------------------------
@@ -1005,12 +1081,17 @@ def _log_field_changes(pi, data):
 # Main group dispatcher
 # ---------------------------------------------------------------------------
 
-def process_group(client, data):
+def process_group(client, data, _rules_engine=None):
     """Route a single redsea JSON object through rules engine and MQTT topics.
 
     The rules engine ALWAYS runs (writes to SQLite + WebSocket).
     MQTT topic publishing is controlled by PUBLISH_MODE (essential/all)
     and only runs if MQTT is configured.
+
+    _rules_engine: override the module-level rules_engine instance.
+        Used by the multi-station path to pass the per-station engine.
+        When None (default), uses the module-level rules_engine singleton
+        (single-station path — unchanged behaviour).
     """
     pi = data.get("pi")
     if not pi:
@@ -1018,6 +1099,9 @@ def process_group(client, data):
 
     stats.inc()
     pi = str(pi)
+
+    if _rules_engine is None:
+        _rules_engine = rules_engine
 
     # Always accumulate decoded fields for the status message
     station_info.update(pi, data)
@@ -1037,7 +1121,7 @@ def process_group(client, data):
 
     # Rule 1-2: Traffic Announcement (TA flag change)
     if "ta" in data and state.changed(pi, "traffic/ta", data["ta"]):
-        rules_engine.on_ta_change(client, pi, data["ta"], data)
+        _rules_engine.on_ta_change(client, pi, data["ta"], data)
         # Also publish to MQTT topic
         retain = config.MQTT_RETAIN_STATE
         pub(client, f"{pi}/traffic/ta",
@@ -1064,8 +1148,8 @@ def process_group(client, data):
                 {"radiotext": rt_stripped, "partial": rt_full is None, "timestamp": ts},
                 qos=1, retain=False)
             # Only update the traffic event with complete RadioText
-            if rt_full and rules_engine.is_active(pi):
-                rules_engine.on_radiotext(client, pi, rt_stripped, data)
+            if rt_full and _rules_engine.is_active(pi):
+                _rules_engine.on_radiotext(client, pi, rt_stripped, data)
 
     # Rule 4: PTY alarm
     pty = data.get("prog_type")
@@ -1073,9 +1157,9 @@ def process_group(client, data):
         pub(client, f"{pi}/station/pty", {"prog_type": pty, "timestamp": ts},
             qos=1, retain=config.MQTT_RETAIN_STATE)
         if pty in ALERT_PTY:
-            rules_engine.on_pty_alert(client, pi, pty, data)
-        elif rules_engine.is_emergency_active(pi):
-            rules_engine.on_pty_normal(client, pi, pty, data)
+            _rules_engine.on_pty_alert(client, pi, pty, data)
+        elif _rules_engine.is_emergency_active(pi):
+            _rules_engine.on_pty_normal(client, pi, pty, data)
 
     # Rule 5: EON Traffic Announcements (group 14A)
     # Only create events for genuine TA state transitions, not for the
@@ -1091,7 +1175,7 @@ def process_group(client, data):
                     {"active": on["ta"], "timestamp": ts},
                     qos=1, retain=config.MQTT_RETAIN_STATE)
                 if was_known:
-                    rules_engine.on_eon_ta(client, pi, other_pi, on["ta"], data)
+                    _rules_engine.on_eon_ta(client, pi, other_pi, on["ta"], data)
 
     # --- Extended topics (only in "all" mode) ---
     publish_all = config.PUBLISH_MODE == "all"
@@ -1155,7 +1239,7 @@ def status_publisher(stop_event):
             break
         snap = stats.snapshot()
         snap["mqtt_connected"] = mqtt_connected.is_set()
-        snap["frequency"] = config.FM_FREQUENCY
+        snap["frequency"] = rules_engine.frequency
         snap["timestamp"] = now_iso()
         si = station_info.snapshot()
         if si:
@@ -1251,7 +1335,7 @@ def _on_pipeline_line(raw_line):
             pi = data.get("pi", "?")
             log.info("════════════════════════════════════════════")
             log.info("  First RDS group received — decoder is running")
-            log.info("  PI: %s  Frequency: %s", pi, config.FM_FREQUENCY)
+            log.info("  PI: %s  Frequency: %s", pi, rules_engine.frequency)
             log.info("════════════════════════════════════════════")
             _first_group = False
 
@@ -1291,7 +1375,10 @@ def main():
     log.info("════════════════════════════════════════════")
     log.info("  RDS Guard starting")
     log.info("════════════════════════════════════════════")
-    log.info("  Frequency:  %s", config.FM_FREQUENCY)
+    if config.MULTI_STATION:
+        log.info("  Frequencies: %s (multi-station)", ", ".join(config.STATION_FREQS))
+    else:
+        log.info("  Frequency:  %s", config.FM_FREQUENCY)
     log.info("  Publish:    %s (raw: %s)", config.PUBLISH_MODE, config.PUBLISH_RAW)
     log.info("  Retention:  %d days", config.EVENT_RETENTION_DAYS)
     log.info("  Web UI:     port %d", config.WEB_UI_PORT)
@@ -1325,18 +1412,52 @@ def main():
     if transcriber_instance:
         transcriber_instance.start()
 
-    recorder = AudioRecorder(
-        audio_dir=config.AUDIO_DIR,
-        transcriber=transcriber_instance,
-        on_transcription_complete=_on_transcription_complete,
-        max_duration_sec=config.MAX_RECORDING_SEC,
-    )
-    log.info("Audio recording enabled → %s", config.AUDIO_DIR)
+    record_types_set = set(t.strip() for t in config.RECORD_EVENT_TYPES.split(","))
 
-    # Wire recorder to rules engine
-    rules_engine._recorder = recorder
-    rules_engine._record_types = set(
-        t.strip() for t in config.RECORD_EVENT_TYPES.split(","))
+    if not config.MULTI_STATION:
+        # Single-station: one recorder, one rules engine (module-level singletons)
+        recorder = AudioRecorder(
+            audio_dir=config.AUDIO_DIR,
+            transcriber=transcriber_instance,
+            on_transcription_complete=_on_transcription_complete,
+            max_duration_sec=config.MAX_RECORDING_SEC,
+        )
+        log.info("Audio recording enabled → %s", config.AUDIO_DIR)
+        # Wire recorder to module-level rules engine
+        rules_engine._recorder = recorder
+        rules_engine._record_types = record_types_set
+        rules_engine.frequency = config.FM_FREQUENCY
+        # Single-station station_configs not needed below — set to None
+        station_configs_multi = None
+        callbacks_multi = None
+    else:
+        # Multi-station: one recorder + one RulesEngine per station
+        recorder = None   # pipeline will use per-station recorders
+        station_configs_multi = []
+        callbacks_multi = []
+        for freq in config.STATION_FREQS:
+            rec = AudioRecorder(
+                audio_dir=config.AUDIO_DIR,
+                transcriber=transcriber_instance,
+                on_transcription_complete=_on_transcription_complete,
+                max_duration_sec=config.MAX_RECORDING_SEC,
+            )
+            st_stats = Stats()
+            _station_stats[freq] = st_stats
+            re = RulesEngine(
+                recorder=rec,
+                record_event_types=config.RECORD_EVENT_TYPES,
+                frequency=freq,
+            )
+            station_configs_multi.append({
+                "frequency": freq,
+                "freq_hz": config._parse_freq_hz(freq),
+                "recorder": rec,
+            })
+            callbacks_multi.append(
+                _make_station_callback(freq, re, st_stats)
+            )
+        log.info("Audio recording enabled → %s (multi-station)", config.AUDIO_DIR)
 
     # --- 2. Start web server FIRST — always available ---
     log.info("Starting web server on port %d...", config.WEB_UI_PORT)
@@ -1368,15 +1489,23 @@ def main():
         log.info("MQTT disabled (set MQTT_ENABLED=true in .env to activate)")
 
     # --- 4. Start radio pipeline (with AudioTee + recorder) ---
-    from pipeline import run_pipeline
+    from pipeline import run_pipeline, run_pipeline_multi
 
     _last_stats_log = time.time()
 
-    pipeline_thread = threading.Thread(
-        target=run_pipeline,
-        args=(_on_pipeline_line, pipeline_status, stop_event, recorder),
-        daemon=True,
-    )
+    if not config.MULTI_STATION:
+        pipeline_thread = threading.Thread(
+            target=run_pipeline,
+            args=(_on_pipeline_line, pipeline_status, stop_event, recorder),
+            daemon=True,
+        )
+    else:
+        pipeline_thread = threading.Thread(
+            target=run_pipeline_multi,
+            args=(station_configs_multi, callbacks_multi,
+                  pipeline_status, stop_event),
+            daemon=True,
+        )
     pipeline_thread.start()
 
     # --- 5. Housekeeping threads ---
