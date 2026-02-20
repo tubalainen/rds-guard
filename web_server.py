@@ -126,7 +126,16 @@ async def handle_delete_events(request):
 
 
 async def handle_audio(request):
-    """GET /api/audio/{filename} — serve audio file."""
+    """GET /api/audio/{filename} — serve audio file.
+
+    Serves the complete file in a single response with Accept-Ranges: none.
+    Range requests on OGG/Opus files cause playback to stop at 5-10 seconds
+    in some browsers: the browser requests bytes 0-65535, then makes a second
+    range request starting at byte 65536, which may land in the middle of an
+    OGG page.  The browser's Opus decoder cannot resync from an arbitrary byte
+    offset (unlike VLC), so playback silently stops.  Serving the full file
+    avoids this entirely.
+    """
     import config as cfg
 
     filename = request.match_info["filename"]
@@ -151,10 +160,18 @@ async def handle_audio(request):
     }
     content_type = content_types.get(suffix, "application/octet-stream")
 
-    return web.FileResponse(file_path, headers={
-        "Content-Type": content_type,
-        "Cache-Control": "public, max-age=86400",
-    })
+    body = await asyncio.get_event_loop().run_in_executor(
+        None, file_path.read_bytes
+    )
+    return web.Response(
+        body=body,
+        content_type=content_type,
+        headers={
+            "Content-Length": str(len(body)),
+            "Accept-Ranges": "none",
+            "Cache-Control": "public, max-age=86400",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
