@@ -233,7 +233,18 @@ const Events = (() => {
         if (!iso) return '';
         try {
             const d = new Date(iso + 'Z');
-            return d.toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            const now = new Date();
+            const isToday = d.getFullYear() === now.getFullYear()
+                         && d.getMonth()    === now.getMonth()
+                         && d.getDate()     === now.getDate();
+            const timeStr = d.toLocaleTimeString('sv-SE', {
+                hour: '2-digit', minute: '2-digit', second: '2-digit'
+            });
+            if (isToday) return timeStr;
+            const dateStr = d.toLocaleDateString('sv-SE', {
+                day: 'numeric', month: 'short'
+            });
+            return `${dateStr} ${timeStr}`;
         } catch (e) {
             return iso.substring(11, 19);
         }

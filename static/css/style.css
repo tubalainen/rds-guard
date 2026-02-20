@@ -317,14 +317,18 @@ main {
 
 .event-audio audio {
     width: 100%;
-    height: 36px;
-    border-radius: 6px;
+    height: 40px;
+    border-radius: 8px;
     outline: none;
+    color-scheme: dark;
+    accent-color: var(--accent-blue);
 }
 
 /* Dark theme audio player (Webkit) */
 .event-audio audio::-webkit-media-controls-panel {
-    background: var(--bg-hover);
+    background: #181b26;
+    border: 1px solid var(--border);
+    border-radius: 8px;
 }
 
 /* Pulsing indicator for active events */
