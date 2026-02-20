@@ -86,6 +86,12 @@ const Events = (() => {
                             list.appendChild(renderEventCard(ev, false));
                         }
                     });
+                    // If the playing card's event is on an older page (outside
+                    // the current LIMIT/offset window), re-append it so the
+                    // audio element is not garbage-collected and playback stops.
+                    if (saved && !saved.card.isConnected) {
+                        list.appendChild(saved.card);
+                    }
                     const shown = list.children.length;
                     loadMore.style.display = shown < total ? 'block' : 'none';
                 }
@@ -119,6 +125,11 @@ const Events = (() => {
                     container.appendChild(renderEventCard(ev, true));
                 }
             });
+            // If the event transitioned out of active state during playback,
+            // re-append the card so the audio element is not garbage-collected.
+            if (saved && !saved.card.isConnected) {
+                container.appendChild(saved.card);
+            }
         } catch (e) {
             // Server not reachable
         }
