@@ -15,8 +15,9 @@ const Events = (() => {
      * element from the given container.  Returns { card, eventId } or null.
      */
     function detachPlayingCard(container) {
-        const audio = container.querySelector('audio');
-        if (audio && !audio.paused && !audio.ended) {
+        const audio = Array.from(container.querySelectorAll('audio'))
+                           .find(a => !a.paused && !a.ended);
+        if (audio) {
             const card = audio.closest('.event-card');
             if (card) {
                 const eventId = card.dataset.eventId;
@@ -206,7 +207,7 @@ const Events = (() => {
         // Audio player
         if (ev.audio_url) {
             html += '<div class="event-audio">';
-            html += `<audio controls preload="none" src="${escapeHtml(ev.audio_url)}"></audio>`;
+            html += `<audio controls preload="none" src="${escapeHtml(ev.audio_url)}?v=3"></audio>`;
             html += '</div>';
         }
 
