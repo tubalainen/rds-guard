@@ -54,6 +54,7 @@ COPY config.py /app/config.py
 COPY event_store.py /app/event_store.py
 COPY web_server.py /app/web_server.py
 COPY pipeline.py /app/pipeline.py
+COPY channelizer.py /app/channelizer.py
 COPY rds_guard.py /app/rds_guard.py
 COPY audio_tee.py /app/audio_tee.py
 COPY audio_recorder.py /app/audio_recorder.py
