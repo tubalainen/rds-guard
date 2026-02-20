@@ -169,7 +169,7 @@ async def handle_audio(request):
         headers={
             "Content-Length": str(len(body)),
             "Accept-Ranges": "none",
-            "Cache-Control": "public, max-age=86400",
+            "Cache-Control": "no-store",
         },
     )
 
