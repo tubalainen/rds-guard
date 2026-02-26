@@ -4,6 +4,8 @@ FM radio traffic and emergency monitoring for Sweden. Decodes RDS data from an R
 
 Built for Sveriges Radio P4, Sweden's primary traffic announcement carrier and emergency broadcast channel (VMA).
 
+<img width="1706" height="1392" alt="image" src="https://github.com/user-attachments/assets/f13e254d-0a31-4c74-b32b-f32b9b7c42bd" />
+
 ## What it does
 
 - Tunes to an FM frequency using an RTL-SDR USB dongle
