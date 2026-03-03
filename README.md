@@ -1,6 +1,6 @@
 # RDS Guard
 
-FM radio traffic and emergency monitoring for Sweden. Decodes RDS data from an RTL-SDR dongle, captures traffic announcements and emergency broadcasts, and serves a live web dashboard.
+FM radio traffic and emergency monitoring for Sweden. Decodes RDS data from an RTL-SDR dongle, captures traffic announcements and emergency broadcasts, transcribes the captured audio using OpenAI´s Whisper model, optionally push the transcribed message to MQTT and serves a live web dashboard.
 
 Built for Sveriges Radio P4, Sweden's primary traffic announcement carrier and emergency broadcast channel (VMA).
 
