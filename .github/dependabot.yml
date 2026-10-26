@@ -1,0 +1,34 @@
+version: 2
+
+# Daily update checks for every component type in the repo. Updates within
+# each ecosystem are grouped into a single PR to keep the noise down;
+# security updates are still raised individually as soon as they appear.
+# The 7-day cooldown skips brand-new releases (a common window for hijacked
+# packages/actions); it does not delay security updates.
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: daily
+    cooldown:
+      default-days: 7
+    groups:
+      python:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: daily
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
