@@ -1,0 +1,164 @@
+name: Security scan
+
+# Daily CVE and component check.
+#
+#   python-deps      pip-audit on requirements.txt          (fails on any known CVE)
+#   container-image  Trivy on the published :latest image   (fails on fixable HIGH/CRITICAL CVEs)
+#   repository       Trivy secrets + Dockerfile misconfig   (fails on leaked secrets)
+#   workflows        zizmor audit of GitHub Actions usage   (report only)
+#
+# Findings from the Trivy and zizmor jobs are also uploaded to the
+# repository's Security -> Code scanning tab. A failed scheduled run
+# triggers GitHub's standard workflow-failure notification.
+
+on:
+  schedule:
+    - cron: "17 4 * * *" # daily, 04:17 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TRIVY_VERSION: v0.76.1
+  PIP_AUDIT_VERSION: 2.10.1
+
+jobs:
+  python-deps:
+    name: Python dependencies (pip-audit)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Matches the Python shipped in the debian:bookworm-slim runtime image.
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+
+      - name: Install pip-audit
+        run: python -m pip install --disable-pip-version-check "pip-audit==${PIP_AUDIT_VERSION}"
+
+      - name: Audit requirements.txt
+        run: |
+          set +e
+          pip-audit -r requirements.txt --desc --progress-spinner off -f markdown -o pip-audit.md
+          rc=$?
+          {
+            echo "## pip-audit (requirements.txt)"
+            if [ -s pip-audit.md ]; then cat pip-audit.md; else echo "No known vulnerabilities found."; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+  container-image:
+    name: Container image (Trivy)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}:latest
+      TRIVY_USERNAME: ${{ github.actor }}
+      TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Scan image (SARIF, all severities)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: image
+          image-ref: ${{ env.IMAGE }}
+          scanners: vuln
+          format: sarif
+          output: trivy-image.sarif
+
+      - name: Upload SARIF to code scanning
+        if: always() && hashFiles('trivy-image.sarif') != ''
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-container-image
+
+      # Gate: fail only on HIGH/CRITICAL CVEs that have a fix available,
+      # i.e. ones a rebuild or dependency bump would actually resolve.
+      - name: Fail on fixable HIGH/CRITICAL CVEs
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          skip-setup-trivy: true
+          scan-type: image
+          image-ref: ${{ env.IMAGE }}
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+          exit-code: "1"
+
+  repository:
+    name: Repository secrets and misconfig (Trivy)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Scan repository (SARIF)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: fs
+          scan-ref: .
+          scanners: secret,misconfig
+          format: sarif
+          output: trivy-repo.sarif
+
+      - name: Upload SARIF to code scanning
+        if: always() && hashFiles('trivy-repo.sarif') != ''
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: trivy-repo.sarif
+          category: trivy-repository
+
+      - name: Fail on committed secrets
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          skip-setup-trivy: true
+          scan-type: fs
+          scan-ref: .
+          scanners: secret
+          format: table
+          exit-code: "1"
+
+  workflows:
+    name: GitHub Actions workflows (zizmor)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Uploads findings (unpinned actions, template injection, excessive
+      # permissions, known-vulnerable action versions, ...) to code scanning.
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@53290badfa369cb0bf7ad16342cb62c2fa47ac7b # v0.8.0
