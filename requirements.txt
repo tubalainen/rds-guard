@@ -1,5 +1,5 @@
-paho-mqtt>=2.0.0,<3.0.0
-aiohttp>=3.9.0,<4.0.0
-faster-whisper>=1.0.0
-requests>=2.31.0
-numpy>=1.24.0
+paho-mqtt>=2.1.0,<3.0.0
+aiohttp>=3.14.5,<4.0.0
+faster-whisper>=1.2.1
+requests>=2.34.2
+numpy>=2.5.4
