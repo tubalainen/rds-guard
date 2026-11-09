@@ -12,6 +12,11 @@ updates:
       interval: daily
     cooldown:
       default-days: 7
+    ignore:
+      # numpy 2.5+ needs Python >= 3.12; the debian:bookworm-slim image ships
+      # Python 3.11. Drop this when the base image moves to a newer Debian.
+      - dependency-name: numpy
+        versions: [">=2.5"]
     groups:
       python:
         patterns: ["*"]
