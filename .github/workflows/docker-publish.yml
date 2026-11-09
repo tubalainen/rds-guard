@@ -4,7 +4,17 @@ on:
   push:
     branches: [master]
     tags: ["v*"]
+  # Weekly rebuild so the published image picks up Debian/Python security
+  # fixes even when the code hasn't changed.
+  schedule:
+    - cron: "41 5 * * 1" # Mondays, 05:41 UTC
   workflow_dispatch:
+
+# Queue runs instead of running them side by side, so an older build can
+# never finish last and overwrite :latest.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
@@ -68,3 +78,7 @@ jobs:
           build-args: BUILD_VERSION=${{ steps.version.outputs.value }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          pull: true
+          # Scheduled rebuilds skip the layer cache, otherwise the cached
+          # apt-get layer would keep shipping the old packages.
+          no-cache: ${{ github.event_name == 'schedule' }}

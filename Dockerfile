@@ -31,7 +31,10 @@ RUN git clone --depth 1 https://github.com/windytan/redsea.git /tmp/redsea \
 # ================================================================
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Upgrade first so the image picks up Debian security fixes that are newer
+# than the base image snapshot.
+RUN apt-get update && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
         rtl-sdr \
         librtlsdr0 \
         libusb-1.0-0 \
