@@ -607,6 +607,12 @@ and merge it, or run Actions → **Release** → *Run workflow* with a version.
 Either way the `Release` workflow tags `master`, publishes a GitHub release
 with generated release notes, and builds both images for that version.
 
+To add hand-written notes, such as upgrade steps, put them in
+`docs/release-notes/<version>.md` (e.g. `docs/release-notes/v0.3.0.md`) in the
+same pull request. They appear above the generated notes. A notes file added
+later for a release that already exists is put at the top of that release's
+text once, when it reaches `master`.
+
 ### View logs
 
 ```bash
