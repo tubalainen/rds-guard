@@ -435,9 +435,10 @@ docker compose down && docker compose build --no-cache && docker compose up -d &
 
 ### Releasing
 
-Actions → **Release** → *Run workflow* with a version such as `v0.3.0`. It
-tags the current `master`, publishes a GitHub release with generated release
-notes, and builds both images for that version.
+Change `RELEASE_VERSION` to the new version (e.g. `v0.3.0`) in a pull request
+and merge it, or run Actions → **Release** → *Run workflow* with a version.
+Either way the `Release` workflow tags `master`, publishes a GitHub release
+with generated release notes, and builds both images for that version.
 
 ### View logs
 
