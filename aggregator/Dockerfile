@@ -14,8 +14,9 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 # the web UI's base theme
 COPY transcriber.py /app/transcriber.py
 COPY static/css/style.css /app/static/css/style.css
-COPY aggregator/ /app/aggregator/
-RUN rm -f /app/aggregator/Dockerfile /app/aggregator/requirements.txt
+# Code and UI only — never .env, compose files or local data
+COPY aggregator/*.py /app/aggregator/
+COPY aggregator/static/ /app/aggregator/static/
 
 # Runs as an unprivileged user: the ingest API faces the internet
 RUN useradd --system --uid 10001 --home-dir /data rdsagg \

@@ -21,8 +21,33 @@ updates:
       python:
         patterns: ["*"]
 
+  - package-ecosystem: pip
+    directory: /aggregator
+    schedule:
+      interval: daily
+    cooldown:
+      default-days: 7
+    groups:
+      python-aggregator:
+        patterns: ["*"]
+
   - package-ecosystem: docker
     directory: /
+    schedule:
+      interval: daily
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: docker
+    directory: /aggregator
+    schedule:
+      interval: daily
+    cooldown:
+      default-days: 7
+
+  # nginx and cloudflared images in aggregator/docker-compose.yml
+  - package-ecosystem: docker-compose
+    directory: /aggregator
     schedule:
       interval: daily
     cooldown:

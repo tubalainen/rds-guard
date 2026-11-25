@@ -1,0 +1,9 @@
+# Keep secrets and local data out of the build context
+**/.env
+**/*.db
+rds-data/
+aggregator-data/
+.git/
+.github/
+tests/
+**/__pycache__/

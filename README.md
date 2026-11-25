@@ -16,6 +16,7 @@ Built for Sveriges Radio P4, Sweden's primary traffic announcement carrier and e
 - Stores events in a local SQLite database with 30-day retention
 - Serves a dark-themed web dashboard with live event feed, audio playback, and transcriptions
 - Optionally forwards events and decoded data to an MQTT broker for Home Assistant or other automation
+- Optionally reports to a central [aggregator](aggregator/README.md) that collects events from several installations (see [Run as a satellite](#run-as-a-satellite))
 
 ## Architecture
 
@@ -394,6 +395,10 @@ rds-guard/
 ├── transcriber.py        # Whisper STT (local faster-whisper or remote ASR)
 ├── status.py             # Status snapshot (/api/status + uplink heartbeat)
 ├── uplink.py             # Satellite → aggregator sender (outbox + heartbeat)
+├── docs/
+│   └── uplink-protocol.md # Satellite ↔ aggregator protocol
+├── aggregator/           # Aggregator service (separate container, see its README)
+├── tests/                # pytest suite (pip install -r requirements-dev.txt; pytest)
 ├── event_store.py        # SQLite wrapper
 ├── web_server.py         # aiohttp REST API + WebSocket + static serving
 └── static/
@@ -505,7 +510,8 @@ Events in the database and web UI are always tagged with `frequency` and `statio
 ## Run as a satellite
 
 An installation can also report to a central **aggregator** that collects
-traffic announcements from several places. You keep everything locally (your
+traffic announcements from several places (see
+[aggregator/README.md](aggregator/README.md) for running one). You keep everything locally (your
 own events, audio, transcriptions, web UI and MQTT); the uplink only adds a
 copy that is sent to the aggregator.
 

@@ -2,8 +2,8 @@ name: Security scan
 
 # Daily CVE and component check.
 #
-#   python-deps      pip-audit on requirements.txt          (fails on any known CVE)
-#   container-image  Trivy on the published :latest image   (fails on fixable HIGH/CRITICAL CVEs)
+#   python-deps      pip-audit on each requirements.txt     (fails on any known CVE)
+#   container-image  Trivy on the published :latest images  (fails on fixable HIGH/CRITICAL CVEs)
 #   repository       Trivy secrets + Dockerfile misconfig   (fails on leaked secrets)
 #   workflows        zizmor audit of GitHub Actions usage   (report only)
 #
@@ -28,45 +28,65 @@ env:
 
 jobs:
   python-deps:
-    name: Python dependencies (pip-audit)
+    name: Python dependencies (pip-audit, ${{ matrix.name }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Python versions match the ones shipped in each runtime image
+          - name: satellite
+            requirements: requirements.txt
+            python: "3.11"
+          - name: aggregator
+            requirements: aggregator/requirements.txt
+            python: "3.12"
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      # Matches the Python shipped in the debian:bookworm-slim runtime image.
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python }}
 
       - name: Install pip-audit
         run: python -m pip install --disable-pip-version-check "pip-audit==${PIP_AUDIT_VERSION}"
 
-      - name: Audit requirements.txt
+      - name: Audit ${{ matrix.requirements }}
+        env:
+          REQUIREMENTS: ${{ matrix.requirements }}
         run: |
           set +e
-          pip-audit -r requirements.txt --desc --progress-spinner off -f markdown -o pip-audit.md
+          pip-audit -r "$REQUIREMENTS" --desc --progress-spinner off -f markdown -o pip-audit.md
           rc=$?
           {
-            echo "## pip-audit (requirements.txt)"
+            echo "## pip-audit ($REQUIREMENTS)"
             if [ -s pip-audit.md ]; then cat pip-audit.md; else echo "No known vulnerabilities found."; fi
           } >> "$GITHUB_STEP_SUMMARY"
           exit $rc
 
   container-image:
-    name: Container image (Trivy)
+    name: Container image (Trivy, ${{ matrix.name }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: read
       security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: satellite
+            image: ghcr.io/${{ github.repository }}:latest
+          - name: aggregator
+            image: ghcr.io/${{ github.repository }}-aggregator:latest
     env:
-      IMAGE: ghcr.io/${{ github.repository }}:latest
+      IMAGE: ${{ matrix.image }}
       TRIVY_USERNAME: ${{ github.actor }}
       TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -90,7 +110,7 @@ jobs:
         uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: trivy-image.sarif
-          category: trivy-container-image
+          category: trivy-container-image-${{ matrix.name }}
 
       # Gate: fail only on HIGH/CRITICAL CVEs that have a fix available,
       # i.e. ones a rebuild or dependency bump would actually resolve.
