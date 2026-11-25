@@ -545,10 +545,13 @@ Pull the latest image and restart (preserves event history):
 docker compose down && docker compose pull && docker compose up -d && docker compose logs -f
 ```
 
-Clean restart from scratch (wipes the event database):
+Clean restart from scratch (deletes the event database, audio and all other
+data in `./rds-data`). The data is in a bind-mounted folder, so
+`docker compose down -v` does not remove it; delete the folder instead. The
+container writes its files as root, so this needs `sudo`:
 
 ```bash
-docker compose down -v && docker compose pull && docker compose up -d && docker compose logs -f
+docker compose down && sudo rm -rf ./rds-data && docker compose pull && docker compose up -d && docker compose logs -f
 ```
 
 If building locally (with `build: .` in docker-compose.yml):
