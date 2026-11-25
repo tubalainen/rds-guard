@@ -9,7 +9,7 @@
     "repository": {
       "url": "https://github.com/tubalainen/rds-guard",
       "provider": "github",
-      "revision": "e2f0f0993506aabfd677ccdf7b79af6873ef1e3f"
+      "revision": "5257d568afed99f78363351751048cc13410c796"
     }
   },
   "layout": {
@@ -133,8 +133,8 @@
         },
         {
           "path": "config.py",
-          "line": 137,
-          "end_line": 146
+          "line": 159,
+          "end_line": 168
         }
       ],
       "row": 1,
@@ -199,7 +199,7 @@
       "id": "agg_pipeline",
       "type": "backend",
       "label": "Processing",
-      "sublabel": "Whisper, alerts",
+      "sublabel": "transcription, alerts",
       "sources": [
         {
           "path": "aggregator/pipeline.py",
@@ -279,6 +279,31 @@
       ],
       "row": 4,
       "col": 3
+    },
+    {
+      "id": "elevenlabs",
+      "type": "cloud",
+      "label": "ElevenLabs Scribe",
+      "sublabel": "speech-to-text API",
+      "sources": [
+        {
+          "path": "transcriber.py",
+          "line": 272,
+          "end_line": 306
+        },
+        {
+          "path": "transcriber.py",
+          "line": 224,
+          "end_line": 238
+        },
+        {
+          "path": "aggregator/config.py",
+          "line": 63,
+          "end_line": 63
+        }
+      ],
+      "row": 4,
+      "col": 4
     }
   ],
   "boundaries": [
@@ -381,6 +406,12 @@
       "from": "agg_store",
       "to": "agg_web",
       "label": "query"
+    },
+    {
+      "id": "pipeline-elevenlabs",
+      "from": "agg_pipeline",
+      "to": "elevenlabs",
+      "label": "audio → text"
     }
   ],
   "cards": [
@@ -388,7 +419,7 @@
       "dot": "emerald",
       "title": "Satellite (standalone without UPLINK_URL)",
       "items": [
-        "Keeps its own events, audio, Whisper transcriptions and optional MQTT",
+        "Keeps its own events, audio, transcriptions and optional MQTT; transcribes with ElevenLabs or the bundled KB-Whisper",
         "Uplink sends event metadata, OGG audio and a 30 s heartbeat over HTTPS with a node token; never transcriptions",
         "Only outbound HTTPS; queued locally for up to 72 h when offline"
       ]
@@ -398,7 +429,7 @@
       "title": "Aggregator",
       "items": [
         "Only /api/v1/ingest/* is public; nginx answers 404 to everything else",
-        "Transcribes uploaded audio centrally, one MQTT alert per event",
+        "Transcribes uploaded audio centrally with ElevenLabs Scribe; local KB-Whisper (strict) takes over on API errors or without a key; one MQTT alert per event",
         "Web UI, read API and node admin stay on the LAN (no login)"
       ]
     }

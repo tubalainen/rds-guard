@@ -10,7 +10,7 @@ and the aggregator fit together. It is rendered with
 | `rds-guard.architecture.html` | Interactive version: download and open in a browser to click components, follow connections and open the cited source lines |
 | `rds-guard.architecture.json` | Source of both; every component cites the code it describes |
 
-Source references are pinned to commit `e2f0f09`. After an architecture change,
+Source references are pinned to commit `5257d56`. After an architecture change,
 update the JSON (components, connections, `sources` and
 `meta.repository.revision`), then regenerate from the repository root:
 
