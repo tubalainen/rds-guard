@@ -18,11 +18,24 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build-and-push:
+    name: Build ${{ matrix.name }}
     runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Satellite / standalone (the radio decoder)
+          - name: rds-guard
+            image: ghcr.io/${{ github.repository }}
+            dockerfile: Dockerfile
+          # Aggregator (collects events from satellites)
+          - name: rds-guard-aggregator
+            image: ghcr.io/${{ github.repository }}-aggregator
+            dockerfile: aggregator/Dockerfile
 
     permissions:
       contents: read
@@ -51,7 +64,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ matrix.image }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
@@ -71,13 +84,14 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: BUILD_VERSION=${{ steps.version.outputs.value }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
           pull: true
           # Scheduled rebuilds skip the layer cache, otherwise the cached
           # apt-get layer would keep shipping the old packages.

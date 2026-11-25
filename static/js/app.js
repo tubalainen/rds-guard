@@ -106,6 +106,30 @@ const App = (() => {
         };
         pipeEl.title = pipeLabels[pipeState] || 'Pipeline: ' + pipeState;
 
+        // Uplink (only shown in satellite mode)
+        const upEl = document.getElementById('status-uplink');
+        const up = data.uplink;
+        if (up && up.enabled) {
+            const queued = up.queue_depth || 0;
+            const upLabels = {
+                connected: 'uplink',
+                starting: 'uplink…',
+                offline: 'uplink offline',
+                unauthorized: 'uplink: bad token',
+                incompatible: 'uplink: update needed',
+            };
+            let text = upLabels[up.state] || ('uplink: ' + up.state);
+            if (queued > 0) text += ` (${queued} queued)`;
+            document.getElementById('status-uplink-text').textContent = text;
+            upEl.className = 'status-uplink ' + up.state;
+            upEl.title = 'Uplink to aggregator: ' + up.state
+                + (up.last_ok_at ? ' — last delivery ' + up.last_ok_at : '')
+                + (up.last_error ? ' — ' + up.last_error : '');
+            upEl.style.display = '';
+        } else {
+            upEl.style.display = 'none';
+        }
+
         // Version
         const versionEl = document.getElementById('status-version');
         if (data.version) {

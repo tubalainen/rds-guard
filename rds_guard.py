@@ -744,20 +744,7 @@ def _on_transcription_complete(event_id, text, error, duration_sec=None):
 
     # Fetch event context for the retained per-station transcription topic
     try:
-        rows, _ = event_store.query_events(limit=1, offset=0)
-        event = None
-        for r in rows:
-            if r.get("id") == event_id:
-                event = r
-                break
-        if not event:
-            # Direct lookup
-            import sqlite3
-            conn = event_store._conn()
-            row = conn.execute(
-                "SELECT * FROM events WHERE id = ?", (event_id,)
-            ).fetchone()
-            event = dict(row) if row else {}
+        event = event_store.get_event(event_id) or {}
     except Exception:
         event = {}
 
@@ -1274,6 +1261,21 @@ def retention_purge(stop_event):
 
 mqtt_client = None
 
+# Uplink to an aggregator — set by main() in satellite mode, else None
+uplink = None
+
+
+def _uplink_status():
+    """Status fields included in the uplink heartbeat."""
+    import status
+    snap = status.build_status()
+    pipe = snap.get("pipeline") or {}
+    return {
+        "uptime_sec": snap.get("uptime_sec"),
+        "pipeline": {"state": pipe.get("state"), "error": pipe.get("error")},
+        "stations": status.station_list(snap),
+    }
+
 
 # ---------------------------------------------------------------------------
 # MQTT background connector — non-blocking, never delays startup
@@ -1370,7 +1372,7 @@ def _on_pipeline_line(raw_line):
 # ---------------------------------------------------------------------------
 
 def main():
-    global _mqtt_available, _event_loop, _last_stats_log
+    global _mqtt_available, _event_loop, _last_stats_log, uplink
 
     log.info("════════════════════════════════════════════")
     log.info("  RDS Guard starting")
@@ -1389,10 +1391,32 @@ def main():
         log.info("  MQTT host:  %s:%s", config.MQTT_HOST or "(empty)", config.MQTT_PORT)
         log.info("  MQTT user:  %s", config.MQTT_USER or "(none)")
         log.info("  MQTT prefix: %s", config.MQTT_TOPIC_PREFIX)
+    if config.UPLINK_ENABLED:
+        log.info("  Mode:       satellite → %s", config.UPLINK_URL)
+        log.info("  Node name:  %s", config.NODE_NAME or "(not set)")
+    else:
+        log.info("  Mode:       standalone (no uplink)")
 
     # --- 1. Initialize event store (fast, ~10ms) ---
     log.info("Initializing event store...")
     event_store.init_db()
+
+    # Satellite mode: queue event changes for the aggregator.  Enabled before
+    # stale events are closed so that their end is forwarded too.
+    if config.UPLINK_ENABLED:
+        from uplink import Uplink
+        uplink = Uplink(
+            base_url=config.UPLINK_URL,
+            token=config.UPLINK_TOKEN,
+            audio_dir=config.AUDIO_DIR,
+            node_name=config.NODE_NAME,
+            version=config.BUILD_VERSION,
+            status_fn=_uplink_status,
+            heartbeat_sec=config.UPLINK_HEARTBEAT_SEC,
+            max_age_hours=config.UPLINK_MAX_AGE_HOURS,
+        )
+        event_store.enable_outbox(uplink.notify)
+
     event_store.close_stale_events()
 
     stop_event = threading.Event()
@@ -1525,6 +1549,10 @@ def main():
         target=retention_purge, args=(stop_event,), daemon=True
     )
     purge_thread.start()
+
+    # Uplink worker + heartbeat (satellite mode only)
+    if uplink:
+        uplink.start(stop_event)
 
     # --- 6. Signal handling + main thread wait ---
     def shutdown(signum, frame):

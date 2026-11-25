@@ -62,6 +62,8 @@ COPY rds_guard.py /app/rds_guard.py
 COPY audio_tee.py /app/audio_tee.py
 COPY audio_recorder.py /app/audio_recorder.py
 COPY transcriber.py /app/transcriber.py
+COPY status.py /app/status.py
+COPY uplink.py /app/uplink.py
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
