@@ -4,19 +4,11 @@ Collects traffic announcements and emergency broadcasts from several
 [RDS Guard](../README.md) installations, called **satellites**, run by friends
 at different places, each with its own RTL-SDR and local P4 station.
 
-```
- Satellite (Karlstad)   Satellite (Luleå)   Satellite (…)
-        │ HTTPS               │                   │       outbound only
-        └──────────────┬──────┴───────────────────┘
-                       ▼
-          Cloudflare  →  nginx  (only /api/v1/ingest/*)
-                       ▼
-        ┌──────── aggregator ────────────────────────┐
-        │ ingest API :8081   SQLite + audio          │
-        │ Whisper (central)  MQTT (all stations)     │
-        │ web UI + read API :8080  (LAN only)        │
-        └────────────────────────────────────────────┘
-```
+![RDS Guard architecture: satellites send events and audio over HTTPS through Cloudflare and nginx to the aggregator's ingest API, which stores them, transcribes the audio and publishes MQTT alerts](../docs/architecture/rds-guard.architecture.svg)
+
+The diagram shows one satellite; any number can report to the same
+aggregator. An [interactive version](../docs/architecture/README.md) links
+each component to its source code.
 
 Satellites send raw data only: event metadata (station, RadioText,
 timestamps), the recorded audio (OGG/Opus) and a status heartbeat. The
@@ -122,11 +114,13 @@ rotate it instead.
 
 ### Instructions for the satellite owner
 
-Send your friend these steps.
+Send your friend the three lines and a link to
+[Run as a satellite](../README.md#run-as-a-satellite) in the main README. In
+short:
 
 1. Install RDS Guard by following its [Quick start](../README.md#quick-start),
-   with the frequency of your local P4 station.
-2. Add the three lines you got to `.env`:
+   with the frequency of the local P4 station, and check that it decodes.
+2. Add the three lines to `.env`:
 
 ```bash
 UPLINK_URL=https://rds.example.com
@@ -134,15 +128,11 @@ UPLINK_TOKEN=…
 NODE_NAME=Kalle, Karlstad
 ```
 
-3. Restart:
+3. Restart with `docker compose up -d`.
 
-```bash
-docker compose up -d
-```
-
-The status bar of the satellite's web UI shows `uplink` in green when it is
-connected, and the node turns green under **Nodes** on the aggregator within
-a minute. No ports need to be opened at the satellite.
+The satellite's status bar shows `uplink` in green when it is connected, and
+the node turns green under **Nodes** here within a minute. No ports need to be
+opened at the satellite.
 
 ## Configuration
 
