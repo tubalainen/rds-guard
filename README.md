@@ -205,6 +205,16 @@ Recorded audio is transcribed using Whisper for searchable text. Three engine mo
 
 > **Local vs Remote:** Local transcription works out of the box but uses significant CPU/RAM (especially larger models). For Raspberry Pi or low-power hosts, use `TRANSCRIPTION_ENGINE=remote` with a [whisper-asr-webservice](https://github.com/ahmetoner/whisper-asr-webservice) container running on a more powerful machine, or set `TRANSCRIPTION_ENGINE=none` to disable transcription while still recording audio.
 
+### Uplink to an aggregator (optional)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `UPLINK_URL` | | Aggregator address. Empty = standalone (see [Run as a satellite](#run-as-a-satellite)) |
+| `UPLINK_TOKEN` | | Node token from the aggregator's owner |
+| `NODE_NAME` | | Your name or place, shown on the aggregator |
+| `UPLINK_HEARTBEAT_SEC` | `30` | Seconds between status reports |
+| `UPLINK_MAX_AGE_HOURS` | `72` | Unsent items older than this are dropped |
+
 ## Web UI
 
 The dashboard has two views:
@@ -382,6 +392,8 @@ rds-guard/
 ├── audio_tee.py          # PCM stream splitter (rtl_fm → redsea + recorder)
 ├── audio_recorder.py     # Recording lifecycle, ffmpeg conversion
 ├── transcriber.py        # Whisper STT (local faster-whisper or remote ASR)
+├── status.py             # Status snapshot (/api/status + uplink heartbeat)
+├── uplink.py             # Satellite → aggregator sender (outbox + heartbeat)
 ├── event_store.py        # SQLite wrapper
 ├── web_server.py         # aiohttp REST API + WebSocket + static serving
 └── static/
@@ -489,6 +501,46 @@ Events in the database and web UI are always tagged with `frequency` and `statio
 - `FM_FREQUENCIES` unset → single-station mode using `FM_FREQUENCY` (unchanged)
 - `FM_FREQUENCIES` with exactly 1 value → also single-station mode
 - `FM_FREQUENCIES` with 2–4 values → wideband multi-station mode
+
+## Run as a satellite
+
+An installation can also report to a central **aggregator** that collects
+traffic announcements from several places. You keep everything locally (your
+own events, audio, transcriptions, web UI and MQTT); the uplink only adds a
+copy that is sent to the aggregator.
+
+Ask the aggregator's owner for an address and a node token, then add to `.env`:
+
+```bash
+UPLINK_URL=https://rds.example.com
+UPLINK_TOKEN=paste-your-token-here
+NODE_NAME=Kalle, Karlstad
+```
+
+Restart the container. The status bar shows the uplink state, and `GET
+/api/status` includes an `uplink` object.
+
+What is sent:
+
+- each traffic announcement and emergency broadcast: station (PI, PS),
+  frequency, programme type, RadioText, start and end time
+- the recorded audio of each event (OGG/Opus, about 0.7 MB per 2 minutes)
+- a status report every 30 seconds: station, decode rate, pipeline health and
+  software version
+
+Transcriptions are **not** sent. The aggregator transcribes the audio itself.
+
+The satellite only makes outbound HTTPS requests, so no ports need to be
+opened. If the aggregator or your internet connection is down, everything is
+queued locally and sent once it is back, for up to `UPLINK_MAX_AGE_HOURS`.
+The protocol is described in [docs/uplink-protocol.md](docs/uplink-protocol.md).
+
+| Status bar | Meaning |
+|---|---|
+| `uplink` (green) | Connected |
+| `uplink offline` | Aggregator unreachable; data is queued |
+| `uplink: bad token` | Token wrong or node disabled; ask the aggregator's owner |
+| `uplink: update needed` | Your RDS Guard version is not supported by the aggregator |
 
 ## Multiple RTL-SDR dongles
 

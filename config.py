@@ -129,3 +129,32 @@ TRANSCRIPTION_DEVICE = os.environ.get("TRANSCRIPTION_DEVICE", "cpu")
 # Remote engine settings (only used when TRANSCRIPTION_ENGINE=remote)
 WHISPER_REMOTE_URL = os.environ.get("WHISPER_REMOTE_URL", "")
 WHISPER_REMOTE_TIMEOUT = _int(os.environ.get("WHISPER_REMOTE_TIMEOUT"), 120)
+
+# --- Uplink (satellite mode, optional) ---
+# Set UPLINK_URL + UPLINK_TOKEN to forward events, their audio and a periodic
+# status heartbeat to an RDS Guard aggregator.  Leave UPLINK_URL empty to run
+# standalone (the default).  Everything keeps working locally either way.
+UPLINK_URL = os.environ.get("UPLINK_URL", "").strip().rstrip("/")
+UPLINK_TOKEN = os.environ.get("UPLINK_TOKEN", "").strip()
+# Free-text name shown on the aggregator next to this node's reports
+NODE_NAME = os.environ.get("NODE_NAME", "").strip()
+UPLINK_HEARTBEAT_SEC = max(10, _int(os.environ.get("UPLINK_HEARTBEAT_SEC"), 30))
+# Queued items older than this are dropped instead of delivered late
+UPLINK_MAX_AGE_HOURS = max(1, _int(os.environ.get("UPLINK_MAX_AGE_HOURS"), 72))
+
+UPLINK_ENABLED: bool = bool(UPLINK_URL)
+if UPLINK_ENABLED:
+    if not UPLINK_URL.lower().startswith(("http://", "https://")):
+        print(
+            f"ERROR: UPLINK_URL must start with http:// or https:// "
+            f"(got '{UPLINK_URL}'). Aborting.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not UPLINK_TOKEN:
+        print(
+            "ERROR: UPLINK_URL is set but UPLINK_TOKEN is empty. Ask the "
+            "aggregator's owner for a node token. Aborting.",
+            file=sys.stderr,
+        )
+        sys.exit(1)

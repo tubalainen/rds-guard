@@ -93,54 +93,8 @@ async def handle_events_active(request):
 
 async def handle_status(request):
     """GET /api/status — decoder status."""
-    import time
-    snap = _stats.snapshot()
-    snap["mqtt_connected"] = _mqtt_connected.is_set() if _mqtt_connected else False
-
-    import config as cfg
-    import rds_guard as rg
-
-    if _pipeline_status:
-        snap["pipeline"] = _pipeline_status.snapshot()
-    else:
-        snap["pipeline"] = {"state": "unknown"}
-
-    snap["version"] = cfg.BUILD_VERSION
-    snap["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
-
-    if cfg.MULTI_STATION:
-        # Multi-station: return a stations[] array keyed by configured frequency
-        si = _station_info.snapshot()
-        stations = []
-        for freq in cfg.STATION_FREQS:
-            pi = rg._freq_to_pi.get(freq)
-            info = si.get(pi, {}) if pi else {}
-            st_stats = rg._station_stats.get(freq)
-            st_snap = st_stats.snapshot() if st_stats else {"groups_per_sec": 0.0, "groups_total": 0}
-            stations.append({
-                "frequency": freq,
-                "pi": pi,
-                "ps": info.get("ps"),
-                "long_ps": info.get("long_ps"),
-                "prog_type": info.get("prog_type"),
-                "tp": info.get("tp"),
-                "ta": info.get("ta"),
-                "radiotext": info.get("radiotext"),
-                "groups_per_sec": st_snap["groups_per_sec"],
-                "groups_total": st_snap["groups_total"],
-            })
-        snap["stations"] = stations
-    else:
-        # Single-station: original flat structure
-        snap["frequency"] = cfg.FM_FREQUENCY
-        si = _station_info.snapshot()
-        if si:
-            primary = next(iter(si.values()))
-            snap["station"] = primary
-        else:
-            snap["station"] = None
-
-    return web.json_response(snap)
+    import status
+    return web.json_response(status.build_status())
 
 
 async def handle_delete_events(request):
