@@ -545,10 +545,13 @@ Pull the latest image and restart (preserves event history):
 docker compose down && docker compose pull && docker compose up -d && docker compose logs -f
 ```
 
-Clean restart from scratch (wipes the event database):
+Clean restart from scratch (deletes the event database, audio and all other
+data in `./rds-data`). The data is in a bind-mounted folder, so
+`docker compose down -v` does not remove it; delete the folder instead. The
+container writes its files as root, so this needs `sudo`:
 
 ```bash
-docker compose down -v && docker compose pull && docker compose up -d && docker compose logs -f
+docker compose down && sudo rm -rf ./rds-data && docker compose pull && docker compose up -d && docker compose logs -f
 ```
 
 If building locally (with `build: .` in docker-compose.yml):
@@ -556,6 +559,46 @@ If building locally (with `build: .` in docker-compose.yml):
 ```bash
 docker compose down && docker compose build --no-cache && docker compose up -d && docker compose logs -f
 ```
+
+### Upgrading from v0.1.3 to v0.2.x
+
+v0.2.x is a drop-in upgrade for a standalone install. Satellite mode is
+optional and **off by default**: if you don't set `UPLINK_URL`, RDS Guard runs
+exactly as before, and nothing is sent anywhere. You don't need to change
+`.env` or `docker-compose.yml`, and your existing events, audio and
+transcriptions are kept.
+
+1. **Back up your data (recommended):**
+   ```bash
+   docker compose down
+   cp -a rds-data rds-data.backup-0.1.3
+   ```
+2. **Pull the new image and start again:**
+   ```bash
+   docker compose pull
+   docker compose up -d
+   ```
+   If you build locally (`build: .`), run `git pull` and then
+   `docker compose up -d --build` instead.
+3. **Check the log** with `docker compose logs -f rds-guard`. You should see
+   `Mode: standalone (no uplink)`. The web UI footer shows the new version.
+
+On first start the database in `rds-data/events.db` is migrated
+automatically. A new `event_uid` column and an empty `outbox` table are added,
+and existing rows are not changed. The outbox is only used in satellite mode.
+
+**Pinning a version:** `ghcr.io/tubalainen/rds-guard:latest` follows
+`master`. To stay on a release, set the image to
+`ghcr.io/tubalainen/rds-guard:0.2.1` (or `:0.2` to get 0.2.x patch releases).
+
+**Rolling back:** set the image to `ghcr.io/tubalainen/rds-guard:0.1.3`, and
+restore `rds-data.backup-0.1.3` if you want the database exactly as it was.
+v0.1.3 ignores the added column and table, so it also runs on the migrated
+database.
+
+**Joining an aggregator** is a separate, optional step after the upgrade. See
+[Run as a satellite](#run-as-a-satellite). Only events recorded after the
+uplink is turned on are sent. Older events and transcriptions are not.
 
 ### Releasing
 
