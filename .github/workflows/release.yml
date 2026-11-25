@@ -7,11 +7,17 @@ name: Release
 # Two ways to release:
 #   - change RELEASE_VERSION (e.g. to v0.3.0) in a pull request and merge it
 #   - Actions tab → Release → Run workflow, with a version
+#
+# Hand-written notes: put them in docs/release-notes/<version>.md (e.g.
+# docs/release-notes/v0.2.2.md). They are placed above the generated notes
+# when the release is created. Adding a notes file for a release that already
+# exists puts it at the top of that release's text, once (a marker comment
+# keeps later runs from adding it again).
 
 on:
   push:
     branches: [master]
-    paths: [RELEASE_VERSION]
+    paths: [RELEASE_VERSION, "docs/release-notes/**"]
   workflow_dispatch:
     inputs:
       version:
@@ -74,11 +80,48 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
+          NOTES_ARGS=()
+          if [ -f "docs/release-notes/$VERSION.md" ]; then
+            {
+              echo "<!-- release-notes: docs/release-notes/$VERSION.md -->"
+              cat "docs/release-notes/$VERSION.md"
+            } > "$RUNNER_TEMP/notes.md"
+            NOTES_ARGS=(--notes-file "$RUNNER_TEMP/notes.md")
+          fi
           gh release create "$VERSION" \
             --repo "$REPO" \
             --target "$TARGET" \
             --title "$VERSION" \
-            --generate-notes
+            --generate-notes \
+            "${NOTES_ARGS[@]}"
+
+      # Put hand-written notes at the top of releases that already existed
+      # when their notes file was added. Runs once per release (marker).
+      - name: Add notes files to existing releases
+        if: github.event_name == 'push'
+        run: |
+          shopt -s nullglob
+          for f in docs/release-notes/v*.md; do
+            v="$(basename "$f" .md)"
+            marker="<!-- release-notes: $f -->"
+            body="$(gh release view "$v" --repo "$REPO" --json body --jq .body 2>/dev/null)" || {
+              echo "No release $v yet, skipping $f"
+              continue
+            }
+            if grep -qF "$marker" <<< "$body"; then
+              echo "$v already has $f"
+              continue
+            fi
+            {
+              echo "$marker"
+              cat "$f"
+              echo
+              echo
+              printf '%s\n' "$body"
+            } > "$RUNNER_TEMP/body-$v.md"
+            gh release edit "$v" --repo "$REPO" --notes-file "$RUNNER_TEMP/body-$v.md"
+            echo "Added $f to release $v"
+          done
 
       # Tags created with the workflow token do not trigger other workflows
       # by themselves, so start the image build for the tag explicitly.
