@@ -1,0 +1,68 @@
+name: Release
+
+# Creates a version tag and a GitHub release with generated release notes on
+# the current master, then builds and publishes both Docker images for that
+# version (ghcr.io/<repo>:X.Y.Z and ghcr.io/<repo>-aggregator:X.Y.Z).
+#
+# Start it from the Actions tab ("Run workflow") or through the API.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, e.g. v0.2.0"
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release ${{ inputs.version }}
+    runs-on: ubuntu-latest
+    # Releases are only cut from the default branch
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    permissions:
+      contents: write   # create the tag and the release
+      actions: write    # start the image build for the new tag
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      VERSION: ${{ inputs.version }}
+      TARGET: ${{ github.sha }}
+    steps:
+      - name: Validate version
+        run: |
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version must look like v1.2.3 (got '$VERSION')"
+            exit 1
+          fi
+          if gh release view "$VERSION" --repo "$REPO" >/dev/null 2>&1; then
+            echo "::error::Release $VERSION already exists"
+            exit 1
+          fi
+
+      - name: Create tag and release
+        run: |
+          gh release create "$VERSION" \
+            --repo "$REPO" \
+            --target "$TARGET" \
+            --title "$VERSION" \
+            --generate-notes
+
+      # Tags created with the workflow token do not trigger other workflows
+      # by themselves, so start the image build for the tag explicitly.
+      - name: Build images for the release
+        run: gh workflow run docker-publish.yml --repo "$REPO" --ref "$VERSION"
+
+      - name: Summary
+        run: |
+          {
+            echo "## Released $VERSION"
+            echo "- Release: https://github.com/$REPO/releases/tag/$VERSION"
+            echo "- Image build started for $VERSION (see the 'Build and publish Docker image' workflow)"
+          } >> "$GITHUB_STEP_SUMMARY"

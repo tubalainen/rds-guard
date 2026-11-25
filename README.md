@@ -433,6 +433,12 @@ If building locally (with `build: .` in docker-compose.yml):
 docker compose down && docker compose build --no-cache && docker compose up -d && docker compose logs -f
 ```
 
+### Releasing
+
+Actions → **Release** → *Run workflow* with a version such as `v0.3.0`. It
+tags the current `master`, publishes a GitHub release with generated release
+notes, and builds both images for that version.
+
 ### View logs
 
 ```bash
