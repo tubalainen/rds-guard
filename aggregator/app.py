@@ -9,12 +9,15 @@ Runs two HTTP servers in one event loop:
 import asyncio
 import logging
 import signal
+import threading
 from pathlib import Path
 
 from aiohttp import web
 
 from . import config, store
 from .ingest import create_ingest_app
+from .mqtt_out import MqttOut
+from .pipeline import Pipeline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,11 +51,40 @@ async def main():
     log.info("════════════════════════════════════════════")
     log.info("  RDS Guard aggregator %s starting", config.BUILD_VERSION)
     log.info("════════════════════════════════════════════")
+    log.info("  Public URL:  %s", config.PUBLIC_URL or "(not set)")
+    log.info("  Transcribe:  %s", config.TRANSCRIPTION_ENGINE)
+    log.info("  MQTT:        %s", "enabled" if config.MQTT_ENABLED else "disabled")
+    log.info("  Retention:   %d days", config.EVENT_RETENTION_DAYS)
     Path(config.AUDIO_DIR).mkdir(parents=True, exist_ok=True)
     store.init_db(config.DB_PATH)
 
+    # Central transcription (shared implementation with the satellite)
+    from transcriber import create_transcriber
+    transcriber = create_transcriber(
+        engine=config.TRANSCRIPTION_ENGINE,
+        language=config.TRANSCRIPTION_LANGUAGE,
+        model_size=config.TRANSCRIPTION_MODEL,
+        device=config.TRANSCRIPTION_DEVICE,
+        remote_url=config.WHISPER_REMOTE_URL,
+        remote_timeout=config.WHISPER_REMOTE_TIMEOUT,
+    )
+    if transcriber:
+        transcriber.start()
+
+    mqtt = None
+    if config.MQTT_ENABLED:
+        mqtt = MqttOut()
+        mqtt.start()
+
+    pipeline = Pipeline(transcriber=transcriber, mqtt=mqtt)
+    pipeline.requeue_pending()
+    stop_threads = threading.Event()
+    threading.Thread(target=pipeline.run, args=(stop_threads,),
+                     daemon=True, name="sweeper").start()
+
     runners = [
-        await _serve(create_ingest_app(), config.INGEST_PORT, "Ingest API"),
+        await _serve(create_ingest_app(pipeline), config.INGEST_PORT,
+                     "Ingest API"),
         await _serve(create_web_app(), config.WEB_PORT, "Web UI"),
     ]
 
@@ -64,8 +96,11 @@ async def main():
     await stop.wait()
 
     log.info("Shutting down...")
+    stop_threads.set()
     for r in runners:
         await r.cleanup()
+    if mqtt:
+        mqtt.stop()
 
 
 if __name__ == "__main__":

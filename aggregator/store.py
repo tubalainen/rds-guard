@@ -359,6 +359,12 @@ def get_event(event_uid):
     return _event_dict(row)
 
 
+def get_event_by_id(event_id):
+    row = _conn().execute(_EVENT_SELECT + " WHERE e.id = ?",
+                          (event_id,)).fetchone()
+    return _event_dict(row)
+
+
 def query_events(event_type=None, pi=None, node=None, since=None,
                  active=None, limit=50, offset=0):
     """Query events. Returns (rows, total). node is a node name."""
