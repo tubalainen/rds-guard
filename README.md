@@ -136,6 +136,109 @@ docker compose logs -f rds-guard
 
 > **Building locally:** To build from source instead of pulling the pre-built image, edit `docker-compose.yml` — comment out the `image:` line and uncomment `build: .`, then run `docker compose up -d --build`.
 
+6. **Optional:** connect the installation to an aggregator. See
+   [Run as a satellite](#run-as-a-satellite).
+
+That's a complete **standalone** installation: everything stays on this host.
+
+## Run as a satellite
+
+A satellite is an ordinary RDS Guard installation that also reports to a
+central **aggregator**, which collects traffic announcements and emergency
+broadcasts from many places. Nothing changes locally: you keep your own events,
+audio, transcriptions, web UI and MQTT. The uplink only adds a copy that is
+sent to the aggregator.
+
+```
+ Your RDS Guard (satellite)                         Aggregator (someone else's server)
+ RTL-SDR → decode → events, audio, UI, MQTT
+                │
+                └── uplink.py ── outbound HTTPS ──→  https://rds.example.com
+                    (queued locally while offline)
+```
+
+### Before you start
+
+1. Get the standalone installation working first ([Quick start](#quick-start)):
+   the web UI shows your station and a decode rate above 5 grp/s.
+2. Ask the aggregator's owner for three values: the aggregator address, a
+   node token, and the name to use for your node. They create the token in the
+   aggregator's web UI (*Nodes → Add node*) and get the lines to send you.
+
+No ports need to be opened on your router: the satellite only makes outbound
+HTTPS requests.
+
+### Connect
+
+1. Add the lines you received to `.env`:
+
+```bash
+UPLINK_URL=https://rds.example.com    # Aggregator address
+UPLINK_TOKEN=paste-your-token-here    # Node token (keep it secret)
+NODE_NAME=Kalle, Karlstad             # Shown on the aggregator
+```
+
+2. Restart the container so it reads the new settings:
+
+```bash
+docker compose up -d
+```
+
+### Check that it works
+
+Within a minute:
+
+- The status bar at the bottom of the web UI shows **`uplink`** in green.
+- The log shows `Mode: satellite` at start-up and then `Uplink connected`:
+
+```bash
+docker compose logs rds-guard | grep -i -E "mode|uplink"
+```
+
+- The status API reports the uplink state and how many items are queued:
+
+```bash
+curl -s http://localhost:8022/api/status | python3 -m json.tool | grep -A6 '"uplink"'
+```
+
+  `"state": "connected"` with `"queue_depth": 0` means everything has been delivered.
+
+- On the aggregator, your node turns green under **Nodes**.
+
+| Status bar | Meaning | What to do |
+|---|---|---|
+| `uplink` (green) | Connected | Nothing |
+| `uplink offline` | Aggregator unreachable; data is queued | Check your internet connection and `UPLINK_URL`; hover over the status for the last error |
+| `uplink: bad token` | Token wrong, rotated or node disabled | Ask the aggregator's owner for a new token |
+| `uplink: update needed` | Your RDS Guard version is not supported by the aggregator | Update: `docker compose pull && docker compose up -d` |
+| *(no uplink shown)* | `UPLINK_URL` is empty | Standalone mode; see [Connect](#connect) |
+
+### What is sent
+
+- Each traffic announcement and emergency broadcast: station (PI, PS),
+  frequency, programme type, RadioText, start and end time.
+- The recorded audio of each event (OGG/Opus, about 0.7 MB per 2 minutes).
+- A status report every 30 seconds: station, decode rate, pipeline health,
+  software version and queue length.
+
+Transcriptions are **not** sent; the aggregator transcribes the audio itself.
+Nothing else leaves your network: no MQTT data, no web UI, no raw RDS stream.
+
+If the aggregator or your internet connection is down, everything is queued
+locally and sent once the connection is back, for up to
+`UPLINK_MAX_AGE_HOURS` (72 hours by default). The protocol is described in
+[docs/uplink-protocol.md](docs/uplink-protocol.md).
+
+### Disconnect
+
+Remove or comment out `UPLINK_URL` in `.env` and run `docker compose up -d`.
+The installation is standalone again; local data is not affected.
+
+### Run the aggregator yourself
+
+To collect events from friends' satellites, run the separate aggregator
+container: see [aggregator/README.md](aggregator/README.md).
+
 ## Configuration
 
 All settings are in the `.env` file:
@@ -465,6 +568,10 @@ curl http://localhost:8022/api/status
 | Events show as "In progress" after restart | Normal — stale events from the previous run | They are automatically closed on startup. Do a clean rebuild with `-v` to clear old data |
 | MQTT not publishing | MQTT disabled or broker unreachable | Set `MQTT_ENABLED=true` in `.env` and verify broker IP/port. Check logs for MQTT connection errors |
 | Low decode rate (< 5 grp/s) | Weak signal or wrong frequency | Try increasing `RTL_GAIN`. Verify `FM_FREQUENCY` matches a nearby P4 transmitter |
+| Container keeps restarting; log shows `UPLINK_URL is set but UPLINK_TOKEN is empty` | Satellite settings incomplete | Add `UPLINK_TOKEN` from the aggregator's owner, or remove `UPLINK_URL` to run standalone |
+| Status bar shows `uplink offline` | Aggregator unreachable, or a proxy/Cloudflare answered instead of it | Hover over the uplink status, or check `docker compose logs rds-guard \| grep -i uplink`. Data stays queued and is sent later |
+| Status bar shows `uplink: bad token` | Token wrong, rotated or node disabled | Ask the aggregator's owner for a new token and update `UPLINK_TOKEN` |
+| `queue_depth` in `/api/status` keeps growing | Uplink cannot deliver | See the two rows above; items older than `UPLINK_MAX_AGE_HOURS` are dropped |
 
 ## Multi-station monitoring
 
@@ -513,47 +620,6 @@ Events in the database and web UI are always tagged with `frequency` and `statio
 - `FM_FREQUENCIES` unset → single-station mode using `FM_FREQUENCY` (unchanged)
 - `FM_FREQUENCIES` with exactly 1 value → also single-station mode
 - `FM_FREQUENCIES` with 2–4 values → wideband multi-station mode
-
-## Run as a satellite
-
-An installation can also report to a central **aggregator** that collects
-traffic announcements from several places (see
-[aggregator/README.md](aggregator/README.md) for running one). You keep everything locally (your
-own events, audio, transcriptions, web UI and MQTT); the uplink only adds a
-copy that is sent to the aggregator.
-
-Ask the aggregator's owner for an address and a node token, then add to `.env`:
-
-```bash
-UPLINK_URL=https://rds.example.com
-UPLINK_TOKEN=paste-your-token-here
-NODE_NAME=Kalle, Karlstad
-```
-
-Restart the container. The status bar shows the uplink state, and `GET
-/api/status` includes an `uplink` object.
-
-What is sent:
-
-- each traffic announcement and emergency broadcast: station (PI, PS),
-  frequency, programme type, RadioText, start and end time
-- the recorded audio of each event (OGG/Opus, about 0.7 MB per 2 minutes)
-- a status report every 30 seconds: station, decode rate, pipeline health and
-  software version
-
-Transcriptions are **not** sent. The aggregator transcribes the audio itself.
-
-The satellite only makes outbound HTTPS requests, so no ports need to be
-opened. If the aggregator or your internet connection is down, everything is
-queued locally and sent once it is back, for up to `UPLINK_MAX_AGE_HOURS`.
-The protocol is described in [docs/uplink-protocol.md](docs/uplink-protocol.md).
-
-| Status bar | Meaning |
-|---|---|
-| `uplink` (green) | Connected |
-| `uplink offline` | Aggregator unreachable; data is queued |
-| `uplink: bad token` | Token wrong or node disabled; ask the aggregator's owner |
-| `uplink: update needed` | Your RDS Guard version is not supported by the aggregator |
 
 ## Multiple RTL-SDR dongles
 
