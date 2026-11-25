@@ -145,12 +145,14 @@ All settings are in `.env`; see [.env.example](.env.example).
 | `WEB_UI_BIND` / `WEB_UI_PORT` | `0.0.0.0` / `8080` | Where the web UI is published on the host. Use `127.0.0.1` on a server with a public address |
 | `NGINX_BIND` / `NGINX_PORT` | `127.0.0.1` / `8088` | Where nginx is published on the host (not needed with the tunnel) |
 | `EVENT_RETENTION_DAYS` | `90` | Delete events and audio older than this |
-| `TRANSCRIPTION_ENGINE` | `local` | `local`, `remote` or `none` (same as on the satellite) |
+| `TRANSCRIPTION_ENGINE` | `local` | `local`, `remote`, `elevenlabs` or `none` (same as on the satellite) |
 | `TRANSCRIPTION_LANGUAGE` | `sv` | Whisper language |
-| `TRANSCRIPTION_MODEL` | *(auto)* | Local model; empty = `KBLab/kb-whisper-small` for Swedish, else `small` |
+| `TRANSCRIPTION_MODEL` | *(auto)* | Local model; empty = bundled KB-Whisper small (strict) for Swedish, else `small` |
 | `TRANSCRIPTION_PROMPT` | | Optional vocabulary hint for Whisper (place names, road numbers) |
 | `TRANSCRIPTION_BEAM_SIZE` | `5` | Beam width; `1` is faster on CPU |
 | `TRANSCRIPTION_CPU_THREADS` | `0` | CPU threads, `0` = automatic |
+| `ELEVENLABS_API_KEY` / `ELEVENLABS_MODEL` / `ELEVENLABS_KEYTERMS` | / `scribe_v3` / | ElevenLabs Scribe settings for `elevenlabs` (see the main README) |
+| `TRANSCRIPTION_FALLBACK` | `local` | On ElevenLabs errors: `local` or `none` |
 | `TRANSCRIPTION_DEVICE` | `cpu` | `cpu` or `cuda` |
 | `WHISPER_REMOTE_URL` | | Remote ASR server for `remote` |
 | `MQTT_ENABLED` | `false` | Publish to MQTT |

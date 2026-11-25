@@ -123,7 +123,8 @@ TRANSCRIPTION_ENGINE = os.environ.get("TRANSCRIPTION_ENGINE", "local")
 TRANSCRIPTION_LANGUAGE = os.environ.get("TRANSCRIPTION_LANGUAGE", "sv")
 
 # Local engine settings (only used when TRANSCRIPTION_ENGINE=local)
-# Empty = automatic: KBLab/kb-whisper-small for Swedish, else "small".
+# Empty = automatic: for Swedish the KB-Whisper small "strict" model bundled
+# in the Docker image (else KBLab/kb-whisper-small from the hub), else "small".
 # Any faster-whisper size (tiny … large-v3, large-v3-turbo) or a Hugging Face
 # CTranslate2 repo id (e.g. KBLab/kb-whisper-medium) works.
 TRANSCRIPTION_MODEL = os.environ.get("TRANSCRIPTION_MODEL", "").strip()
@@ -137,6 +138,17 @@ TRANSCRIPTION_CPU_THREADS = _int(os.environ.get("TRANSCRIPTION_CPU_THREADS"), 0)
 # Remote engine settings (only used when TRANSCRIPTION_ENGINE=remote)
 WHISPER_REMOTE_URL = os.environ.get("WHISPER_REMOTE_URL", "")
 WHISPER_REMOTE_TIMEOUT = _int(os.environ.get("WHISPER_REMOTE_TIMEOUT"), 120)
+
+# ElevenLabs Scribe (only used when TRANSCRIPTION_ENGINE=elevenlabs)
+ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "").strip()
+ELEVENLABS_MODEL = os.environ.get("ELEVENLABS_MODEL", "scribe_v3").strip()
+# Comma-separated words the model should listen for (road numbers, places)
+ELEVENLABS_KEYTERMS = os.environ.get("ELEVENLABS_KEYTERMS", "")
+ELEVENLABS_TIMEOUT = _int(os.environ.get("ELEVENLABS_TIMEOUT"), 60)
+# What to do when the API fails: "local" = transcribe with faster-whisper
+# instead (model loaded on first use), "none" = mark the clip as failed
+TRANSCRIPTION_FALLBACK = os.environ.get(
+    "TRANSCRIPTION_FALLBACK", "local").strip().lower()
 
 # --- Uplink (satellite mode, optional) ---
 # Set UPLINK_URL + UPLINK_TOKEN to forward events, their audio and a periodic

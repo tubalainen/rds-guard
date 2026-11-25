@@ -1435,6 +1435,11 @@ def main():
         initial_prompt=config.TRANSCRIPTION_PROMPT,
         beam_size=config.TRANSCRIPTION_BEAM_SIZE,
         cpu_threads=config.TRANSCRIPTION_CPU_THREADS,
+        elevenlabs_api_key=config.ELEVENLABS_API_KEY,
+        elevenlabs_model=config.ELEVENLABS_MODEL,
+        elevenlabs_keyterms=config.ELEVENLABS_KEYTERMS,
+        elevenlabs_timeout=config.ELEVENLABS_TIMEOUT,
+        fallback=config.TRANSCRIPTION_FALLBACK,
     )
     if transcriber_instance:
         transcriber_instance.start()

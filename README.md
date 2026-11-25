@@ -320,17 +320,24 @@ Recorded audio is transcribed using Whisper for searchable text. Three engine mo
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TRANSCRIPTION_ENGINE` | `local` | `local` = built-in faster-whisper, `remote` = external ASR server, `none` = disable |
+| `TRANSCRIPTION_ENGINE` | `local` | `local` = built-in faster-whisper, `remote` = external ASR server, `elevenlabs` = ElevenLabs Scribe API with local fallback, `none` = disable |
 | `TRANSCRIPTION_LANGUAGE` | `sv` | Language code for Whisper (e.g. `sv`, `en`, `de`) |
-| `TRANSCRIPTION_MODEL` | *(auto)* | Empty = `KBLab/kb-whisper-small` for Swedish, `small` for other languages. Any size (`tiny` … `large-v3`, `large-v3-turbo`) or a Hugging Face CTranslate2 repo such as `KBLab/kb-whisper-medium` (local only) |
+| `TRANSCRIPTION_MODEL` | *(auto)* | Empty = the bundled KB-Whisper small *strict* model for Swedish, `small` for other languages. Any size (`tiny` … `large-v3`, `large-v3-turbo`) or a Hugging Face CTranslate2 repo such as `KBLab/kb-whisper-medium` (local only) |
 | `TRANSCRIPTION_DEVICE` | `cpu` | Compute device: `cpu` or `cuda` (local only) |
 | `TRANSCRIPTION_PROMPT` | | Optional vocabulary hint passed to Whisper, e.g. `Trafikverket, E4, E18, Essingeleden, olycka, kö, körfält` |
 | `TRANSCRIPTION_BEAM_SIZE` | `5` | Beam search width; `1` is roughly twice as fast on CPU at a small accuracy cost (local only) |
 | `TRANSCRIPTION_CPU_THREADS` | `0` | CPU threads for inference, `0` = automatic (local only) |
 | `WHISPER_REMOTE_URL` | | URL of remote Whisper ASR server, e.g. `http://whisper:9000` (remote only) |
 | `WHISPER_REMOTE_TIMEOUT` | `120` | HTTP timeout in seconds for remote ASR requests |
+| `ELEVENLABS_API_KEY` | | ElevenLabs API key (elevenlabs only) |
+| `ELEVENLABS_MODEL` | `scribe_v3` | `scribe_v3` (writes numbers as digits) or `scribe_v2` |
+| `ELEVENLABS_KEYTERMS` | | Comma-separated words to listen for, e.g. `E18, Bergviksmotet, Våxnäsmotet` (max 50 characters / 5 words each; costs 20 % extra) |
+| `ELEVENLABS_TIMEOUT` | `60` | HTTP timeout in seconds |
+| `TRANSCRIPTION_FALLBACK` | `local` | When the ElevenLabs call fails: `local` = transcribe with faster-whisper instead, `none` = mark as failed |
 
-> **Swedish model:** for `TRANSCRIPTION_LANGUAGE=sv` the default is [KB-Whisper](https://huggingface.co/KBLab/kb-whisper-small) from the National Library of Sweden, trained on 50 000+ hours of Swedish. `kb-whisper-small` has about 6–7 % word error rate on Swedish benchmarks versus 20–26 % for OpenAI's `small` (and beats OpenAI's `large-v3`) at the same CPU cost. On a stronger host, `KBLab/kb-whisper-medium` or `KBLab/kb-whisper-large` is more accurate still. Models are cached under `/data/models`.
+> **Swedish model:** for `TRANSCRIPTION_LANGUAGE=sv` the default is [KB-Whisper](https://huggingface.co/KBLab/kb-whisper-small) small from the National Library of Sweden, in its verbatim *strict* style, which the Docker image converts and bundles at build time (`/opt/models`) because KBLab only publishes the default style for faster-whisper. KB-Whisper is trained on 50 000+ hours of Swedish. `kb-whisper-small` has about 6–7 % word error rate on Swedish benchmarks versus 20–26 % for OpenAI's `small` (and beats OpenAI's `large-v3`) at the same CPU cost. On a stronger host, `KBLab/kb-whisper-medium` or `KBLab/kb-whisper-large` is more accurate still. Other models are downloaded once and cached under `/data/models`.
+
+> **ElevenLabs:** on P4 traffic clips Scribe was more complete than local KB-Whisper (fewer dropped place names and details, phone and road numbers right) and took 2–5 s per clip. Audio is sent to ElevenLabs (US processing by default). With the default fallback, a failed call is transcribed locally, so alerts still get text.
 
 > **Local vs Remote:** Local transcription works out of the box but uses significant CPU/RAM (especially larger models). For Raspberry Pi or low-power hosts, use `TRANSCRIPTION_ENGINE=remote` with a [whisper-asr-webservice](https://github.com/ahmetoner/whisper-asr-webservice) container running on a more powerful machine, or set `TRANSCRIPTION_ENGINE=none` to disable transcription while still recording audio.
 
