@@ -4,19 +4,11 @@ Collects traffic announcements and emergency broadcasts from several
 [RDS Guard](../README.md) installations, called **satellites**, run by friends
 at different places, each with its own RTL-SDR and local P4 station.
 
-```
- Satellite (Karlstad)   Satellite (Luleå)   Satellite (…)
-        │ HTTPS               │                   │       outbound only
-        └──────────────┬──────┴───────────────────┘
-                       ▼
-          Cloudflare  →  nginx  (only /api/v1/ingest/*)
-                       ▼
-        ┌──────── aggregator ────────────────────────┐
-        │ ingest API :8081   SQLite + audio          │
-        │ Whisper (central)  MQTT (all stations)     │
-        │ web UI + read API :8080  (LAN only)        │
-        └────────────────────────────────────────────┘
-```
+![RDS Guard architecture: satellites send events and audio over HTTPS through Cloudflare and nginx to the aggregator's ingest API, which stores them, transcribes the audio and publishes MQTT alerts](../docs/architecture/rds-guard.architecture.svg)
+
+The diagram shows one satellite; any number can report to the same
+aggregator. An [interactive version](../docs/architecture/README.md) links
+each component to its source code.
 
 Satellites send raw data only: event metadata (station, RadioText,
 timestamps), the recorded audio (OGG/Opus) and a status heartbeat. The

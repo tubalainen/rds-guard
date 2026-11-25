@@ -1,0 +1,403 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "RDS Guard: satellites and aggregator",
+    "output": "docs/architecture/rds-guard.architecture.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "repository": {
+      "url": "https://github.com/tubalainen/rds-guard",
+      "provider": "github",
+      "revision": "e2f0f0993506aabfd677ccdf7b79af6873ef1e3f"
+    }
+  },
+  "layout": {
+    "mode": "grid",
+    "cols": 8,
+    "cellW": 140,
+    "gapX": 70
+  },
+  "components": [
+    {
+      "id": "decoder",
+      "type": "backend",
+      "label": "Radio decoder",
+      "sublabel": "RTL-SDR, rtl_fm + redsea",
+      "sources": [
+        {
+          "path": "docker-compose.yml",
+          "line": 13,
+          "end_line": 14
+        },
+        {
+          "path": "pipeline.py",
+          "line": 90,
+          "end_line": 133
+        },
+        {
+          "path": "pipeline.py",
+          "line": 491,
+          "end_line": 502
+        }
+      ],
+      "row": 1,
+      "col": 0
+    },
+    {
+      "id": "rules",
+      "type": "backend",
+      "label": "Rules engine",
+      "sublabel": "TA / alarm → events",
+      "sources": [
+        {
+          "path": "rds_guard.py",
+          "line": 260,
+          "end_line": 341
+        },
+        {
+          "path": "rds_guard.py",
+          "line": 1071,
+          "end_line": 1080
+        },
+        {
+          "path": "audio_recorder.py",
+          "line": 118,
+          "end_line": 148
+        }
+      ],
+      "row": 1,
+      "col": 1
+    },
+    {
+      "id": "sat_store",
+      "type": "database",
+      "label": "Event store",
+      "sublabel": "SQLite + outbox",
+      "sources": [
+        {
+          "path": "event_store.py",
+          "line": 76,
+          "end_line": 86
+        },
+        {
+          "path": "event_store.py",
+          "line": 106,
+          "end_line": 127
+        },
+        {
+          "path": "event_store.py",
+          "line": 413,
+          "end_line": 426
+        }
+      ],
+      "row": 1,
+      "col": 2
+    },
+    {
+      "id": "sat_web",
+      "type": "frontend",
+      "label": "Local web UI",
+      "sublabel": ":8022 events, audio",
+      "sources": [
+        {
+          "path": "web_server.py",
+          "line": 50,
+          "end_line": 50
+        },
+        {
+          "path": "web_server.py",
+          "line": 210,
+          "end_line": 230
+        }
+      ],
+      "row": 2,
+      "col": 2
+    },
+    {
+      "id": "uplink",
+      "type": "backend",
+      "label": "Uplink",
+      "sublabel": "queued, in order",
+      "sources": [
+        {
+          "path": "uplink.py",
+          "line": 146,
+          "end_line": 169
+        },
+        {
+          "path": "uplink.py",
+          "line": 229,
+          "end_line": 245
+        },
+        {
+          "path": "config.py",
+          "line": 137,
+          "end_line": 146
+        }
+      ],
+      "row": 1,
+      "col": 3
+    },
+    {
+      "id": "cloudflare",
+      "type": "cloud",
+      "label": "Cloudflare",
+      "sublabel": "Tunnel or proxy",
+      "sources": [
+        {
+          "path": "aggregator/docker-compose.yml",
+          "line": 39,
+          "end_line": 47
+        }
+      ],
+      "row": 1,
+      "col": 4
+    },
+    {
+      "id": "nginx",
+      "type": "security",
+      "label": "nginx",
+      "sublabel": "/api/v1/ingest/* only",
+      "sources": [
+        {
+          "path": "aggregator/nginx/ingest.conf",
+          "line": 27,
+          "end_line": 49
+        }
+      ],
+      "row": 1,
+      "col": 5
+    },
+    {
+      "id": "ingest",
+      "type": "backend",
+      "label": "Ingest API",
+      "sublabel": ":8081, token per node",
+      "sources": [
+        {
+          "path": "aggregator/ingest.py",
+          "line": 418,
+          "end_line": 433
+        },
+        {
+          "path": "aggregator/ingest.py",
+          "line": 329,
+          "end_line": 329
+        },
+        {
+          "path": "aggregator/ingest.py",
+          "line": 367,
+          "end_line": 372
+        }
+      ],
+      "row": 1,
+      "col": 6
+    },
+    {
+      "id": "agg_pipeline",
+      "type": "backend",
+      "label": "Processing",
+      "sublabel": "Whisper, alerts",
+      "sources": [
+        {
+          "path": "aggregator/pipeline.py",
+          "line": 117,
+          "end_line": 146
+        },
+        {
+          "path": "aggregator/pipeline.py",
+          "line": 156,
+          "end_line": 164
+        },
+        {
+          "path": "aggregator/pipeline.py",
+          "line": 225,
+          "end_line": 242
+        }
+      ],
+      "row": 2,
+      "col": 7
+    },
+    {
+      "id": "agg_store",
+      "type": "database",
+      "label": "Aggregator store",
+      "sublabel": "SQLite + audio",
+      "sources": [
+        {
+          "path": "aggregator/store.py",
+          "line": 49,
+          "end_line": 92
+        },
+        {
+          "path": "aggregator/store.py",
+          "line": 263,
+          "end_line": 306
+        }
+      ],
+      "row": 1,
+      "col": 7
+    },
+    {
+      "id": "agg_web",
+      "type": "frontend",
+      "label": "Aggregator UI",
+      "sublabel": ":8080 LAN, read API",
+      "sources": [
+        {
+          "path": "aggregator/api.py",
+          "line": 123,
+          "end_line": 123
+        },
+        {
+          "path": "aggregator/api.py",
+          "line": 271,
+          "end_line": 291
+        }
+      ],
+      "row": 0,
+      "col": 7
+    },
+    {
+      "id": "mqtt",
+      "type": "external",
+      "label": "MQTT broker",
+      "sublabel": "optional, Home Assistant",
+      "sources": [
+        {
+          "path": "aggregator/mqtt_out.py",
+          "line": 61,
+          "end_line": 76
+        },
+        {
+          "path": "aggregator/mqtt_out.py",
+          "line": 81,
+          "end_line": 94
+        }
+      ],
+      "row": 3,
+      "col": 7
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Satellite host (each friend)",
+      "wraps": [
+        "decoder",
+        "rules",
+        "sat_store",
+        "sat_web",
+        "uplink"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "Aggregator host",
+      "wraps": [
+        "nginx",
+        "ingest",
+        "agg_pipeline",
+        "agg_store",
+        "agg_web"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "decoder-rules",
+      "from": "decoder",
+      "to": "rules",
+      "label": "JSON"
+    },
+    {
+      "id": "rules-store",
+      "from": "rules",
+      "to": "sat_store",
+      "label": "events"
+    },
+    {
+      "id": "store-web",
+      "from": "sat_store",
+      "to": "sat_web",
+      "label": "query"
+    },
+    {
+      "id": "store-uplink",
+      "from": "sat_store",
+      "to": "uplink",
+      "label": "outbox"
+    },
+    {
+      "id": "uplink-cloudflare",
+      "from": "uplink",
+      "to": "cloudflare",
+      "label": "HTTPS",
+      "variant": "emphasis"
+    },
+    {
+      "id": "cloudflare-nginx",
+      "from": "cloudflare",
+      "to": "nginx",
+      "label": "tunnel"
+    },
+    {
+      "id": "nginx-ingest",
+      "from": "nginx",
+      "to": "ingest",
+      "label": "proxy"
+    },
+    {
+      "id": "ingest-store",
+      "from": "ingest",
+      "to": "agg_store",
+      "label": "upsert"
+    },
+    {
+      "id": "ingest-pipeline",
+      "from": "ingest",
+      "to": "agg_pipeline",
+      "label": "hooks"
+    },
+    {
+      "id": "pipeline-store",
+      "from": "agg_pipeline",
+      "to": "agg_store",
+      "label": "transcripts"
+    },
+    {
+      "id": "pipeline-mqtt",
+      "from": "agg_pipeline",
+      "to": "mqtt",
+      "label": "alerts",
+      "variant": "dashed"
+    },
+    {
+      "id": "agg-store-web",
+      "from": "agg_store",
+      "to": "agg_web",
+      "label": "query"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Satellite (standalone without UPLINK_URL)",
+      "items": [
+        "Keeps its own events, audio, Whisper transcriptions and optional MQTT",
+        "Uplink sends event metadata, OGG audio and a 30 s heartbeat over HTTPS with a node token; never transcriptions",
+        "Only outbound HTTPS; queued locally for up to 72 h when offline"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Aggregator",
+      "items": [
+        "Only /api/v1/ingest/* is public; nginx answers 404 to everything else",
+        "Transcribes uploaded audio centrally, one MQTT alert per event",
+        "Web UI, read API and node admin stay on the LAN (no login)"
+      ]
+    }
+  ]
+}

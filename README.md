@@ -20,6 +20,24 @@ Built for Sveriges Radio P4, Sweden's primary traffic announcement carrier and e
 
 ## Architecture
 
+### System overview
+
+![RDS Guard architecture: a satellite decodes P4 with an RTL-SDR, stores events and audio locally and, optionally, sends them over HTTPS through Cloudflare and nginx to the aggregator, which stores, transcribes and publishes alerts](docs/architecture/rds-guard.architecture.svg)
+
+Every installation is a complete RDS Guard on its own (**standalone**). With
+`UPLINK_URL` set it also becomes a **satellite** and sends a copy of each event
+and its audio to an **aggregator**, a separate container that collects events
+from many satellites, transcribes them centrally and publishes MQTT alerts. Only
+the aggregator's ingest API is on the internet, behind Cloudflare and nginx.
+See [Run as a satellite](#run-as-a-satellite) and
+[aggregator/README.md](aggregator/README.md).
+
+An [interactive version](docs/architecture/rds-guard.architecture.html) of the
+diagram (download and open in a browser) links every component to the code it
+describes; see [docs/architecture](docs/architecture/README.md).
+
+### Inside one installation
+
 Single Docker container. One process handles the entire pipeline:
 
 ```
@@ -49,6 +67,8 @@ Single Docker container. One process handles the entire pipeline:
 │                               ├── GET  /api/audio/:f  → play │
 │                               ├── GET  /api/status    → info │
 │                               └── WS   /ws/console    → live │
+│                                   │                          │
+│  Uplink (optional, UPLINK_URL) ──→ HTTPS ──→ aggregator      │
 │                                   │                          │
 ├───────────────────────────────────┼──────────────────────────┤
 │                               port 8022                      │
@@ -499,6 +519,7 @@ rds-guard/
 ├── status.py             # Status snapshot (/api/status + uplink heartbeat)
 ├── uplink.py             # Satellite → aggregator sender (outbox + heartbeat)
 ├── docs/
+│   ├── architecture/     # Archify architecture diagram (SVG, HTML, JSON source)
 │   └── uplink-protocol.md # Satellite ↔ aggregator protocol
 ├── aggregator/           # Aggregator service (separate container, see its README)
 ├── tests/                # pytest suite (pip install -r requirements-dev.txt; pytest)
