@@ -37,7 +37,7 @@ services:
       - "${NGINX_BIND:-127.0.0.1}:${NGINX_PORT:-8088}:8080"
 
   cloudflared:
-    image: cloudflare/cloudflared:2026.10.7
+    image: cloudflare/cloudflared:2026.11.1
     container_name: rds-guard-aggregator-tunnel
     profiles: ["tunnel"]
     restart: unless-stopped
