@@ -14,9 +14,10 @@
   },
   "layout": {
     "mode": "grid",
-    "cols": 8,
-    "cellW": 140,
-    "gapX": 70
+    "cols": 5,
+    "cellW": 150,
+    "gapX": 72,
+    "gapY": 92
   },
   "components": [
     {
@@ -111,7 +112,7 @@
           "end_line": 230
         }
       ],
-      "row": 2,
+      "row": 0,
       "col": 2
     },
     {
@@ -151,8 +152,8 @@
           "end_line": 47
         }
       ],
-      "row": 1,
-      "col": 4
+      "row": 2,
+      "col": 0
     },
     {
       "id": "nginx",
@@ -166,8 +167,8 @@
           "end_line": 49
         }
       ],
-      "row": 1,
-      "col": 5
+      "row": 2,
+      "col": 1
     },
     {
       "id": "ingest",
@@ -191,8 +192,8 @@
           "end_line": 372
         }
       ],
-      "row": 1,
-      "col": 6
+      "row": 2,
+      "col": 2
     },
     {
       "id": "agg_pipeline",
@@ -216,8 +217,8 @@
           "end_line": 242
         }
       ],
-      "row": 2,
-      "col": 7
+      "row": 3,
+      "col": 3
     },
     {
       "id": "agg_store",
@@ -236,8 +237,8 @@
           "end_line": 306
         }
       ],
-      "row": 1,
-      "col": 7
+      "row": 2,
+      "col": 3
     },
     {
       "id": "agg_web",
@@ -256,8 +257,8 @@
           "end_line": 291
         }
       ],
-      "row": 0,
-      "col": 7
+      "row": 2,
+      "col": 4
     },
     {
       "id": "mqtt",
@@ -276,8 +277,8 @@
           "end_line": 94
         }
       ],
-      "row": 3,
-      "col": 7
+      "row": 4,
+      "col": 3
     }
   ],
   "boundaries": [
@@ -333,8 +334,10 @@
       "id": "uplink-cloudflare",
       "from": "uplink",
       "to": "cloudflare",
-      "label": "HTTPS",
-      "variant": "emphasis"
+      "label": "HTTPS + token",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top"
     },
     {
       "id": "cloudflare-nginx",
