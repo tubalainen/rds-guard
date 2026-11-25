@@ -27,6 +27,23 @@ RUN git clone --depth 1 https://github.com/windytan/redsea.git /tmp/redsea \
     && ninja install
 
 # ================================================================
+#  Model stage: KB-Whisper small, "strict" style, for faster-whisper
+# ================================================================
+# KBLab only publishes the CTranslate2 file for the default style, so the
+# strict (most verbatim) one is converted here.  Runs on the build host's
+# architecture (the output is portable); torch never reaches the runtime image.
+FROM --platform=$BUILDPLATFORM python:3.12-slim-bookworm AS model
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+        torch \
+    && pip install --no-cache-dir "transformers>=4.40,<5" "ctranslate2>=4.5,<5" huggingface_hub
+COPY tools/convert_kb_whisper.py /tmp/convert_kb_whisper.py
+# Commit of the "strict" tag, pinned for reproducible builds
+ARG KB_WHISPER_REVISION=066ef166dd25b4b27039517ca77af30c1c10688a
+RUN python3 /tmp/convert_kb_whisper.py KBLab/kb-whisper-small \
+        "$KB_WHISPER_REVISION" /opt/models/kb-whisper-small-strict int8 \
+    && rm -rf /root/.cache
+
+# ================================================================
 #  Stage 2: Slim runtime image
 # ================================================================
 FROM debian:bookworm-slim
@@ -52,6 +69,9 @@ COPY --from=builder /usr/local/bin/redsea /usr/local/bin/redsea
 COPY requirements.txt /app/requirements.txt
 RUN pip3 install --no-cache-dir --break-system-packages -r /app/requirements.txt
 
+# Bundled Swedish Whisper model (see the model stage above)
+COPY --from=model /opt/models/ /opt/models/
+
 # Copy application files
 COPY config.py /app/config.py
 COPY event_store.py /app/event_store.py
@@ -72,6 +92,10 @@ COPY static/ /app/static/
 
 # Data volume for SQLite database
 VOLUME /data
+
+# Keep downloaded Whisper models on the data volume so they survive
+# container recreation instead of being fetched again on every update
+ENV HF_HOME=/data/models
 
 ARG BUILD_VERSION=dev
 ENV BUILD_VERSION=${BUILD_VERSION}

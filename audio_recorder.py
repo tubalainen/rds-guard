@@ -157,6 +157,12 @@ class AudioRecorder:
             "-ar", str(self.SAMPLE_RATE),
             "-ac", str(self.CHANNELS),
             "-i", "pipe:0",
+            # The PCM is the raw FM multiplex: undo the 50 µs pre-emphasis
+            # used in Europe (it boosts treble/hiss) and keep only the speech
+            # band, dropping hum and the 19 kHz pilot before downsampling.
+            # Clearer audio for both playback and Whisper.
+            "-af", "aemphasis=type=50fm:mode=reproduction,"
+                   "highpass=f=80,lowpass=f=7000",
             "-ar", "16000",
         ]
         if output_format == "ogg":

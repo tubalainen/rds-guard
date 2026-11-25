@@ -1,4 +1,7 @@
 aiohttp>=3.14.5,<4.0.0
 paho-mqtt>=2.2.0,<3.0.0
 faster-whisper>=1.2.1
+# PyAV 19 removed av.open(metadata_errors=...), which faster-whisper 1.2.1
+# still passes when decoding audio: local transcription fails on every clip.
+av>=11,<19
 requests>=2.34.2

@@ -1,6 +1,6 @@
 # RDS Guard
 
-FM radio traffic and emergency monitoring for Sweden. Decodes RDS data from an RTL-SDR dongle, captures traffic announcements and emergency broadcasts, transcribes the captured audio using OpenAI´s Whisper model, optionally push the transcribed message to MQTT and serves a live web dashboard.
+FM radio traffic and emergency monitoring for Sweden. Decodes RDS data from an RTL-SDR dongle, captures traffic announcements and emergency broadcasts, transcribes the captured audio with ElevenLabs Scribe (falling back to a local, Swedish-tuned Whisper model), optionally push the transcribed message to MQTT and serves a live web dashboard.
 
 Built for Sveriges Radio P4, Sweden's primary traffic announcement carrier and emergency broadcast channel (VMA).
 
@@ -11,8 +11,8 @@ Built for Sveriges Radio P4, Sweden's primary traffic announcement carrier and e
 - Tunes to an FM frequency using an RTL-SDR USB dongle
 - Decodes all RDS (Radio Data System) data in real time
 - Detects traffic announcements, emergency broadcasts, and EON cross-network alerts
-- Records broadcast audio during traffic and emergency events, converts to OGG/WAV via ffmpeg
-- Transcribes recorded audio using Whisper (local or remote) for searchable text
+- Records broadcast audio during traffic and emergency events, removes the FM pre-emphasis and converts to OGG/WAV via ffmpeg
+- Transcribes recorded audio with ElevenLabs Scribe, or locally with the bundled Swedish KB-Whisper model (used automatically as fallback, or without an API key)
 - Stores events in a local SQLite database with 30-day retention
 - Serves a dark-themed web dashboard with live event feed, audio playback, and transcriptions
 - Optionally forwards events and decoded data to an MQTT broker for Home Assistant or other automation
@@ -57,8 +57,8 @@ Single Docker container. One process handles the entire pipeline:
 │                │                                 └──┬───┬──┘ │
 │                ▼                            ┌───────┘   └──┐ │
 │          Transcriber                        ▼              ▼ │
-│       (faster-whisper                   SQLite           MQTT │
-│        or remote ASR)              /data/events.db  (optional)│
+│     (ElevenLabs Scribe,                 SQLite           MQTT │
+│      fallback KB-Whisper)          /data/events.db  (optional)│
 │                                         │                    │
 │          /data/audio/                   ▼                    │
 │           *.ogg / *.wav     Web server (aiohttp)             │
@@ -91,7 +91,7 @@ Single Docker container. One process handles the entire pipeline:
 | PTY changes to Alarm | `emergency` | `critical` |
 | EON linked station TA (group 14A) | `eon_traffic` | `info` |
 
-Events are written to SQLite and optionally published to MQTT. Traffic announcements and emergency broadcasts are tracked through their full lifecycle (start, RadioText updates, end with duration). Audio is automatically recorded during `traffic` and `emergency` events, then transcribed via Whisper.
+Events are written to SQLite and optionally published to MQTT. Traffic announcements and emergency broadcasts are tracked through their full lifecycle (start, RadioText updates, end with duration). Audio is automatically recorded during `traffic` and `emergency` events, then transcribed (ElevenLabs Scribe, or local KB-Whisper as fallback).
 
 ## Requirements
 
@@ -128,6 +128,14 @@ Edit `.env` and at minimum set your local P4 frequency:
 
 ```bash
 FM_FREQUENCY=103.3M        # Your local P4 frequency
+```
+
+For the best transcriptions, add an [ElevenLabs](https://elevenlabs.io) API
+key (about 2–3 öre per traffic announcement). Without one, audio is
+transcribed locally with the bundled Swedish KB-Whisper model:
+
+```bash
+ELEVENLABS_API_KEY=your-key
 ```
 
 If you want MQTT forwarding, enable it and configure the broker:
@@ -316,16 +324,28 @@ Audio is always recorded during traffic and emergency events. Recordings are sto
 
 ### Transcription
 
-Recorded audio is transcribed using Whisper for searchable text. Three engine modes are available:
+Recorded audio is transcribed for searchable text and MQTT alerts. By default ElevenLabs Scribe does the work and the local KB-Whisper model takes over when the API fails; without `ELEVENLABS_API_KEY` everything is transcribed locally.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TRANSCRIPTION_ENGINE` | `local` | `local` = built-in faster-whisper, `remote` = external ASR server, `none` = disable |
+| `TRANSCRIPTION_ENGINE` | `elevenlabs` | `elevenlabs` = ElevenLabs Scribe API with local fallback (runs as `local` without an API key), `local` = built-in faster-whisper, `remote` = external ASR server, `none` = disable |
 | `TRANSCRIPTION_LANGUAGE` | `sv` | Language code for Whisper (e.g. `sv`, `en`, `de`) |
-| `TRANSCRIPTION_MODEL` | `small` | Whisper model size: `tiny`, `base`, `small`, `medium`, `large-v3` (local only) |
+| `TRANSCRIPTION_MODEL` | *(auto)* | Empty = the bundled KB-Whisper small *strict* model for Swedish, `small` for other languages. Any size (`tiny` … `large-v3`, `large-v3-turbo`) or a Hugging Face CTranslate2 repo such as `KBLab/kb-whisper-medium` (local only) |
 | `TRANSCRIPTION_DEVICE` | `cpu` | Compute device: `cpu` or `cuda` (local only) |
+| `TRANSCRIPTION_PROMPT` | | Optional vocabulary hint passed to Whisper, e.g. `Trafikverket, E4, E18, Essingeleden, olycka, kö, körfält` |
+| `TRANSCRIPTION_BEAM_SIZE` | `5` | Beam search width; `1` is roughly twice as fast on CPU at a small accuracy cost (local only) |
+| `TRANSCRIPTION_CPU_THREADS` | `0` | CPU threads for inference, `0` = automatic (local only) |
 | `WHISPER_REMOTE_URL` | | URL of remote Whisper ASR server, e.g. `http://whisper:9000` (remote only) |
 | `WHISPER_REMOTE_TIMEOUT` | `120` | HTTP timeout in seconds for remote ASR requests |
+| `ELEVENLABS_API_KEY` | | ElevenLabs API key (elevenlabs only) |
+| `ELEVENLABS_MODEL` | `scribe_v3` | `scribe_v3` (writes numbers as digits) or `scribe_v2` |
+| `ELEVENLABS_KEYTERMS` | | Comma-separated words to listen for, e.g. `E18, Bergviksmotet, Våxnäsmotet` (max 50 characters / 5 words each; costs 20 % extra) |
+| `ELEVENLABS_TIMEOUT` | `60` | HTTP timeout in seconds |
+| `TRANSCRIPTION_FALLBACK` | `local` | When the ElevenLabs call fails: `local` = transcribe with faster-whisper instead, `none` = mark as failed |
+
+> **Swedish model:** for `TRANSCRIPTION_LANGUAGE=sv` the default is [KB-Whisper](https://huggingface.co/KBLab/kb-whisper-small) small from the National Library of Sweden, in its verbatim *strict* style, which the Docker image converts and bundles at build time (`/opt/models`) because KBLab only publishes the default style for faster-whisper. KB-Whisper is trained on 50 000+ hours of Swedish. `kb-whisper-small` has about 6–7 % word error rate on Swedish benchmarks versus 20–26 % for OpenAI's `small` (and beats OpenAI's `large-v3`) at the same CPU cost. On a stronger host, `KBLab/kb-whisper-medium` or `KBLab/kb-whisper-large` is more accurate still. Other models are downloaded once and cached under `/data/models`.
+
+> **ElevenLabs:** on P4 traffic clips Scribe was more complete than local KB-Whisper (fewer dropped place names and details, phone and road numbers right) and took 2–5 s per clip. Audio is sent to ElevenLabs (US processing by default). With the default fallback, a failed call is transcribed locally, so alerts still get text.
 
 > **Local vs Remote:** Local transcription works out of the box but uses significant CPU/RAM (especially larger models). For Raspberry Pi or low-power hosts, use `TRANSCRIPTION_ENGINE=remote` with a [whisper-asr-webservice](https://github.com/ahmetoner/whisper-asr-webservice) container running on a more powerful machine, or set `TRANSCRIPTION_ENGINE=none` to disable transcription while still recording audio.
 
@@ -515,7 +535,8 @@ rds-guard/
 ├── channelizer.py        # Wideband IQ → N×PCM (numpy DSP, multi-station only)
 ├── audio_tee.py          # PCM stream splitter (rtl_fm → redsea + recorder)
 ├── audio_recorder.py     # Recording lifecycle, ffmpeg conversion
-├── transcriber.py        # Whisper STT (local faster-whisper or remote ASR)
+├── transcriber.py        # Speech-to-text: ElevenLabs Scribe, local faster-whisper or remote ASR
+├── tools/convert_kb_whisper.py # Build step: converts KB-Whisper strict for faster-whisper
 ├── status.py             # Status snapshot (/api/status + uplink heartbeat)
 ├── uplink.py             # Satellite → aggregator sender (outbox + heartbeat)
 ├── docs/
@@ -589,7 +610,7 @@ and existing rows are not changed. The outbox is only used in satellite mode.
 
 **Pinning a version:** `ghcr.io/tubalainen/rds-guard:latest` follows
 `master`. To stay on a release, set the image to
-`ghcr.io/tubalainen/rds-guard:0.2.1` (or `:0.2` to get 0.2.x patch releases).
+`ghcr.io/tubalainen/rds-guard:0.2.2` (or `:0.2` to get 0.2.x patch releases).
 
 **Rolling back:** set the image to `ghcr.io/tubalainen/rds-guard:0.1.3`, and
 restore `rds-data.backup-0.1.3` if you want the database exactly as it was.
@@ -599,6 +620,20 @@ database.
 **Joining an aggregator** is a separate, optional step after the upgrade. See
 [Run as a satellite](#run-as-a-satellite). Only events recorded after the
 uplink is turned on are sent. Older events and transcriptions are not.
+
+### Transcription changes in v0.2.2
+
+- **ElevenLabs is the default engine.** Add `ELEVENLABS_API_KEY` to `.env` to
+  use it. Without a key nothing changes in how it works: audio is transcribed
+  locally. To keep local only, set `TRANSCRIPTION_ENGINE=local`.
+- **New local model.** With `TRANSCRIPTION_LANGUAGE=sv` and
+  `TRANSCRIPTION_MODEL` empty, the bundled KB-Whisper small *strict* model is
+  used (it is in the image, nothing to download). If your `.env` still has
+  `TRANSCRIPTION_MODEL=small`, you stay on OpenAI's small model: clear the
+  line to switch.
+- New recordings have the FM pre-emphasis removed, so they sound less sharp.
+- Other models are now cached in `rds-data/models`; a model you set yourself
+  is downloaded once more after the upgrade.
 
 ### Releasing
 
