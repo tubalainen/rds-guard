@@ -322,10 +322,15 @@ Recorded audio is transcribed using Whisper for searchable text. Three engine mo
 |----------|---------|-------------|
 | `TRANSCRIPTION_ENGINE` | `local` | `local` = built-in faster-whisper, `remote` = external ASR server, `none` = disable |
 | `TRANSCRIPTION_LANGUAGE` | `sv` | Language code for Whisper (e.g. `sv`, `en`, `de`) |
-| `TRANSCRIPTION_MODEL` | `small` | Whisper model size: `tiny`, `base`, `small`, `medium`, `large-v3` (local only) |
+| `TRANSCRIPTION_MODEL` | *(auto)* | Empty = `KBLab/kb-whisper-small` for Swedish, `small` for other languages. Any size (`tiny` … `large-v3`, `large-v3-turbo`) or a Hugging Face CTranslate2 repo such as `KBLab/kb-whisper-medium` (local only) |
 | `TRANSCRIPTION_DEVICE` | `cpu` | Compute device: `cpu` or `cuda` (local only) |
+| `TRANSCRIPTION_PROMPT` | | Optional vocabulary hint passed to Whisper, e.g. `Trafikverket, E4, E18, Essingeleden, olycka, kö, körfält` |
+| `TRANSCRIPTION_BEAM_SIZE` | `5` | Beam search width; `1` is roughly twice as fast on CPU at a small accuracy cost (local only) |
+| `TRANSCRIPTION_CPU_THREADS` | `0` | CPU threads for inference, `0` = automatic (local only) |
 | `WHISPER_REMOTE_URL` | | URL of remote Whisper ASR server, e.g. `http://whisper:9000` (remote only) |
 | `WHISPER_REMOTE_TIMEOUT` | `120` | HTTP timeout in seconds for remote ASR requests |
+
+> **Swedish model:** for `TRANSCRIPTION_LANGUAGE=sv` the default is [KB-Whisper](https://huggingface.co/KBLab/kb-whisper-small) from the National Library of Sweden, trained on 50 000+ hours of Swedish. `kb-whisper-small` has about 6–7 % word error rate on Swedish benchmarks versus 20–26 % for OpenAI's `small` (and beats OpenAI's `large-v3`) at the same CPU cost. On a stronger host, `KBLab/kb-whisper-medium` or `KBLab/kb-whisper-large` is more accurate still. Models are cached under `/data/models`.
 
 > **Local vs Remote:** Local transcription works out of the box but uses significant CPU/RAM (especially larger models). For Raspberry Pi or low-power hosts, use `TRANSCRIPTION_ENGINE=remote` with a [whisper-asr-webservice](https://github.com/ahmetoner/whisper-asr-webservice) container running on a more powerful machine, or set `TRANSCRIPTION_ENGINE=none` to disable transcription while still recording audio.
 

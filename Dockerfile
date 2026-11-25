@@ -73,6 +73,10 @@ COPY static/ /app/static/
 # Data volume for SQLite database
 VOLUME /data
 
+# Keep downloaded Whisper models on the data volume so they survive
+# container recreation instead of being fetched again on every update
+ENV HF_HOME=/data/models
+
 ARG BUILD_VERSION=dev
 ENV BUILD_VERSION=${BUILD_VERSION}
 

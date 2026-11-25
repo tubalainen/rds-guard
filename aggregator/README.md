@@ -147,7 +147,10 @@ All settings are in `.env`; see [.env.example](.env.example).
 | `EVENT_RETENTION_DAYS` | `90` | Delete events and audio older than this |
 | `TRANSCRIPTION_ENGINE` | `local` | `local`, `remote` or `none` (same as on the satellite) |
 | `TRANSCRIPTION_LANGUAGE` | `sv` | Whisper language |
-| `TRANSCRIPTION_MODEL` | `small` | Local model size |
+| `TRANSCRIPTION_MODEL` | *(auto)* | Local model; empty = `KBLab/kb-whisper-small` for Swedish, else `small` |
+| `TRANSCRIPTION_PROMPT` | | Optional vocabulary hint for Whisper (place names, road numbers) |
+| `TRANSCRIPTION_BEAM_SIZE` | `5` | Beam width; `1` is faster on CPU |
+| `TRANSCRIPTION_CPU_THREADS` | `0` | CPU threads, `0` = automatic |
 | `TRANSCRIPTION_DEVICE` | `cpu` | `cpu` or `cuda` |
 | `WHISPER_REMOTE_URL` | | Remote ASR server for `remote` |
 | `MQTT_ENABLED` | `false` | Publish to MQTT |

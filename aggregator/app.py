@@ -56,6 +56,9 @@ async def main():
         device=config.TRANSCRIPTION_DEVICE,
         remote_url=config.WHISPER_REMOTE_URL,
         remote_timeout=config.WHISPER_REMOTE_TIMEOUT,
+        initial_prompt=config.TRANSCRIPTION_PROMPT,
+        beam_size=config.TRANSCRIPTION_BEAM_SIZE,
+        cpu_threads=config.TRANSCRIPTION_CPU_THREADS,
     )
     if transcriber:
         transcriber.start()

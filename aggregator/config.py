@@ -62,7 +62,15 @@ MQTT_CLIENT_ID = os.environ.get("MQTT_CLIENT_ID", "rds-guard-aggregator")
 # --- Transcription (same settings as the satellite) ---
 TRANSCRIPTION_ENGINE = os.environ.get("TRANSCRIPTION_ENGINE", "local")
 TRANSCRIPTION_LANGUAGE = os.environ.get("TRANSCRIPTION_LANGUAGE", "sv")
-TRANSCRIPTION_MODEL = os.environ.get("TRANSCRIPTION_MODEL", "small")
+# Empty = automatic: KBLab/kb-whisper-small for Swedish, else "small".
+# Any faster-whisper size (tiny … large-v3, large-v3-turbo) or a Hugging Face
+# CTranslate2 repo id (e.g. KBLab/kb-whisper-medium) works.
+TRANSCRIPTION_MODEL = os.environ.get("TRANSCRIPTION_MODEL", "").strip()
 TRANSCRIPTION_DEVICE = os.environ.get("TRANSCRIPTION_DEVICE", "cpu")
+# Optional vocabulary hint (place names, road numbers) given to Whisper
+TRANSCRIPTION_PROMPT = os.environ.get("TRANSCRIPTION_PROMPT", "").strip()
+TRANSCRIPTION_BEAM_SIZE = _int(os.environ.get("TRANSCRIPTION_BEAM_SIZE"), 5)
+# 0 = let CTranslate2 decide
+TRANSCRIPTION_CPU_THREADS = _int(os.environ.get("TRANSCRIPTION_CPU_THREADS"), 0)
 WHISPER_REMOTE_URL = os.environ.get("WHISPER_REMOTE_URL", "")
 WHISPER_REMOTE_TIMEOUT = _int(os.environ.get("WHISPER_REMOTE_TIMEOUT"), 120)
