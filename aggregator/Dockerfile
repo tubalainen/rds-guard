@@ -10,8 +10,10 @@ RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 COPY aggregator/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Shared with the satellite: Whisper transcription (local or remote)
+# Shared with the satellite: Whisper transcription (local or remote) and
+# the web UI's base theme
 COPY transcriber.py /app/transcriber.py
+COPY static/css/style.css /app/static/css/style.css
 COPY aggregator/ /app/aggregator/
 RUN rm -f /app/aggregator/Dockerfile /app/aggregator/requirements.txt
 

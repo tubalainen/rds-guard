@@ -382,8 +382,9 @@ def query_events(event_type=None, pi=None, node=None, since=None,
     if since:
         where.append("COALESCE(e.started_at, e.received_at) > ?")
         params.append(since)
-    if active is True:
-        where.append(f"e.state IN ({','.join('?' * len(ACTIVE_STATES))})")
+    if active is not None:
+        op = "IN" if active else "NOT IN"
+        where.append(f"e.state {op} ({','.join('?' * len(ACTIVE_STATES))})")
         params.extend(ACTIVE_STATES)
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     conn = _conn()

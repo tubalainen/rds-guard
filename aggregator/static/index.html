@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RDS Guard Aggregator</title>
+    <link rel="stylesheet" href="/static/css/base.css">
+    <link rel="stylesheet" href="/static/css/aggregator.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>RDS Guard Aggregator</h1>
+        </div>
+        <nav>
+            <button class="nav-btn active" data-view="events">Events</button>
+            <button class="nav-btn" data-view="nodes">Nodes</button>
+        </nav>
+    </header>
+
+    <main>
+        <section id="view-events" class="view active">
+            <div class="filter-bar">
+                <button class="filter-chip active" data-type="">All</button>
+                <button class="filter-chip" data-type="traffic">Traffic</button>
+                <button class="filter-chip" data-type="emergency">Emergency</button>
+                <select id="filter-station" class="filter-select" aria-label="Station">
+                    <option value="">All stations</option>
+                </select>
+                <select id="filter-node" class="filter-select" aria-label="Node">
+                    <option value="">All nodes</option>
+                </select>
+            </div>
+            <div id="active-events"></div>
+            <div id="events-list"></div>
+            <div id="events-empty" class="empty-state" hidden>
+                No events yet. Waiting for satellites to report...
+            </div>
+            <button id="load-more" class="load-more-btn" hidden>Load more</button>
+        </section>
+
+        <section id="view-nodes" class="view">
+            <form id="node-add" class="node-add">
+                <input id="node-add-name" class="console-input" type="text" maxlength="64"
+                       placeholder="New node name, e.g. Kalle, Karlstad" required>
+                <button type="submit" class="console-btn">Add node</button>
+            </form>
+            <div id="node-token" class="node-token" hidden>
+                <div class="event-section-label">Send these lines to the satellite owner
+                    for their <code>.env</code> file. The token is shown only once.</div>
+                <pre id="node-token-snippet"></pre>
+                <button id="node-token-copy" class="console-btn" type="button">Copy</button>
+                <button id="node-token-close" class="console-btn" type="button">Done</button>
+            </div>
+            <div id="node-error" class="node-error" hidden></div>
+            <div id="nodes-list"></div>
+            <div id="nodes-empty" class="empty-state" hidden>
+                No nodes yet. Add one above and send its token to the satellite owner.
+            </div>
+        </section>
+    </main>
+
+    <footer id="status-bar">
+        <div class="status-row status-row-main">
+            <div class="status-group">
+                <span id="status-nodes">--- nodes online</span>
+                <span class="status-sep">&middot;</span>
+                <span id="status-events">--- events</span>
+            </div>
+            <div class="status-group status-group-right">
+                <span id="status-mqtt" class="status-flag" title="MQTT">MQTT</span>
+                <span id="status-transcription" class="status-tag" title="Transcription engine">---</span>
+                <span class="status-sep">&middot;</span>
+                <a id="status-version" class="status-version" href="https://github.com/tubalainen/rds-guard"
+                   target="_blank" rel="noopener noreferrer" title="View on GitHub">---</a>
+            </div>
+        </div>
+    </footer>
+
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/events.js"></script>
+    <script src="/static/js/nodes.js"></script>
+</body>
+</html>

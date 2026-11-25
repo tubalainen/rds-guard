@@ -15,6 +15,7 @@ from pathlib import Path
 from aiohttp import web
 
 from . import config, store
+from .api import create_web_app
 from .ingest import create_ingest_app
 from .mqtt_out import MqttOut
 from .pipeline import Pipeline
@@ -25,18 +26,6 @@ logging.basicConfig(
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
 log = logging.getLogger("rds-aggregator")
-
-
-async def handle_status(request):
-    return web.json_response({"version": config.BUILD_VERSION,
-                              "server_time": store.now_iso(),
-                              **store.counts()})
-
-
-def create_web_app():
-    app = web.Application()
-    app.router.add_get("/api/v1/status", handle_status)
-    return app
 
 
 async def _serve(app, port, label):
@@ -85,7 +74,8 @@ async def main():
     runners = [
         await _serve(create_ingest_app(pipeline), config.INGEST_PORT,
                      "Ingest API"),
-        await _serve(create_web_app(), config.WEB_PORT, "Web UI"),
+        await _serve(create_web_app(pipeline, mqtt), config.WEB_PORT,
+                     "Web UI"),
     ]
 
     stop = asyncio.Event()
