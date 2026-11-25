@@ -1,10 +1,11 @@
 """Transcription engine — speech-to-text with local or cloud backends.
 
 Engines, selected by TRANSCRIPTION_ENGINE:
-  - "local"      → built-in faster-whisper (CPU, default)
+  - "elevenlabs" → ElevenLabs Scribe speech-to-text API (default), with
+                   local faster-whisper as fallback when the API fails.
+                   Without ELEVENLABS_API_KEY it runs as "local".
+  - "local"      → built-in faster-whisper (CPU)
   - "remote"     → external Whisper ASR server via /asr HTTP endpoint
-  - "elevenlabs" → ElevenLabs Scribe speech-to-text API, with local
-                   faster-whisper as fallback when the API fails
   - "none"       → disabled (returns None transcriber)
 """
 
@@ -77,6 +78,11 @@ def create_transcriber(engine, language, model_size=None, device=None,
         log.info("Transcription disabled (TRANSCRIPTION_ENGINE=none)")
         return None
 
+    if engine == "elevenlabs" and not (elevenlabs_api_key or "").strip():
+        log.info("TRANSCRIPTION_ENGINE=elevenlabs but ELEVENLABS_API_KEY is "
+                 "not set — transcribing locally instead")
+        engine = "local"
+
     t = Transcriber(
         engine=engine,
         language=language,
@@ -101,9 +107,6 @@ def create_transcriber(engine, language, model_size=None, device=None,
         else:
             log.info("Transcription engine: remote (%s)", remote_url)
     elif engine == "elevenlabs":
-        if not elevenlabs_api_key:
-            log.error("TRANSCRIPTION_ENGINE=elevenlabs but ELEVENLABS_API_KEY "
-                      "is empty — every clip will use the fallback")
         log.info("Transcription engine: elevenlabs (model=%s, %d keyterms, "
                  "fallback=%s%s)", t.elevenlabs_model, len(t.keyterms),
                  t.fallback,
@@ -148,6 +151,10 @@ class Transcriber:
     @property
     def model_size(self):
         return self._model_size
+
+    @property
+    def engine(self):
+        return self._engine
 
     @property
     def device(self):

@@ -116,10 +116,12 @@ AUDIO_FORMAT = os.environ.get("AUDIO_FORMAT", "ogg")
 MAX_RECORDING_SEC = _int(os.environ.get("MAX_RECORDING_SEC"), 600)
 
 # --- Transcription ---
-# "local"  = built-in faster-whisper on CPU (default, works out of the box)
+# "elevenlabs" = ElevenLabs Scribe API (default) with local faster-whisper
+#                as fallback; without ELEVENLABS_API_KEY it runs as "local"
+# "local"  = built-in faster-whisper on CPU (works out of the box)
 # "remote" = external Whisper ASR server via HTTP /asr endpoint
 # "none"   = disable transcription (audio is still recorded and playable)
-TRANSCRIPTION_ENGINE = os.environ.get("TRANSCRIPTION_ENGINE", "local")
+TRANSCRIPTION_ENGINE = os.environ.get("TRANSCRIPTION_ENGINE", "elevenlabs")
 TRANSCRIPTION_LANGUAGE = os.environ.get("TRANSCRIPTION_LANGUAGE", "sv")
 
 # Local engine settings (only used when TRANSCRIPTION_ENGINE=local)

@@ -120,3 +120,16 @@ def test_missing_key_uses_fallback(clip, monkeypatch):
     t._model = object()
     monkeypatch.setattr(t, "_transcribe_local", lambda path: "lokal")
     assert t.transcribe(clip) == "lokal"
+
+
+def test_factory_without_key_runs_locally(no_bundle):
+    t = transcriber.create_transcriber("elevenlabs", "sv",
+                                       elevenlabs_api_key="")
+    assert t.engine == "local"
+
+
+def test_factory_with_key_uses_elevenlabs(no_bundle):
+    t = transcriber.create_transcriber("elevenlabs", "sv",
+                                       elevenlabs_api_key="key")
+    assert t.engine == "elevenlabs"
+    assert t.fallback == "local"

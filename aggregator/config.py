@@ -60,7 +60,7 @@ MQTT_TOPIC_PREFIX = os.environ.get("MQTT_TOPIC_PREFIX", "rds-aggregator")
 MQTT_CLIENT_ID = os.environ.get("MQTT_CLIENT_ID", "rds-guard-aggregator")
 
 # --- Transcription (same settings as the satellite) ---
-TRANSCRIPTION_ENGINE = os.environ.get("TRANSCRIPTION_ENGINE", "local")
+TRANSCRIPTION_ENGINE = os.environ.get("TRANSCRIPTION_ENGINE", "elevenlabs")
 TRANSCRIPTION_LANGUAGE = os.environ.get("TRANSCRIPTION_LANGUAGE", "sv")
 # Empty = automatic: for Swedish the KB-Whisper small "strict" model bundled
 # in the Docker image (else KBLab/kb-whisper-small from the hub), else "small".
