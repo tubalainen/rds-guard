@@ -6,7 +6,7 @@ import pytest
 
 import geo_service
 import geolocate
-from aggregator import api
+from aggregator import api, config
 from aggregator.pipeline import Pipeline, alert_payload
 
 UID = "33333333-3333-4333-8333-333333333333"
@@ -68,16 +68,20 @@ def test_hints_follow_the_node(agg_store, event, geo):
     assert hints["prompt"].startswith("Trafikmeddelande.")
 
 
-async def test_incidents_api(aiohttp_client, agg_store, event, geo):
+async def test_incidents_api(aiohttp_client, agg_store, event, geo, monkeypatch):
     pipe = Pipeline(transcriber=None, mqtt=None, geo=geo)
     pipe._on_transcribed(agg_store.get_event(UID)["id"], TEXT, None, 2.0)
+    monkeypatch.setattr(config, "ADMIN_PASSWORD", "hemligt")
     web = await aiohttp_client(api.create_web_app(pipe))
+    # The map is public; the node list needs the admin login
     data = await (await web.get("/api/v1/incidents?hours=100000")).json()
     [inc] = data["incidents"]
     assert inc["nodes"] == ["Kalle"] and inc["latest"]["id"] == UID
     assert data["nodes"] == [{"name": "Kalle", "lat": 59.38091, "lon": 13.50276}]
     ev = await (await web.get(f"/api/v1/events/{UID}")).json()
     assert ev["incidents"][0]["label"] == "E18 Bergviksmotet"
+    assert (await web.get("/api/v1/nodes")).status == 401
+    await web.post("/api/v1/admin/login", json={"password": "hemligt"})
     node = (await (await web.get("/api/v1/nodes")).json())["nodes"][0]
     assert node["location"] == "Karlstad, Värmlands län"
     assert node["located"]["name"] == "Karlstad"

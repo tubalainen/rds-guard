@@ -194,7 +194,7 @@ sent to the aggregator.
    the *Debug* page of the web UI (link in the footer) shows your station and a decode rate above 5 grp/s.
 2. Ask the aggregator's owner for three values: the aggregator address, a
    node token, and the name to use for your node. They create the token in the
-   aggregator's web UI (*Noder → Lägg till nod*) and get the lines to send you.
+   aggregator's web UI (*Admin → Noder → Lägg till nod*) and get the lines to send you.
 
 No ports need to be opened on your router: the satellite only makes outbound
 HTTPS requests.
@@ -343,6 +343,7 @@ All settings are in the `.env` file:
 | `EVENT_RETENTION_DAYS` | `30` | Auto-delete events older than this |
 | `WEB_UI_URL` | | Address the web UI is reached on, e.g. `https://rds.example.se`. When set, push messages link to the event and its audio |
 | `NOTIFY_TIMEZONE` | `Europe/Stockholm` | Time zone for the days and times in push rules |
+| `ADMIN_PASSWORD` | *(empty)* | Password for the **Admin** page (push rules). Empty switches Admin off and the rules cannot be changed |
 
 ### Audio recording
 
@@ -428,10 +429,14 @@ around the history of what the receiver has heard:
 - **Sök** — search in RadioText and transcriptions, filtered by type,
   period and station. A search can be turned into a push rule with one
   click (*Bevaka*).
-- **Aviseringar** — the push rules (see [Push notifications](#push-notifications)),
-  the MQTT connection and the latest messages sent.
 - **Karta** — the incidents traffic messages mentioned in the last 12
   hours, on a map (see [Map](#map)).
+- **Admin** — behind the password in `ADMIN_PASSWORD`. Its first section is
+  **Aviseringar**: the push rules (see [Push notifications](#push-notifications)),
+  the MQTT connection and the latest messages sent. A login lasts 12 hours,
+  or until the container restarts or the password changes. Without
+  `ADMIN_PASSWORD` the Admin page is switched off; rules already saved keep
+  sending.
 - **Händelse** — one event: audio, full transcription, RadioText, pushes,
   a small map of the places it mentions, and details. Push messages link
   here when `WEB_UI_URL` is set.
@@ -451,7 +456,7 @@ decoded RDS groups over WebSocket, with pause and filters.
 ## Push notifications
 
 Every finished event is checked against the rules you set under
-**Aviseringar**. For each rule that matches, a ready-to-show message is
+**Admin → Aviseringar**. For each rule that matches, a ready-to-show message is
 published to `rds/notify/<topic of the rule>`, which Home Assistant,
 Node-RED or similar can send on to a phone.
 
@@ -596,7 +601,9 @@ Refresh the place-name registry now and then with
 | `/api/status` | GET | Decoder status (uptime, station info, decode rate) |
 | `/api/audio/{filename}` | GET | Stream recorded audio file (OGG/WAV) |
 | `/api/events` | DELETE | Clear all events |
-| `/api/notify` | GET | Push rules and the MQTT connection |
+| `/api/admin/session` | GET | Whether Admin is on and you are logged in |
+| `/api/admin/login` / `/api/admin/logout` | POST | Log in (`{"password": "…"}`) or out; sets a session cookie |
+| `/api/notify` | GET | Push rules and the MQTT connection (needs Admin login, as do all `/api/notify*`) |
 | `/api/notify/rules` | POST | Create a rule |
 | `/api/notify/rules/{id}` | PUT / DELETE | Change or remove a rule |
 | `/api/notify/preview` | POST | Try a rule (unsaved) on the stored history |
@@ -607,8 +614,8 @@ Refresh the place-name registry now and then with
 Event responses include `audio_url`, `transcription`,
 `transcription_corrected` (Claude's corrected text, or `null`),
 `incidents` (the places on the map), `geo_status` and `notify` (the push
-messages sent for the event). Writes to `/api/notify` must be JSON and, from
-a browser, same-origin.
+messages sent for the event). Writes to `/api/notify` and `/api/admin` must
+be JSON and, from a browser, same-origin.
 
 ## MQTT topics
 
@@ -787,7 +794,7 @@ rds-guard/
     ├── index.html
     ├── shared/           # Web UI shared with the aggregator
     │   ├── app.css
-    │   ├── rdsui.js      # Arkiv, Sök, Händelse, Aviseringar, audio player
+    │   ├── rdsui.js      # Arkiv, Sök, Händelse, Admin (Aviseringar), audio player
     │   ├── map.js        # Karta, place labels, event mini map
     │   └── vendor/       # wavesurfer.js, Leaflet
     ├── css/

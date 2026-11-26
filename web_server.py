@@ -6,6 +6,8 @@ Uses aiohttp to serve:
   GET  /api/events/active → in-progress announcements
   GET  /api/events/:id → one event
   GET  /api/calendar  → light rows for the archive calendar
+  GET  /api/admin/session, POST /api/admin/login|logout → admin login
+  (every /api/notify* route below needs a logged-in admin, see admin_auth)
   GET  /api/notify    → push rules + MQTT connection
   POST/PUT/DELETE /api/notify/rules[/:id] → edit push rules
   POST /api/notify/preview → try a rule on the stored history
@@ -25,6 +27,7 @@ from urllib.parse import urlsplit
 
 from aiohttp import web
 
+import admin_auth
 import event_store
 import notifier
 import notify_rules
@@ -254,8 +257,17 @@ async def handle_audio(request):
 
 
 # ---------------------------------------------------------------------------
-# Push notification rules
+# Admin login and push notification rules
 # ---------------------------------------------------------------------------
+
+def _admin_password():
+    import config as cfg
+    return cfg.ADMIN_PASSWORD
+
+
+ADMIN = admin_auth.AdminAuth(_admin_password, protected=("/api/notify",),
+                             cookie_name="rdsguard_admin")
+
 
 def _error(status, code, detail=""):
     return web.json_response({"error": code, "detail": detail}, status=status)
@@ -263,12 +275,12 @@ def _error(status, code, detail=""):
 
 @web.middleware
 async def write_guard(request, handler):
-    """Rule edits must be JSON and same-origin.
+    """Admin writes (login, rule edits) must be JSON and same-origin.
 
-    The web UI has no login, so this keeps a page on another site from
-    changing the rules through the owner's browser.
+    On top of the SameSite cookie, this keeps a page on another site from
+    logging in or changing the rules through the owner's browser.
     """
-    if (request.path.startswith("/api/notify")
+    if (request.path.startswith(("/api/notify", "/api/admin"))
             and request.method not in ("GET", "HEAD", "OPTIONS")):
         if request.content_type != "application/json":
             return _error(415, "json_required")
@@ -447,7 +459,8 @@ async def handle_index(request):
 # ---------------------------------------------------------------------------
 
 def create_app():
-    app = web.Application(middlewares=[write_guard], client_max_size=64 * 1024)
+    app = web.Application(middlewares=[write_guard, ADMIN.middleware],
+                          client_max_size=64 * 1024)
 
     # API routes
     app.router.add_get("/api/events", handle_events)
@@ -455,6 +468,7 @@ def create_app():
     app.router.add_get("/api/events/{event_id}", handle_event)
     app.router.add_get("/api/calendar", handle_calendar)
     app.router.add_get("/api/incidents", handle_incidents)
+    ADMIN.add_routes(app.router, "/api")
     app.router.add_get("/api/notify", handle_notify)
     app.router.add_get("/api/notify/log", handle_notify_log)
     app.router.add_post("/api/notify/rules", handle_create_rule)

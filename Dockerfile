@@ -86,6 +86,7 @@ COPY status.py /app/status.py
 COPY uplink.py /app/uplink.py
 COPY notify_rules.py /app/notify_rules.py
 COPY notifier.py /app/notifier.py
+COPY admin_auth.py /app/admin_auth.py
 # Map: geolocation of traffic messages and the bundled place-name registry
 COPY gazetteer.py /app/gazetteer.py
 COPY geolocate.py /app/geolocate.py
