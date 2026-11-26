@@ -17,7 +17,8 @@ def _int(val, default):
 BUILD_VERSION = os.environ.get("BUILD_VERSION", "dev")
 
 # --- Network ---
-# Ingest API for satellites. Not published on the host: only nginx reaches it.
+# Ingest API for satellites: the port your HTTPS reverse proxy or tunnel
+# forwards to. It serves /api/v1/ingest/ and nothing else.
 INGEST_PORT = _int(os.environ.get("INGEST_PORT"), 8081)
 # Web UI + read API + node admin. LAN only — never expose it to the internet.
 WEB_PORT = _int(os.environ.get("WEB_PORT"), 8080)
@@ -34,6 +35,10 @@ DATA_DIR = os.environ.get("DATA_DIR", "/data")
 DB_PATH = os.environ.get("DB_PATH", os.path.join(DATA_DIR, "aggregator.db"))
 AUDIO_DIR = os.environ.get("AUDIO_DIR", os.path.join(DATA_DIR, "audio"))
 EVENT_RETENTION_DAYS = _int(os.environ.get("EVENT_RETENTION_DAYS"), 90)
+# The container starts as root, gives DATA_DIR to this user and then runs as
+# it (see privileges.py). Set them to your own uid/gid to own the files.
+RUN_UID = max(0, _int(os.environ.get("PUID"), 10001))
+RUN_GID = max(0, _int(os.environ.get("PGID"), 10001))
 
 # --- Ingest limits ---
 MAX_JSON_BYTES = 64 * 1024

@@ -14,7 +14,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import config, store
+from . import config, privileges, store
 
 MAX_NAME_LEN = 64
 
@@ -122,4 +122,7 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    # 'docker compose exec' starts this as root; write the database as the
+    # same unprivileged user as the server does.
+    privileges.drop_privileges()
     main()

@@ -31,6 +31,8 @@ BUNDLED_SWEDISH_MODEL = os.environ.get(
     "BUNDLED_SWEDISH_MODEL", "/opt/models/kb-whisper-small-strict")
 
 ELEVENLABS_URL = "https://api.elevenlabs.io/v1/speech-to-text"
+# Free account lookup used at startup to confirm the key works
+ELEVENLABS_ACCOUNT_URL = "https://api.elevenlabs.io/v1/user/subscription"
 # ElevenLabs keyterm limits: at most 50 characters and 5 words per term
 _KEYTERM_FORBIDDEN = set("<>{}[]\\")
 _KEYTERM_MAX = 1000
@@ -64,6 +66,17 @@ def parse_keyterms(raw):
     return terms[:_KEYTERM_MAX]
 
 
+def _error_detail(resp):
+    """Short reason from an ElevenLabs error response."""
+    try:
+        detail = resp.json().get("detail", "")
+    except (ValueError, AttributeError):
+        detail = ""
+    if isinstance(detail, dict):
+        detail = detail.get("status") or detail.get("message") or ""
+    return str(detail or resp.text or "")[:200]
+
+
 def create_transcriber(engine, language, model_size=None, device=None,
                        remote_url=None, remote_timeout=120,
                        initial_prompt=None, beam_size=5, cpu_threads=0,
@@ -79,8 +92,8 @@ def create_transcriber(engine, language, model_size=None, device=None,
         return None
 
     if engine == "elevenlabs" and not (elevenlabs_api_key or "").strip():
-        log.info("TRANSCRIPTION_ENGINE=elevenlabs but ELEVENLABS_API_KEY is "
-                 "not set — transcribing locally instead")
+        log.info("ElevenLabs: no ELEVENLABS_API_KEY set — transcribing "
+                 "locally instead")
         engine = "local"
 
     t = Transcriber(
@@ -146,6 +159,10 @@ class Transcriber:
             else "local"
         self._queue = queue.Queue()
         self._model = None  # lazy-loaded for local engine
+        self._last_engine = None  # what served the latest transcription
+        # Result of the startup check: unchecked, ok, auth_failed,
+        # unreachable or error
+        self.elevenlabs_status = "unchecked"
         self._thread = None
 
     @property
@@ -204,6 +221,8 @@ class Transcriber:
             except Exception as e:
                 # Retried on the first job; keep the worker alive
                 log.error("Could not preload Whisper model: %s", e)
+        elif self._engine == "elevenlabs":
+            self.check_elevenlabs()
         while True:
             item = self._queue.get()
             if item is None:
@@ -213,8 +232,9 @@ class Transcriber:
                 t0 = time.monotonic()
                 text = self.transcribe(Path(audio_path))
                 duration_sec = round(time.monotonic() - t0, 1)
-                log.info("Transcription complete for event %d (%d chars, %.1fs)",
-                         event_id, len(text) if text else 0, duration_sec)
+                log.info("Transcription complete for event %d via %s "
+                         "(%d chars, %.1fs)", event_id, self._last_engine,
+                         len(text) if text else 0, duration_sec)
                 callback(event_id, text, None, duration_sec)
             except Exception as e:
                 log.error("Transcription failed for event %s: %s",
@@ -224,10 +244,13 @@ class Transcriber:
     def transcribe(self, audio_path):
         """Transcribe one file synchronously with the configured engine."""
         if self._engine == "remote":
+            self._last_engine = f"remote ASR ({self._remote_url})"
             return self._transcribe_remote(audio_path)
         if self._engine == "elevenlabs":
             try:
-                return self._transcribe_elevenlabs(audio_path)
+                text = self._transcribe_elevenlabs(audio_path)
+                self._last_engine = f"ElevenLabs {self._el_model}"
+                return text
             except Exception as e:
                 if self._fallback != "local":
                     raise
@@ -235,7 +258,72 @@ class Transcriber:
                             "falling back to local %s", e, self._model_size)
         if self._model is None:
             self._load_local_model()
+        self._last_engine = (f"local {self._model_size}"
+                             + (" (fallback)" if self._engine == "elevenlabs"
+                                else ""))
         return self._transcribe_local(audio_path)
+
+    def check_elevenlabs(self):
+        """Confirm at startup that ElevenLabs answers and accepts the key.
+
+        Reads the account's subscription (no credits used) and writes the
+        outcome to the log, so `docker logs` shows whether transcription
+        will go through ElevenLabs or the local fallback.  Returns the
+        status, also kept in self.elevenlabs_status.
+        """
+        import requests
+
+        fallback = (f"clips will be transcribed locally ({self._model_size})"
+                    if self._fallback == "local"
+                    else "transcriptions will fail (TRANSCRIPTION_FALLBACK=none)")
+        try:
+            resp = requests.get(ELEVENLABS_ACCOUNT_URL,
+                                headers={"xi-api-key": self._el_api_key},
+                                timeout=min(15, self._el_timeout or 15))
+        except Exception as e:
+            log.warning("ElevenLabs: could not reach api.elevenlabs.io (%s) — "
+                        "%s until it answers", e, fallback)
+            self.elevenlabs_status = "unreachable"
+            return self.elevenlabs_status
+
+        detail = _error_detail(resp)
+        if resp.status_code == 200:
+            try:
+                sub = resp.json()
+            except ValueError:
+                sub = {}
+            used, limit = sub.get("character_count"), sub.get("character_limit")
+            credits = ""
+            if isinstance(used, int) and isinstance(limit, int) and limit:
+                credits = (", " + f"{used:,} of {limit:,}".replace(",", " ")
+                           + " credits used")
+                if used >= 0.9 * limit:
+                    log.warning("ElevenLabs: %d%% of this period's credits are "
+                                "used; when they run out, %s",
+                                round(100 * used / limit), fallback)
+            log.info("ElevenLabs: connected and authenticated (plan %s%s) — "
+                     "transcribing with %s, fallback %s",
+                     sub.get("tier", "unknown"), credits, self._el_model,
+                     self._fallback)
+            self.elevenlabs_status = "ok"
+        elif resp.status_code in (401, 403) and "permission" in detail.lower():
+            # A restricted key without "User: read" access still works for
+            # speech-to-text; the first transcription will confirm it.
+            log.info("ElevenLabs: API key accepted, but it may not read account "
+                     "details (%s) — speech-to-text is confirmed by the first "
+                     "transcription", detail)
+            self.elevenlabs_status = "ok"
+        elif resp.status_code in (401, 403):
+            log.error("ElevenLabs: authentication failed (HTTP %d: %s) — check "
+                      "ELEVENLABS_API_KEY; %s", resp.status_code, detail,
+                      fallback)
+            self.elevenlabs_status = "auth_failed"
+        else:
+            log.warning("ElevenLabs: unexpected answer (HTTP %d: %s) — %s if "
+                        "transcription fails", resp.status_code, detail,
+                        fallback)
+            self.elevenlabs_status = "error"
+        return self.elevenlabs_status
 
     def _load_local_model(self):
         """Load the faster-whisper model (one-time, may download)."""

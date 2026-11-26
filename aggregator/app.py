@@ -2,7 +2,8 @@
 
 Runs two HTTP servers in one event loop:
   - ingest API (INGEST_PORT, default 8081): satellites report here; this is
-    the only part that is put on the internet, behind nginx + Cloudflare
+    the only part that is put on the internet, behind an HTTPS reverse
+    proxy or a Cloudflare Tunnel
   - web UI + read API + node admin (WEB_PORT, default 8080): LAN only
 """
 
@@ -14,7 +15,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from . import config, notifier, store
+from . import config, notifier, privileges, store
 from .api import create_web_app
 from .ingest import create_ingest_app
 from .mqtt_out import MqttOut
@@ -103,4 +104,6 @@ async def main():
 
 
 if __name__ == "__main__":
+    privileges.drop_privileges()
+    privileges.require_writable()
     asyncio.run(main())

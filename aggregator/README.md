@@ -4,7 +4,7 @@ Collects traffic announcements and emergency broadcasts from several
 [RDS Guard](../README.md) installations, called **satellites**, run by friends
 at different places, each with its own RTL-SDR and local P4 station.
 
-![RDS Guard architecture: satellites send events and audio over HTTPS through Cloudflare and nginx to the aggregator's ingest API, which stores them, transcribes the audio and publishes MQTT alerts](../docs/architecture/rds-guard.architecture.svg)
+![RDS Guard architecture: satellites send events and audio over HTTPS through your reverse proxy to the aggregator's ingest API, which stores them, transcribes the audio and publishes MQTT alerts](../docs/architecture/rds-guard.architecture.svg)
 
 The diagram shows one satellite; any number can report to the same
 aggregator. An [interactive version](../docs/architecture/README.md) links
@@ -35,7 +35,9 @@ local events, transcriptions, web UI and MQTT. The protocol is in
 
 ## Quick start
 
-You need a Linux host with Docker, and a domain on Cloudflare.
+You need a Linux host with Docker, and a way to publish one port over HTTPS:
+a reverse proxy you already run (Nginx Proxy Manager, Caddy, Traefik …) or a
+Cloudflare Tunnel.
 
 1. Get the files:
 
@@ -45,52 +47,142 @@ cd rds-guard/aggregator
 cp .env.example .env
 ```
 
-2. Edit `.env`: set `PUBLIC_URL` to the address satellites will use, for
-   example `https://rds.example.com`.
+2. Edit `.env`. These are the settings to look at; the rest have working
+   defaults (see [Configuration](#configuration)):
 
-3. Put the ingest API on the internet (see [Cloudflare](#cloudflare)). With
-   a Cloudflare Tunnel:
+   | Setting | Value |
+   |---|---|
+   | `PUBLIC_URL` | The address satellites will use, e.g. `https://rds.example.com`. It must start with `https://`: satellites do not follow redirects |
+   | `ELEVENLABS_API_KEY` | Your ElevenLabs key. Empty = all audio is transcribed locally |
+   | `MQTT_ENABLED`, `MQTT_HOST` … | Only if you want alerts on MQTT (Home Assistant etc.) |
+
+3. Start it. This is a single container:
 
 ```bash
-docker compose --profile tunnel up -d
+docker compose up -d
 ```
 
-4. Open the web UI at **http://your-host:8080**, go to **Noder**, add a node
+4. Put the ingest API, port **8081**, on the internet (see
+   [Publishing the ingest API](#publishing-the-ingest-api)) and
+   [check that it works](#check-that-it-works).
+
+5. Open the web UI at **http://your-host:8080**, go to **Noder**, add a node
    per friend, and send them the three lines that are shown (see
    [Adding a satellite](#adding-a-satellite)).
+
+Database, audio and downloaded models are stored in the `aggregator-data`
+folder next to `docker-compose.yml`.
 
 To build locally instead of pulling `ghcr.io/tubalainen/rds-guard-aggregator`,
 uncomment `build:` in `docker-compose.yml` and run `docker compose up -d --build`.
 
-## Cloudflare
+## Publishing the ingest API
 
-Only one thing is published: nginx, which forwards `/api/v1/ingest/*` to the
-aggregator and answers 404 to everything else. **The web UI and admin API
-have no login.** Never expose port 8080, and never point Cloudflare at it.
+The aggregator listens on two ports, both plain HTTP:
 
-### Option A: Cloudflare Tunnel (recommended)
+| Port | What | Reachable from |
+|---|---|---|
+| `8081` | Ingest API for satellites. Serves `/api/v1/ingest/*` and nothing else; every request needs a node token | The internet, through HTTPS |
+| `8080` | Web UI, read API and node admin, **without login** | Your LAN only |
+
+Point your proxy or tunnel at port **8081** and never at 8080. No extra
+filter is needed in front: the web UI and the admin API do not exist on port
+8081.
+
+### Option A: a reverse proxy you already run
+
+Any proxy that terminates HTTPS and forwards to `http://<docker-host>:8081`
+works. The steps below are for **Nginx Proxy Manager** with the domain on
+Cloudflare; `rds.example.com` stands for your own hostname.
+
+**1. Nginx Proxy Manager:** add a **Proxy Host**.
+
+| Tab | Field | Value |
+|---|---|---|
+| Details | Domain Names | `rds.example.com` |
+| Details | Scheme | `http` |
+| Details | Forward Hostname / IP | The LAN address of the Docker host, e.g. `192.168.1.50` |
+| Details | Forward Port | `8081` (never `8080`: that is the web UI, which has no login) |
+| Details | Cache Assets, Block Common Exploits, Websockets Support | Off; none of them is needed |
+| SSL | SSL Certificate | A certificate for `rds.example.com`, issued the same way as for your other proxy hosts (Let's Encrypt, or a Cloudflare origin certificate) |
+| SSL | Force SSL | On |
+| SSL | HTTP/2 Support | Optional |
+
+No custom locations and no advanced configuration are needed.
+
+If Nginx Proxy Manager runs in Docker on the same host, the forward address
+is the host's LAN address, not `127.0.0.1`. Or put both containers on one
+Docker network and forward to `rds-guard-aggregator:8081`.
+
+**2. Cloudflare:**
+
+| Where | Setting |
+|---|---|
+| DNS | An `A` or `CNAME` record for `rds` that points to the same address as your other Nginx Proxy Manager hosts, set to **Proxied** |
+| SSL/TLS | Encryption mode **Full (strict)** |
+| Bots | If satellites get an HTTP 403 from Cloudflare, see [Bot protection](#bot-protection) |
+| Rate limiting | Optional, see [Rate limiting](#rate-limiting) |
+
+Nothing else is needed: no page rules, no cache settings and no tunnel.
+
+On a server with a public address, port 8081 would also be reachable
+directly, without HTTPS. Close it in the firewall, or set `INGEST_API_BIND`
+in `.env` to an address only your proxy can reach.
+
+### Option B: Cloudflare Tunnel
 
 No open ports on your router, and no public IP address needed.
 
 1. In the Cloudflare dashboard: **Zero Trust → Networks → Tunnels → Create
-   a tunnel**, type *Cloudflared*. Copy the tunnel token into `.env` as
-   `CLOUDFLARE_TUNNEL_TOKEN=...`.
+   a tunnel**, type *Cloudflared*, and copy the tunnel token.
 2. Add a **public hostname** to the tunnel:
    - Hostname: e.g. `rds.example.com`
-   - Path: `api/v1/ingest/*` (optional extra lock; nginx already refuses the rest)
-   - Service: `HTTP`, URL `nginx:8080`
-3. Start with the tunnel profile: `docker compose --profile tunnel up -d`.
+   - Path: `api/v1/ingest/*` (optional)
+   - Service: `HTTP`, URL `aggregator:8081`
+3. Run `cloudflared`. If you do not run one already, add it to
+   `docker-compose.yml` under `services:` and put
+   `CLOUDFLARE_TUNNEL_TOKEN=...` in `.env`:
 
-### Option B: proxied DNS to your own server
+```yaml
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+```
 
-If the host already has a public address and a TLS-terminating reverse
-proxy (Caddy, Traefik, nginx), point that proxy at nginx on
-`127.0.0.1:8088` (`NGINX_BIND` / `NGINX_PORT` in `.env`) and set the DNS
-record to *Proxied* in Cloudflare with SSL mode **Full (strict)**. Allow
-connections to the origin only from
-[Cloudflare's address ranges](https://www.cloudflare.com/ips/), and add those
-ranges as `set_real_ip_from` in `nginx/ingest.conf` so the per-client rate
-limit sees real client addresses.
+### Check that it works
+
+From any computer on the internet:
+
+```bash
+curl -i https://rds.example.com/api/v1/ingest/heartbeat
+```
+
+The right answer is **HTTP 426** with the header `X-RDS-Guard-Protocol: 1`
+and the body `{"error": "unsupported_protocol", …}`. It means the request
+went all the way to the ingest port, which refused it because `curl` is not
+a satellite.
+
+| Answer | Meaning |
+|---|---|
+| 426 with `X-RDS-Guard-Protocol: 1` | Everything is connected |
+| 404 without that header, and `https://rds.example.com/` shows the web UI | The proxy forwards to port 8080. Change it to `8081` right away: the web UI has no login |
+| 502 or 504 | The proxy cannot reach the aggregator: check the forward address and port, and that the container runs (`docker compose ps`) |
+| 403 from Cloudflare | See [Bot protection](#bot-protection) |
+| 521, 525 or 526 from Cloudflare | Cloudflare cannot reach the proxy over HTTPS: check the DNS record, that port 443 reaches the proxy, and its certificate |
+
+Then add a node under **Noder** in the web UI (see
+[Adding a satellite](#adding-a-satellite)). When its owner has started the
+satellite, the node turns green within a minute.
+
+### Rate limiting
+
+The aggregator limits requests per node (`INGEST_RATE_PER_MIN`). Requests
+without a valid token are refused right away, but not limited per client
+address. To cap those too, add a rate limiting rule for
+`/api/v1/ingest/` in Cloudflare or in your reverse proxy.
 
 ### Bot protection
 
@@ -147,9 +239,9 @@ All settings are in `.env`; see [.env.example](.env.example).
 | `PUBLIC_URL` | | Address satellites use; shown in their setup lines |
 | `WEB_UI_URL` | | Address of the web UI on your network. When set, push messages link to the event |
 | `NOTIFY_TIMEZONE` | `Europe/Stockholm` | Time zone for the days and times in push rules |
-| `CLOUDFLARE_TUNNEL_TOKEN` | | Token for the `tunnel` profile |
 | `WEB_UI_BIND` / `WEB_UI_PORT` | `0.0.0.0` / `8080` | Where the web UI is published on the host. Use `127.0.0.1` on a server with a public address |
-| `NGINX_BIND` / `NGINX_PORT` | `127.0.0.1` / `8088` | Where nginx is published on the host (not needed with the tunnel) |
+| `INGEST_API_BIND` / `INGEST_API_PORT` | `0.0.0.0` / `8081` | Where the ingest API is published on the host: the address and port your reverse proxy forwards to |
+| `PUID` / `PGID` | `10001` / `10001` | User and group that own the files in `aggregator-data` and that the server runs as |
 | `EVENT_RETENTION_DAYS` | `90` | Delete events and audio older than this |
 | `TRANSCRIPTION_ENGINE` | `elevenlabs` | `elevenlabs` (local fallback; runs as `local` without `ELEVENLABS_API_KEY`), `local`, `remote` or `none` (same as on the satellite) |
 | `TRANSCRIPTION_LANGUAGE` | `sv` | Whisper language |
@@ -172,7 +264,12 @@ All settings are in `.env`; see [.env.example](.env.example).
 
 The Swedish KB-Whisper model is bundled in the image, so local transcription
 needs no download. A model you set with `TRANSCRIPTION_MODEL` is downloaded
-once into the data volume.
+once into the data folder.
+
+At startup the log says whether the ElevenLabs key works, and each
+transcription names the engine that served it:
+`docker compose logs aggregator | grep -i elevenlabs`. The main README's
+Transcription section lists the messages.
 
 ## MQTT topics
 
@@ -221,12 +318,15 @@ browser, come from the same origin.
 
 ## Security notes
 
-- Only `/api/v1/ingest/*` is reachable from the internet. Every request
-  there needs a node token, and a node can only change its own events.
+- Only port 8081 is meant for the internet, and it serves `/api/v1/ingest/*`
+  only. Every request there needs a node token, and a node can only change
+  its own events.
 - Everything a satellite sends is validated and length-limited; audio must
   be OGG, at most 8 MiB, and is stored under a name the aggregator chooses.
 - The web UI and admin API have **no login**. Keep port 8080 on your LAN.
-- The container runs as an unprivileged user.
+- The server runs as an unprivileged user. The container starts as root
+  only to make the `aggregator-data` folder writable for that user, and drops
+  root before it opens the database or listens on a port.
 
 ## Operations
 
@@ -236,4 +336,33 @@ docker compose pull && docker compose up -d            # update
 docker compose exec aggregator python3 -m aggregator.nodes list
 ```
 
-Data (database, audio, Whisper model) lives in the `aggregator-data` volume.
+Data (database, audio, downloaded Whisper models) lives in the
+`aggregator-data` folder next to `docker-compose.yml`. To back it up, stop
+the container and copy the folder.
+
+### Upgrading from v0.2.3 or older
+
+Up to v0.2.3 the compose file also started nginx (and optionally
+`cloudflared`), and kept the data in a Docker volume. To move to the
+single-container setup:
+
+1. Update the files (`git pull`). In `.env`, `NGINX_BIND` / `NGINX_PORT` are
+   no longer used.
+2. Stop the aggregator and remove the nginx and `cloudflared` containers:
+   `docker compose down --remove-orphans`. The data volume is kept.
+3. Copy the data from the volume into the folder. The volume is normally
+   called `aggregator_aggregator-data`; check with `docker volume ls`:
+
+```bash
+mkdir -p aggregator-data
+docker run --rm -v aggregator_aggregator-data:/from -v "$PWD/aggregator-data":/to alpine cp -a /from/. /to/
+```
+
+4. Start again: `docker compose pull && docker compose up -d`. Nodes, tokens
+   and events are kept.
+5. Point your reverse proxy or tunnel at port `8081` of the aggregator
+   instead of nginx (see [Publishing the ingest API](#publishing-the-ingest-api)).
+   A tunnel that pointed at `nginx:8080` now needs its own `cloudflared`
+   (Option B) and the service URL `aggregator:8081`.
+6. When everything works, remove the old volume:
+   `docker volume rm aggregator_aggregator-data`

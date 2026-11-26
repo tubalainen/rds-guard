@@ -23,13 +23,14 @@ Built for Sveriges Radio P4, Sweden's primary traffic announcement carrier and e
 
 ### System overview
 
-![RDS Guard architecture: a satellite decodes P4 with an RTL-SDR, stores events and audio locally and, optionally, sends them over HTTPS through Cloudflare and nginx to the aggregator, which stores, transcribes and publishes alerts](docs/architecture/rds-guard.architecture.svg)
+![RDS Guard architecture: a satellite decodes P4 with an RTL-SDR, stores events and audio locally and, optionally, sends them over HTTPS through a reverse proxy to the aggregator, which stores, transcribes and publishes alerts](docs/architecture/rds-guard.architecture.svg)
 
 Every installation is a complete RDS Guard on its own (**standalone**). With
 `UPLINK_URL` set it also becomes a **satellite** and sends a copy of each event
 and its audio to an **aggregator**, a separate container that collects events
 from many satellites, transcribes them centrally and publishes MQTT alerts. Only
-the aggregator's ingest API is on the internet, behind Cloudflare and nginx.
+the aggregator's ingest API is on the internet, behind an HTTPS reverse proxy or
+a Cloudflare Tunnel.
 See [Run as a satellite](#run-as-a-satellite) and
 [aggregator/README.md](aggregator/README.md).
 
@@ -266,7 +267,11 @@ The installation is standalone again; local data is not affected.
 ### Run the aggregator yourself
 
 To collect events from friends' satellites, run the separate aggregator
-container: see [aggregator/README.md](aggregator/README.md).
+container: see [aggregator/README.md](aggregator/README.md). It is a single
+container that you put behind your own HTTPS reverse proxy (for example
+Nginx Proxy Manager with Cloudflare) or a Cloudflare Tunnel; its README has
+the settings for both and a way to
+[check that it works](aggregator/README.md#check-that-it-works).
 
 ## Configuration
 
@@ -349,6 +354,17 @@ Recorded audio is transcribed for searchable text and MQTT alerts. By default El
 > **Swedish model:** for `TRANSCRIPTION_LANGUAGE=sv` the default is [KB-Whisper](https://huggingface.co/KBLab/kb-whisper-small) small from the National Library of Sweden, in its verbatim *strict* style, which the Docker image converts and bundles at build time (`/opt/models`) because KBLab only publishes the default style for faster-whisper. KB-Whisper is trained on 50 000+ hours of Swedish. `kb-whisper-small` has about 6–7 % word error rate on Swedish benchmarks versus 20–26 % for OpenAI's `small` (and beats OpenAI's `large-v3`) at the same CPU cost. On a stronger host, `KBLab/kb-whisper-medium` or `KBLab/kb-whisper-large` is more accurate still. Other models are downloaded once and cached under `/data/models`.
 
 > **ElevenLabs:** on P4 traffic clips Scribe was more complete than local KB-Whisper (fewer dropped place names and details, phone and road numbers right) and took 2–5 s per clip. Audio is sent to ElevenLabs (US processing by default). With the default fallback, a failed call is transcribed locally, so alerts still get text.
+
+**Check that ElevenLabs works:** at startup the container checks the key against ElevenLabs (an account lookup, no credits used) and logs the result. `docker compose logs rds-guard | grep -i elevenlabs` shows one of:
+
+```
+ElevenLabs: connected and authenticated (plan starter, 20 264 of 90 000 credits used) — transcribing with scribe_v3, fallback local
+ElevenLabs: authentication failed (HTTP 401: invalid_api_key) — check ELEVENLABS_API_KEY; clips will be transcribed locally (…)
+ElevenLabs: could not reach api.elevenlabs.io (…) — clips will be transcribed locally (…) until it answers
+ElevenLabs: no ELEVENLABS_API_KEY set — transcribing locally instead
+```
+
+Each transcription is logged with the engine that served it, e.g. `Transcription complete for event 42 via ElevenLabs scribe_v3 (333 chars, 3.1s)` or `… via local … (fallback)`. A warning appears when 90 % of the period's credits are used.
 
 > **Local vs Remote:** Local transcription works out of the box but uses significant CPU/RAM (especially larger models). For Raspberry Pi or low-power hosts, use `TRANSCRIPTION_ENGINE=remote` with a [whisper-asr-webservice](https://github.com/ahmetoner/whisper-asr-webservice) container running on a more powerful machine, or set `TRANSCRIPTION_ENGINE=none` to disable transcription while still recording audio.
 
@@ -708,7 +724,7 @@ and existing rows are not changed. The outbox is only used in satellite mode.
 
 **Pinning a version:** `ghcr.io/tubalainen/rds-guard:latest` follows
 `master`. To stay on a release, set the image to
-`ghcr.io/tubalainen/rds-guard:0.2.2` (or `:0.2` to get 0.2.x patch releases).
+`ghcr.io/tubalainen/rds-guard:0.3.0` (or `:0.3` to get 0.3.x patch releases).
 
 **Rolling back:** set the image to `ghcr.io/tubalainen/rds-guard:0.1.3`, and
 restore `rds-data.backup-0.1.3` if you want the database exactly as it was.
