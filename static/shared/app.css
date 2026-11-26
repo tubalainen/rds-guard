@@ -597,6 +597,20 @@ details.help[open] summary { margin-bottom: 10px; }
 }
 .map-check input { width: 18px; height: 18px; margin: 0; accent-color: #7F56D9; cursor: pointer; }
 #map-backfill { margin-top: 8px; }
+#map-areas { margin-top: 8px; }
+.map-areas {
+    padding: 12px 14px; border-radius: 12px;
+    background: var(--warn-bg); color: var(--text); border: 1px solid var(--border);
+}
+.map-areas-title { margin: 0 0 6px; font-size: 14px; font-weight: 600; color: var(--warn); }
+.map-areas ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.map-area { display: flex; gap: 10px; align-items: flex-start; }
+.map-area-icon {
+    flex: none; width: 18px; height: 18px; margin-top: 1px; border-radius: 50%;
+    background: var(--warn); color: #1F1A0E; font-size: 12px; font-weight: 800;
+    display: inline-flex; align-items: center; justify-content: center;
+}
+.map-area-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
 .map-note.info { background: var(--surface-2); color: var(--text-2); border: 1px solid var(--border); display: flex; gap: 10px; align-items: center; }
 .map-note .spinner {
     flex: none; width: 14px; height: 14px; border-radius: 50%;

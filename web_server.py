@@ -31,6 +31,7 @@ from aiohttp import web
 
 import admin_auth
 import event_store
+import geolocate
 import notifier
 import notify_rules
 
@@ -204,7 +205,12 @@ async def handle_incidents(request):
 
     import rds_guard as rg
     rows = await _run(work)
-    out = {"incidents": rows, "hours": hours, "geo": rg.geo_snapshot()}
+    # Warnings for an area (slippery roads ...): the current ones only
+    areas = await _run(event_store.list_areas, hours or geolocate.INCIDENT_HOURS)
+    for a in areas:
+        a["events"] = [int(k) for k in a["events"] if str(k).isdigit()]
+    out = {"incidents": rows, "areas": areas, "hours": hours,
+           "geo": rg.geo_snapshot()}
     if history:
         out["backfill"] = await _run(rg.backfill_status)
     return web.json_response(out)

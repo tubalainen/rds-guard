@@ -111,3 +111,16 @@ async def test_history_api(aiohttp_client, store, geo):
     # The normal map keeps to the last 12 hours
     data = await (await client.get("/api/incidents")).json()
     assert data["incidents"] == [] and "backfill" not in data
+
+
+async def test_area_warnings_reach_the_map(aiohttp_client, store, geo):
+    import web_server
+    eid = store.insert_event("traffic", "info", "end", "0xE824", {})
+    result = geo.locate("Det är mycket halt på många vägar i länet.",
+                        rds_guard._node_place.point)
+    assert result.areas and not result.placements
+    store.save_geolocation(eid, result, "done")
+    client = await aiohttp_client(web_server.create_app())
+    data = await (await client.get("/api/incidents")).json()
+    [area] = data["areas"]
+    assert area["events"] == [eid] and "halt" in area["evidence"]

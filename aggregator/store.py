@@ -755,6 +755,8 @@ def save_geolocation(event_uid, result, status, at=None):
             ids = geolocate.merge_placements(
                 conn, result.placements, event_uid, now,
                 _iso_before(now, geolocate.INCIDENT_HOURS * 3600), result.engine)
+        if result is not None:
+            geolocate.save_areas(conn, result.areas, event_uid, now, result.engine)
             row = conn.execute("SELECT transcription FROM events WHERE "
                                "event_uid = ?", (event_uid,)).fetchone()
             text = result.corrected_text or (row[0] if row else "") or ""
@@ -785,6 +787,11 @@ def open_incidents(center=None, km=geolocate.DEFAULT_AREA_KM, at=None):
         rows = geolocate.open_incidents(
             _conn(), iso_ago(geolocate.LINK_HOURS * 3600))
     return _near(rows, center, km)
+
+
+def list_areas(hours=geolocate.INCIDENT_HOURS):
+    """Area warnings of the last hours; hours=None: all that are stored."""
+    return geolocate.list_areas(_conn(), iso_ago(hours * 3600) if hours else None)
 
 
 def list_incidents(hours=geolocate.INCIDENT_HOURS):

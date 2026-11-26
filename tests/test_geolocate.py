@@ -458,3 +458,20 @@ def test_a_stretch_of_the_same_road_joins_a_precise_incident(db):
     [b] = merge(db, [pl(59.24241, 13.01527, 13210, road="E45")], 2, "2026-11-26T12:04:00")
     [c] = merge(db, [pl(59.24241, 13.01527, 13210, road="Rv 61")], 3, "2026-11-26T12:05:00")
     assert a == b and c != a
+
+
+# ---------------------------------------------------------------- area warnings
+
+def test_area_warnings_are_stored_and_said_again_once(db):
+    halt = geo.Mention(kind="area_warning", area="Värmlands län", what="Mycket halt",
+                       evidence="Mycket halt på många vägar i Värmlands län.")
+    geo.save_areas(db, [halt], 1, "2026-11-26T10:00:00", "claude")
+    geo.save_areas(db, [halt], 2, "2026-11-26T11:00:00", "claude")
+    geo.save_areas(db, [geo.Mention(kind="area_warning", area="Sunne", what="Snö")],
+                   3, "2026-11-26T11:30:00", "claude")
+    geo.save_areas(db, [halt], 2, "2026-11-26T11:00:00", "claude")   # placed again
+    a, b = geo.list_areas(db, "2026-11-26T00:00:00")
+    assert (a["area"], b["area"]) == ("Sunne", "Värmlands län")
+    assert b["events"] == ["2", "1"] and b["first_seen"] == "2026-11-26T10:00:00"
+    geo.purge_incidents(db, "2026-11-26T10:30:00")
+    assert [x["events"] for x in geo.list_areas(db)] == [["3"], ["2"]]

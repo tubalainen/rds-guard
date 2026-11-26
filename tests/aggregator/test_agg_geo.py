@@ -138,3 +138,12 @@ def test_messages_of_a_node_without_location_wait(agg_store, event, geo, monkeyp
     assert pipe.start_backfill()
     _wait(pipe)
     assert agg_store.get_event(UID)["geo_status"] == "done"
+
+
+async def test_area_warnings_reach_the_map(aiohttp_client, agg_store, event, geo):
+    place = geo.locate_node("Karlstad, Värmlands län")
+    result = geo.locate("Det är mycket halt på många vägar i länet.", place.point)
+    agg_store.save_geolocation(UID, result, "done")
+    web = await aiohttp_client(api.create_web_app(Pipeline(transcriber=None, mqtt=None, geo=geo)))
+    [area] = (await (await web.get("/api/v1/incidents")).json())["areas"]
+    assert area["events"] == [UID] and "halt" in area["evidence"]

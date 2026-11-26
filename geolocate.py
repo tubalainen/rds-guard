@@ -855,6 +855,18 @@ CREATE TABLE IF NOT EXISTS incident_events (
     PRIMARY KEY (incident_id, event_key)
 );
 CREATE INDEX IF NOT EXISTS idx_incident_events_key ON incident_events(event_key);
+CREATE TABLE IF NOT EXISTS area_warnings (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_key       TEXT NOT NULL,
+    seen_at         TEXT NOT NULL,
+    area            TEXT,
+    road            TEXT,
+    what            TEXT,
+    evidence        TEXT,
+    engine          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_area_warnings_seen ON area_warnings(seen_at);
+CREATE INDEX IF NOT EXISTS idx_area_warnings_key ON area_warnings(event_key);
 """
 
 
@@ -1067,7 +1079,49 @@ def recent_names(conn, since_iso, limit=60):
     return [n for n, _ in sorted(counts.items(), key=lambda kv: -kv[1])][:limit]
 
 
+def save_areas(conn, areas, event_key, now_iso, engine):
+    """Store a message's area warnings (Mention objects), replacing what was
+    stored for it before. The caller holds its write lock and commits."""
+    conn.execute("DELETE FROM area_warnings WHERE event_key = ?", (str(event_key),))
+    for m in areas or ():
+        conn.execute(
+            "INSERT INTO area_warnings (event_key, seen_at, area, road, what, "
+            "evidence, engine) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (str(event_key), now_iso, (m.area or "")[:200] or None, m.road,
+             (m.what or "")[:200], (m.evidence or "")[:EVIDENCE_MAX], engine))
+
+
+def _area_key(row):
+    text = row.get("area") or row.get("what") or row.get("evidence") or ""
+    return " ".join(re.findall(r"\w+", text.lower()))
+
+
+def list_areas(conn, since_iso=None):
+    """Area warnings heard since since_iso, newest first. The same warning
+    said again (same area, or the same words) is one entry, with every
+    message that said it."""
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM area_warnings WHERE seen_at >= ? ORDER BY seen_at DESC",
+        (since_iso or "",))]
+    out, by_key = [], {}
+    for r in rows:
+        key = _area_key(r)
+        if key in by_key:
+            e = by_key[key]
+            e["first_seen"] = r["seen_at"]
+            e["events"].append(r["event_key"])
+            continue
+        e = {"id": r["id"], "area": r["area"], "road": r["road"],
+             "what": r["what"], "evidence": r["evidence"],
+             "first_seen": r["seen_at"], "last_seen": r["seen_at"],
+             "events": [r["event_key"]]}
+        by_key[key] = e
+        out.append(e)
+    return out
+
+
 def purge_incidents(conn, before_iso):
     conn.execute("DELETE FROM incident_events WHERE incident_id IN "
                  "(SELECT id FROM incidents WHERE last_seen < ?)", (before_iso,))
     conn.execute("DELETE FROM incidents WHERE last_seen < ?", (before_iso,))
+    conn.execute("DELETE FROM area_warnings WHERE seen_at < ?", (before_iso,))

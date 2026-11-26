@@ -321,6 +321,26 @@ const RDSMap = (() => {
     }
 
     /** How far placing the older messages has come. */
+    /** Warnings for an area (slippery roads, snow): a list, not pins. */
+    function areasBox(areas) {
+        if (!areas || !areas.length) return '';
+        const rows = areas.map((a) => {
+            const title = a.area || a.what || 'Varning';
+            const sub = a.area && a.what ? a.what : '';
+            const n = (a.events || []).length;
+            const ev = (a.events || [])[0];
+            return `<li class="map-area">
+                <span class="map-area-icon" aria-hidden="true">!</span>
+                <span class="map-area-body"><b>${esc(title)}</b>
+                    ${sub ? `<span class="small muted">${esc(sub)}</span>` : ''}
+                    <span class="small muted">${esc(when(a))}${n > 1 ? ` · nämnd ${n} gånger` : ''}${ev != null
+                        ? ` · <a href="#/event/${encodeURIComponent(ev)}">Meddelandet</a>` : ''}</span>
+                </span></li>`;
+        }).join('');
+        return `<section class="map-areas" aria-label="Varningar för områden">
+            <h2 class="map-areas-title">Varningar för områden</h2><ul>${rows}</ul></section>`;
+    }
+
     function backfillNote(bf, ranHere) {
         if (!bf) return '';
         const claude = bf.engine === 'claude' ? ' med Claude' : '';
@@ -359,6 +379,7 @@ const RDSMap = (() => {
                 </div></div>
             <div id="map-note" class="map-note-slot"></div>
             <div id="map-backfill" class="map-note-slot"></div>
+            <div id="map-areas" class="map-note-slot"></div>
             <div class="map-layout">
                 <div class="map-box"><div id="map" class="map" role="application" aria-label="Karta över händelser"></div>
                     <div class="map-legend" aria-hidden="true">
@@ -465,6 +486,7 @@ const RDSMap = (() => {
             const wasRunning = backfillRunning;
             backfillRunning = !!(bf && bf.running);
             root.querySelector('#map-backfill').innerHTML = backfillNote(bf, backfillAsked);
+            root.querySelector('#map-areas').innerHTML = areasBox(data.areas);
             if (bf && bf.runnable && !backfillAsked) startBackfill();
             if (wasRunning && !backfillRunning) first = true;  // refit to the new pins
 

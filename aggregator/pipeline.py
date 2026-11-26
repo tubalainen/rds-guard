@@ -207,7 +207,7 @@ class Pipeline(Hooks):
             result = self._geo.locate(text, place.point, location,
                                       row.get("radiotext"),
                                       store.open_incidents(place.point))
-            status = "done" if result and result.placements else "none"
+            status = "done" if result and (result.placements or result.areas) else "none"
             store.save_geolocation(uid, result, status)
             if result:
                 log.info("Event %s from %s placed with %s: %s", uid,
@@ -234,7 +234,7 @@ class Pipeline(Hooks):
         result = self._geo.locate(row["transcription"], place.point, location,
                                   row.get("radiotext"),
                                   store.open_incidents(place.point, at=row["at"]))
-        status = "done" if result and result.placements else "none"
+        status = "done" if result and (result.placements or result.areas) else "none"
         store.save_geolocation(row["event_uid"], result, status, at=row["at"])
         return bool(result and result.placements)
 

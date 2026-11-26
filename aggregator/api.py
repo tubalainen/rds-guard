@@ -17,6 +17,7 @@ from aiohttp import web
 import admin_auth
 import notify_rules
 
+import geolocate
 import trafikverket
 
 from . import config, nodes, notifier, store
@@ -380,8 +381,10 @@ async def handle_incidents(request):
         return rows, nodes
 
     rows, nodes = await _run(work)
+    # Warnings for an area (slippery roads ...): the current ones only
+    areas = await _run(store.list_areas, hours or geolocate.INCIDENT_HOURS)
     out = {
-        "incidents": rows, "hours": hours, "nodes": nodes,
+        "incidents": rows, "areas": areas, "hours": hours, "nodes": nodes,
         "geo": {"enabled": config.GEO_ENGINE != "none",
                 "engine": ("claude" if config.GEO_ENGINE == "claude"
                            and config.ANTHROPIC_API_KEY else

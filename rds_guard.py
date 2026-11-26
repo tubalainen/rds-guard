@@ -976,7 +976,7 @@ def _geolocate(event_id, text):
         if result is None:
             event_store.save_geolocation(event_id, None, "none")
             return None
-        status = "done" if result.placements else "none"
+        status = "done" if result.placements or result.areas else "none"
         ids = event_store.save_geolocation(event_id, result, status)
         result.incident_ids = ids
         log.info("Event %d placed with %s: %s", event_id, result.engine,
@@ -1008,7 +1008,7 @@ def _place_older(item):
     if result is None:
         event_store.save_geolocation(item["id"], None, "none", at=item["at"])
         return False
-    status = "done" if result.placements else "none"
+    status = "done" if result.placements or result.areas else "none"
     event_store.save_geolocation(item["id"], result, status, at=item["at"])
     return bool(result.placements)
 
