@@ -211,3 +211,4 @@
     .console-log { height: calc(100vh - 22rem); font-size: 0.75rem; }
     .console-group { min-width: 5rem; }
 }
+.debug { border: 1px solid var(--border); }
