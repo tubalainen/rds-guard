@@ -674,10 +674,31 @@ docker compose exec rds-guard python3 /app/tools/measure_geolocation.py
 docker compose exec rds-guard python3 /app/tools/measure_geolocation.py --keyterms --limit 20
 ```
 
+To score the engines against a labelled set of real messages
+(`tests/fixtures/geo_corpus.json`: which incidents each message holds,
+where, of what kind, and which messages are about the same incident):
+
+```bash
+python3 tools/eval_geolocation.py                   # rules engine, free
+docker compose exec rds-guard python3 /app/tools/eval_geolocation.py --engine claude
+python3 tools/eval_geolocation.py --import events.json   # add messages to label
+python3 tools/eval_geolocation.py --stored events.json   # score what was stored, free
+```
+
+It reports incidents found, places without a match, distance and radius,
+the right kind (new, known, cleared) and how well messages about one
+incident are linked together.
+
 The first shows where the rules engine and (with `ANTHROPIC_API_KEY`)
 Claude place each message, Claude's corrected text and its token cost. The
 second also transcribes the clips again with ElevenLabs with and without
 the place names, to see whether they help.
+
+Places missing from OpenStreetMap, or the one of several same-named places
+that the traffic desk means, are added by hand in
+`geodata/places-local.tsv` (name, kind, lat, lon, county; one per line). A
+name there replaces OpenStreetMap entries of the same name within 5 km and
+wins over the others.
 
 The map tiles come from `tile.openstreetmap.org`, loaded by your browser.
 Refresh the place-name registry now and then with

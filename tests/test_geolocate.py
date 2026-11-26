@@ -1,6 +1,7 @@
 """Geolocation: place-name registry, rules engine, resolver and incidents."""
 
 import gzip
+import json
 import sqlite3
 
 import pytest
@@ -177,7 +178,7 @@ class FakeReader:
         self.fail = fail
         self.calls = []
 
-    def read(self, text, radiotext, location, candidates, open_incidents):
+    def read(self, text, radiotext, location, candidates, open_incidents, gaz=None):
         self.calls.append((text, [c.name for c in candidates], open_incidents))
         if self.fail:
             raise RuntimeError("API down")
@@ -296,3 +297,164 @@ def test_open_incidents_at_a_past_time(db):
 def test_shift_keeps_the_timestamp_form():
     assert geo._shift_iso("2026-11-26T23:00:00Z", 2) == "2026-11-27T01:00:00Z"
     assert geo._shift_iso("2026-11-26T23:00:00", -24) == "2026-11-25T23:00:00"
+
+
+# ---------------------------------------------------------------- places added by hand
+
+def test_a_place_added_by_hand_wins_over_others_with_its_name(tmp_path):
+    path = tmp_path / "gaz.tsv.gz"
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        f.write("Ölme\tvillage\t59.36209\t14.00995\tS\t\n"
+                "Stolpen\tlocality\t59.36980\t14.01170\tS\t\n"      # replaced
+                "Stolpen\tisolated_dwelling\t59.44863\t13.99557\tS\t\n"
+                "Stolpen\tisolated_dwelling\t59.51357\t14.30688\tS\t\n")
+    local = tmp_path / "local.tsv"
+    local.write_text("# comment\n"
+                     "Stolpen\tlandmark\t59.36987\t14.01174\tS\tvid E18\n"
+                     "broken line\n", encoding="utf-8")
+    reg = gz.Gazetteer.load(str(path), local_path=str(local))
+    stolpen = reg.exact("Stolpen")
+    assert len(stolpen) == 3                          # the OSM twin is gone
+    assert [p.local for p in stolpen].count(True) == 1
+    assert reg.search("Stolpen", limit=1)[0].place.local
+    [p] = place("Olycka på E18 vid Stolpen.", reg, center=(59.38, 13.5))
+    assert (p.lat, p.lon, p.radius_m) == (59.36987, 14.01174, 600)
+
+
+def test_bundled_hand_made_places_are_valid():
+    places = gz.read_local(gz.LOCAL_PATH)
+    assert places
+    for p in places:
+        assert p.kind in gz.KIND_RADIUS_M and p.county in gz.COUNTIES
+
+
+# ---------------------------------------------------------------- kinds (v0.7)
+
+def test_rules_give_each_part_a_kind_and_its_words():
+    ms = geo.extract_rules(
+        "Olycka på E18 vid Bergviksmotet. Sedan fortfarande köer på riksväg 61 "
+        "vid Skattkärr. Det är mycket halt på många vägar i Värmlands län.")
+    assert [m.kind for m in ms] == ["new", "repeat", "area_warning"]
+    assert ms[0].evidence == "Olycka på E18 vid Bergviksmotet."
+    assert "halt" in ms[2].evidence
+
+
+def test_area_warnings_are_not_placed(reg):
+    r = geo.Geolocator(None).locate(
+        "Mycket halt läge på många vägar, runt Grums och Kil.", reg, KARLSTAD)
+    assert r.placements == [] and [m.kind for m in r.areas] == ["area_warning"]
+
+
+def test_an_id_picks_one_of_several_places_with_a_name(tmp_path):
+    path = tmp_path / "gaz.tsv.gz"
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        f.write("Ölme\tvillage\t59.36209\t14.00995\tS\t\n"
+                "Stolpen\tisolated_dwelling\t59.44863\t13.99557\tS\t\n"
+                "Stolpen\tlocality\t59.36987\t14.01174\tS\t\n")
+    reg = gz.Gazetteer.load(str(path))
+    wanted = next(p for p in reg.exact("Stolpen") if p.kind == "locality")
+    [m] = geo.mentions_from_items(
+        [{"kind": "new", "road": "E18", "town": "p2", "places": [],
+          "evidence": "vid Stolpen", "incident_id": None}],
+        {1: reg.exact("Ölme")[0], 2: wanted}, ("Olycka på E18 vid Stolpen.",))
+    p = geo.resolve(m, reg, (59.38, 13.5))
+    assert (p.lat, p.lon) == wanted.point and p.label == "E18 Stolpen"
+    assert m.evidence == "vid Stolpen"
+
+
+def test_describe_place_says_where_it_is(reg):
+    p = reg.exact("Skattkärr")[0]
+    assert geo.describe_place(p, reg) == "Skattkärr (tätort, Värmlands län)"
+
+
+def test_evidence_must_stand_in_the_text():
+    text = "Olycka på E18 vid Väse. Älg på riksväg 61 vid Kil."
+    assert geo.check_evidence("Älg på riksväg 61 vid Kil.", text) == "Älg på riksväg 61 vid Kil."
+    assert geo.check_evidence("Älg på riksväg 61 nära Kil", text) == "Älg på riksväg 61 vid Kil."
+    assert geo.check_evidence("Något helt annat här", text) == ""
+
+
+class FakeClient:
+    def __init__(self, data):
+        self.data, self.sent = data, None
+        self.messages = self
+
+    def create(self, **kw):
+        self.sent = kw
+        block = type("B", (), {"type": "text", "text": json.dumps(self.data)})
+        return type("R", (), {"stop_reason": "end_turn", "content": [block],
+                              "usage": None})
+
+
+def test_claude_reader_sends_ids_and_known_incidents(reg):
+    reader = object.__new__(geo.ClaudeReader)
+    reader._client = FakeClient({"corrected_text": "Olycka på E18 vid Skattkärr.",
+                                 "items": [{
+        "kind": "update", "incident_id": 7, "evidence": "Olycka på E18 vid Skattkärr.",
+        "when": "now", "confidence": "high", "road": "E18", "town": None,
+        "between": None, "places": ["p1"], "toward": None, "coming_from": None,
+        "both_directions": False, "area": None, "what": "Olycka"}]})
+    reader.model, reader.last_usage = "m", None
+    known = [{"id": 7, "road": "E18", "label": "E18 Skattkärr", "what": "Olycka",
+              "status": "active", "first_seen": "a", "last_seen": "b",
+              "last_evidence": "Olycka vid Skattkärr"}]
+    corrected, [m] = reader.read("Olycka på E18 vid Skatscher.", [], "Karlstad",
+                                 reg.exact("Skattkärr"), known, gaz=reg)
+    payload = json.loads(reader._client.sent["messages"][0]["content"])
+    assert payload["real_places"][0].startswith("p1: Skattkärr (tätort")
+    assert payload["known_incidents"][0]["last_said"] == "Olycka vid Skattkärr"
+    assert (m.kind, m.updates_incident, m.places) == ("update", 7, ["Skattkärr"])
+    assert "skattkärr" in m.pinned
+
+
+def test_a_repeat_counts_but_changes_nothing(db):
+    [a] = merge(db, [pl(59.379, 13.43247, 500, what="Krock, avstängt")], 1,
+                "2026-11-26T10:00:00")
+    [b] = merge(db, [pl(59.379, 13.43247, 500, what="Köer", kind="repeat",
+                        evidence="Fortfarande köer")], 2, "2026-11-26T10:30:00")
+    assert a == b
+    [inc] = geo.list_incidents(db, "2026-11-26T00:00:00")
+    assert inc["what"] == "Krock, avstängt" and inc["last_seen"] == "2026-11-26T10:30:00"
+    [ev] = geo.incidents_for_events(db, ["2"])["2"]
+    assert (ev["kind"], ev["evidence"]) == ("repeat", "Fortfarande köer")
+
+
+def test_an_id_links_to_yesterday_but_a_place_alone_does_not(db):
+    [a] = merge(db, [pl(59.379, 13.43247, 500)], 1, "2026-11-25T08:00:00")
+    since = "2026-11-25T22:00:00"   # 12 hours before the next message
+    [b] = geo.merge_placements(db, [pl(59.379, 13.43247, 500)], 2,
+                               "2026-11-26T10:00:00", since, "rules")
+    [c] = geo.merge_placements(db, [pl(59.379, 13.43247, 500, kind="repeat",
+                                       updates_incident=a)], 3,
+                               "2026-11-26T10:05:00", since, "claude")
+    assert b != a and c == a
+
+
+def test_known_incidents_include_cleared_and_the_last_words(db):
+    merge(db, [pl(59.379, 13.43247, 500, evidence="Krock vid Bergviksmotet")], 1,
+          "2026-11-26T10:00:00")
+    merge(db, [pl(59.379, 13.43247, 500, kind="cleared", cleared=True,
+                  evidence="Öppet igen")], 2, "2026-11-26T11:00:00")
+    [inc] = geo.open_incidents(db, "2026-11-26T00:00:00")
+    assert inc["status"] == "cleared" and inc["last_evidence"] == "Öppet igen"
+
+
+def test_old_incident_tables_get_the_new_columns():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE incident_events (incident_id INTEGER, "
+                 "event_key TEXT, seen_at TEXT, PRIMARY KEY (incident_id, event_key))")
+    geo.init_tables(conn)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(incident_events)")}
+    assert {"kind", "evidence"} <= cols
+
+
+def test_road_numbers_with_a_suffix():
+    assert geo.norm_road("E45an är avstängd") == "E45"
+    assert geo.norm_road("riksväg 61-an") == "Rv 61"
+
+
+def test_a_stretch_of_the_same_road_joins_a_precise_incident(db):
+    [a] = merge(db, [pl(59.18151, 13.01479, 1500, road="E45")], 1, "2026-11-26T11:52:00")
+    [b] = merge(db, [pl(59.24241, 13.01527, 13210, road="E45")], 2, "2026-11-26T12:04:00")
+    [c] = merge(db, [pl(59.24241, 13.01527, 13210, road="Rv 61")], 3, "2026-11-26T12:05:00")
+    assert a == b and c != a

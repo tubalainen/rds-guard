@@ -14,6 +14,15 @@ Two engines read the text; they produce the same kind of result:
 
 Either way, coordinates only ever come from the local place-name registry
 (gazetteer.py): Claude picks names, it never invents positions.
+
+A message mixes things: new incidents, updates of ones already reported,
+reminders, "open again", and warnings for a whole area (slippery roads).
+Each part gets a kind, and the server decides what a kind may change:
+  new           a new incident (or joins one at the same place)
+  update        new facts about a known incident: description, direction
+  repeat        a reminder: counts as a mention, changes nothing else
+  cleared       the incident is over
+  area_warning  a warning for an area, not a point; not placed on the map
 """
 
 import calendar
@@ -30,6 +39,9 @@ log = logging.getLogger("rds-guard")
 
 MAX_RADIUS_M = 25000          # less certain than this: not placed
 INCIDENT_HOURS = 12           # an incident stays on the map this long
+LINK_HOURS = 36               # "the same as yesterday" can still be linked
+KINDS = ("new", "update", "repeat", "cleared", "area_warning")
+EVIDENCE_MAX = 400
 # Besides NULL (stored before v0.5.0), messages with these geo_status values
 # were never placed: the receiver's location was not known then
 PENDING_STATUSES = ("no_location",)
@@ -56,6 +68,12 @@ class Mention:
     what: str = ""
     cleared: bool = False
     updates_incident: int = None
+    kind: str = "new"               # see KINDS
+    evidence: str = ""              # the words of the message it is based on
+    when: str = "unknown"           # now | earlier | yesterday | unknown
+    confidence: str = "high"        # high | medium | low
+    area: str = None                # area_warning: where ("Värmlands län")
+    pinned: dict = field(default_factory=dict)   # name -> Place picked by id
 
 
 @dataclass
@@ -72,6 +90,8 @@ class Placement:
     level: str = ""                 # how it was placed, for the UI
     names: list = field(default_factory=list)
     updates_incident: int = None
+    kind: str = "new"
+    evidence: str = ""
 
 
 @dataclass
@@ -80,6 +100,7 @@ class GeoResult:
     placements: list
     corrected_text: str = None
     error: str = None
+    areas: list = field(default_factory=list)    # area warnings (Mention)
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +108,7 @@ class GeoResult:
 # ---------------------------------------------------------------------------
 
 ROAD_RE = re.compile(
-    r"\b(?:(E)\s?(\d{1,2})|(riks\w*|rv|länsväg|lv|väg)\s+(\d{1,4}))\b",
+    r"\b(?:(E)\s?(\d{1,2})|(riks\w*|rv|länsväg|lv|väg)\s+(\d{1,4}))(?:-?an)?\b",
     re.IGNORECASE)
 
 _STOP = set("""
@@ -118,6 +139,16 @@ _BOTH = re.compile(r"b[åa]d[ae]?\s+(riktning|håll)|åt båda|i båda",
                    re.IGNORECASE)
 _NEW_PART = re.compile(r"^\s*(sedan|vidare|kvar på|över till|dessutom|"
                        r"även|och så|till sist)\b", re.IGNORECASE)
+# Words of a warning for an area, and words that make it a single incident
+_AREA = re.compile(r"halk|\bhalt\b|\bhalla?\b|väglag|återfr|blixthalka|snöfall|"
+                   r"\bsnö\b|oväder|\bstorm", re.IGNORECASE)
+_SPECIFIC = re.compile(r"olyck|krock|dike|vilt|älg|rådjur|djur|stillastående|"
+                       r"lastbil|personbil|\bbil\b|bilar|avstängd|blocker|träd|"
+                       r"haveri|bärg|rondell|motet|korsning|bron\b|tunnel",
+                       re.IGNORECASE)
+_REPEAT = re.compile(r"\bfortfarande\b|\bfortsatt|\bkvar\b|påminner|"
+                     r"som (?:jag|vi) (?:nämnde|sa)|\bnämnde\b|sedan tidigare|"
+                     r"\bi går\b", re.IGNORECASE)
 
 
 def norm_road(text):
@@ -155,16 +186,26 @@ def _sentences(text):
     return [s for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
 
 
+def _area_only(sentence):
+    return bool(_AREA.search(sentence)) and not _SPECIFIC.search(sentence)
+
+
 def _chunks(text):
-    """Group sentences into parts that are about the same road and place."""
+    """Group sentences into parts that are about the same road and place.
+
+    A sentence that only warns for an area ("mycket halt på många vägar")
+    starts a part of its own, marked "area"."""
     chunks = []
     for s in _sentences(text):
         road = norm_road(s)
         cur = chunks[-1] if chunks else None
+        area = _area_only(s)
         new = cur is None or (road and cur["road"] and road != cur["road"])
         new = new or (road and _NEW_PART.search(s) and cur["text"].strip())
+        new = new or (area and not cur.get("area"))
+        new = new or (cur.get("area") and _SPECIFIC.search(s) and road)
         if new:
-            cur = {"road": road, "text": ""}
+            cur = {"road": road, "text": "", "area": area}
             chunks.append(cur)
         cur["road"] = cur["road"] or road
         cur["text"] += " " + s
@@ -188,9 +229,16 @@ def extract_rules(text):
     out = []
     for ch in _chunks(text):
         t = ch["text"]
+        if ch.get("area"):
+            out.append(Mention(road=ch["road"], kind="area_warning",
+                               what=t.strip()[:160], evidence=t.strip()[:EVIDENCE_MAX]))
+            continue
+        cleared = bool(_CLEARED.search(t))
         m = Mention(road=ch["road"], what=_what(t),
-                    both_directions=bool(_BOTH.search(t)),
-                    cleared=bool(_CLEARED.search(t)))
+                    both_directions=bool(_BOTH.search(t)), cleared=cleared,
+                    kind="cleared" if cleared else
+                    "repeat" if _REPEAT.search(t) else "new",
+                    evidence=t.strip()[:EVIDENCE_MAX])
         for pair in re.finditer(r"(?=\bmellan\s+(.{2,40}?)\s+(?:och|till)\s+(.{2,40}))",
                                 t, re.IGNORECASE):
             a, b = _phrase(pair.group(1)), _phrase(pair.group(2))
@@ -264,6 +312,14 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
         # those must be spelt right; capitalised ones may be misheard
         if not name:
             return []
+        pin = mention.pinned.get(name.strip().lower())
+        if pin is not None:
+            # Picked by id from the list of real places
+            if kinds and pin.kind not in kinds:
+                return []
+            if area_km and gz.km(center, pin.point) > area_km:
+                return []
+            return [gz.Match(pin, 1.0, True, name)]
         fuzzy = name[0].isupper() or " " in name.strip()
         return gaz.search(name, near=center, max_km=area_km, limit=8,
                           min_score=FUZZY_MIN if fuzzy else 1.01, kinds=kinds)
@@ -292,7 +348,12 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
 
     # 2. The town the announcer gives ("E18 i Karlstad")
     town = None
-    if mention.town:
+    best = look(mention.town)[:1] if mention.town else []
+    if best and best[0].place.kind not in gz.SETTLEMENTS and (
+            best[0].place.local or mention.town.strip().lower() in mention.pinned):
+        # A spot ("E18 vid Stolpen"), not a town
+        _add(places, mention.town)
+    elif mention.town:
         ms = look(mention.town, kinds=gz.SETTLEMENTS)
         if seg:
             ms = [m for m in ms if gz.segment_km(m.place.point, seg[0].place.point,
@@ -390,7 +451,8 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
                    what=mention.what, both_directions=mention.both_directions,
                    cleared=mention.cleared, level=level,
                    names=list(dict.fromkeys(m.place.name for m in used)),
-                   updates_incident=mention.updates_incident)
+                   updates_incident=mention.updates_incident,
+                   kind=mention.kind, evidence=mention.evidence)
     if seg and names == list(seg):
         place_label = f"{seg[0].place.name}–{seg[1].place.name}"
     else:
@@ -417,37 +479,63 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
 # ---------------------------------------------------------------------------
 
 CLAUDE_SYSTEM = """You read automatic transcriptions of Swedish radio traffic \
-announcements (Sveriges Radio P4) and extract where each traffic incident is.
+announcements (Sveriges Radio P4) and say what each one reports and where.
 
 The transcription is made by speech recognition and often mishears place names \
 and words: "WC" can be "Väse", "Skatscher" can be "Skattkärr", "Kallskoga" is \
-"Karlskoga", "eld" can be "älg", "Riksdags 61" is "riksväg 61".
+"Karlskoga", "Kristineberg" can be "Kristinehamn", "eld" can be "älg", \
+"Riksdags 61" is "riksväg 61", "Stora älget" can be "en stor älg".
 
-You get the transcription, the receiver's location, a list of real place names \
-near the receiver that sound like words in the text, and the incidents that are \
-already open.
+You get the transcription, RadioText, the receiver's location, a numbered list \
+of real places near the receiver whose names sound like words in the text \
+(id, name, kind, nearest town with distance and direction, county), and the \
+incidents already known from the last 36 hours (id, road, place, what, \
+status, when first and last heard, what was said last).
+
+One announcement usually mixes several things. Split it into items, one per \
+incident or warning, and give each a kind:
+- "new": an incident not among the known ones.
+- "update": a known incident with new facts (road closed, lane open, queue, \
+forecast, towing).
+- "repeat": a known incident said again with nothing new ("fortfarande", \
+"som jag nämnde", "påminner om", "samma som i går").
+- "cleared": the incident is over ("öppen igen", "fri och framkomlig").
+- "area_warning": a warning for an area or many roads, not one place \
+(slippery roads, snow, storm, "på många vägar", "i hela länet").
+Mentions of something earlier that is not among the known incidents are \
+"new" with "when" set to "earlier" or "yesterday".
 
 Return:
 - corrected_text: the transcription with clear recognition errors fixed (place \
 names, road numbers, misheard words). Keep the wording and sentences; do not \
 summarise, add facts or remove anything. When unsure, keep the original word.
-- incidents: one entry per distinct traffic problem and place. Ignore everything \
-that is not road traffic (sport, music, news, phone numbers, trains unless a road \
-is affected). For each:
+- items, each with:
+  - kind: as above.
+  - incident_id: for update, repeat and cleared, the id of the known incident; \
+null when none fits. Only use an id when road and place agree.
+  - evidence: the exact words of corrected_text this item is based on, one or \
+a few sentences, copied without changes.
+  - when: "now", "earlier" (today, before this announcement), "yesterday" or \
+"unknown".
+  - confidence: "high" when road and place are clear, "medium" when one is \
+unsure, "low" when you are guessing.
   - road: as said, e.g. "E18", "Rv 61", "Lv 734", or null.
   - town: the town the announcer uses to say where on the road, or null.
   - between: the two places in "mellan A och B", or null.
-  - places: other place names that pin it down (junctions, roundabouts, \
-villages, rest areas, bridges, tunnels), most precise first.
+  - places: other places that pin it down (junctions, roundabouts, villages, \
+rest areas, bridges, tunnels), most precise first.
   - toward: the place in "i riktning mot X" for the affected direction, or null.
   - coming_from: the place in "om man kommer från X", or null.
   - both_directions: true when both directions are affected.
+  - area: for area_warning, where ("Värmlands län", "runt Säffle och Sunne"), \
+else null.
   - what: a short Swedish description, e.g. "Olycka med lastbil, vägen avstängd".
-  - cleared: true when the message says the road is open again or the \
-problem is gone.
-  - updates_incident: the id of an open incident this is about, or null.
-Write every place name as the matching name in the list of real places when one \
-fits; only use another name when the text clearly says it."""
+For town, between, places, toward and coming_from, write the id of the real \
+place ("p12") whenever one fits: pick the one whose position matches the road \
+and the other places said, as several places can share a name. Write a name \
+only when no listed place fits. Leave out everything that is not road \
+traffic (sport, music, news, phone numbers, trains unless a road is \
+affected)."""
 
 _NULLABLE_STR = {"anyOf": [{"type": "string"}, {"type": "null"}]}
 _NULLABLE_INT = {"anyOf": [{"type": "integer"}, {"type": "null"}]}
@@ -456,11 +544,18 @@ CLAUDE_SCHEMA = {
     "type": "object",
     "properties": {
         "corrected_text": {"type": "string"},
-        "incidents": {
+        "items": {
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
+                    "kind": {"type": "string", "enum": list(KINDS)},
+                    "incident_id": _NULLABLE_INT,
+                    "evidence": {"type": "string"},
+                    "when": {"type": "string",
+                             "enum": ["now", "earlier", "yesterday", "unknown"]},
+                    "confidence": {"type": "string",
+                                   "enum": ["high", "medium", "low"]},
                     "road": _NULLABLE_STR,
                     "town": _NULLABLE_STR,
                     "between": {"anyOf": [
@@ -470,31 +565,45 @@ CLAUDE_SCHEMA = {
                     "toward": _NULLABLE_STR,
                     "coming_from": _NULLABLE_STR,
                     "both_directions": {"type": "boolean"},
+                    "area": _NULLABLE_STR,
                     "what": {"type": "string"},
-                    "cleared": {"type": "boolean"},
-                    "updates_incident": _NULLABLE_INT,
                 },
-                "required": ["road", "town", "between", "places", "toward",
-                             "coming_from", "both_directions", "what",
-                             "cleared", "updates_incident"],
+                "required": ["kind", "incident_id", "evidence", "when",
+                             "confidence", "road", "town", "between", "places",
+                             "toward", "coming_from", "both_directions", "area",
+                             "what"],
                 "additionalProperties": False,
             },
         },
     },
-    "required": ["corrected_text", "incidents"],
+    "required": ["corrected_text", "items"],
     "additionalProperties": False,
 }
 
+KIND_SV = {
+    "city": "stad", "town": "tätort", "village": "by", "suburb": "stadsdel",
+    "quarter": "stadsdel", "neighbourhood": "område", "hamlet": "by",
+    "locality": "plats", "isolated_dwelling": "gård", "junction": "trafikplats",
+    "roundabout": "rondell", "tunnel": "tunnel", "bridge": "bro",
+    "rest_area": "rastplats", "water": "sjö", "airport": "flygplats",
+    "landmark": "plats vid väg",
+}
 
-def candidate_names(text, gaz, center, area_km=DEFAULT_AREA_KM, limit=80):
-    """Real place names near the node that sound like words in the text."""
+
+FAR_SMALL_KM = 120     # small places further than this are left out
+
+
+def candidate_names(text, gaz, center, area_km=DEFAULT_AREA_KM, limit=100):
+    """Real place names near the node that sound like words in the text.
+
+    Every place with a name that matches is listed (up to four per phrase),
+    so that the reader can pick the right one of several with one name."""
     words = re.findall(r"[\wåäöÅÄÖéü\-]+", text or "")
     seen, out = set(), []
 
     def add(p):
-        key = (p.name, p.kind)
-        if key not in seen:
-            seen.add(key)
+        if p not in seen:
+            seen.add(p)
             out.append(p)
 
     for n in (3, 2, 1):
@@ -505,12 +614,97 @@ def candidate_names(text, gaz, center, area_km=DEFAULT_AREA_KM, limit=80):
             phrase = " ".join(gram)
             if len(phrase) < 4:
                 continue
-            for m in gaz.search(phrase, near=center, max_km=area_km, limit=2,
+            for m in gaz.search(phrase, near=center, max_km=area_km, limit=4,
                                 min_score=0.82):
-                add(m.place)
+                # Farms and hamlets far away are noise, not what is meant
+                if m.place.weight > 2 or gz.km(center, m.place.point) <= FAR_SMALL_KM:
+                    add(m.place)
     for p in gaz.nearby(center, 100, kinds=("city", "town"), limit=25):
         add(p)
     return out[:limit]
+
+
+def describe_place(p, gaz):
+    """'Stolpen (plats vid väg, 1 km N om Ölme, Värmlands län)'."""
+    parts = [KIND_SV.get(p.kind, p.kind)]
+    town = None
+    if p.kind not in ("city", "town") and hasattr(gaz, "anchor"):
+        town = gaz.anchor(p.point, not_name=p.name)
+    if town is not None:
+        d = gz.km(town.point, p.point)
+        if d < 1:
+            parts.append(f"i {town.name}")
+        else:
+            parts.append(f"{d:.0f} km {gz.compass(gz.bearing(town.point, p.point))}"
+                         f" om {town.name}")
+    if p.county:
+        parts.append(gz.COUNTIES.get(p.county, p.county))
+    return f"{p.name} ({', '.join(parts)})"
+
+
+def check_evidence(evidence, *texts):
+    """The evidence if it stands in one of the texts; else the sentence of
+    the texts most like it; else ''."""
+    ev = " ".join((evidence or "").split())
+    if not ev:
+        return ""
+    for t in texts:
+        if t and ev in " ".join(t.split()):
+            return ev[:EVIDENCE_MAX]
+    want = set(re.findall(r"\w+", ev.lower()))
+    best, best_r = "", 0.5
+    for t in texts:
+        for sentence in _sentences(t or ""):
+            got = set(re.findall(r"\w+", sentence.lower()))
+            r = len(want & got) / max(len(want), 1)
+            if r > best_r:
+                best, best_r = sentence.strip(), r
+    return best[:EVIDENCE_MAX]
+
+
+_ID_RE = re.compile(r"^\s*p(\d+)\s*$", re.IGNORECASE)
+
+
+def mentions_from_items(items, places_by_id, texts=()):
+    """Claude's items -> [Mention]. Place ids ("p12") become the place's
+    name, pinned to that very place."""
+    out = []
+    for it in items or []:
+        pinned = {}
+
+        def name(ref):
+            if not ref:
+                return None
+            m = _ID_RE.match(str(ref))
+            if m:
+                place = places_by_id.get(int(m.group(1)))
+                if place is None:
+                    return None
+                pinned[place.name.lower()] = place
+                return place.name
+            return str(ref).strip() or None
+
+        kind = it.get("kind") if it.get("kind") in KINDS else "new"
+        between = [name(b) for b in (it.get("between") or [])]
+        between = [b for b in between if b]
+        out.append(Mention(
+            road=norm_road(it.get("road") or "") or it.get("road"),
+            town=name(it.get("town")),
+            between=tuple(between[:2]) if len(between) >= 2 else None,
+            places=[n for n in (name(p) for p in it.get("places") or []) if n],
+            toward=name(it.get("toward")),
+            coming_from=name(it.get("coming_from")),
+            both_directions=bool(it.get("both_directions")),
+            what=(it.get("what") or "")[:160],
+            cleared=kind == "cleared",
+            updates_incident=it.get("incident_id"),
+            kind=kind,
+            evidence=check_evidence(it.get("evidence"), *texts),
+            when=it.get("when") or "unknown",
+            confidence=it.get("confidence") or "high",
+            area=it.get("area"),
+            pinned=pinned))
+    return out
 
 
 class ClaudeReader:
@@ -523,18 +717,23 @@ class ClaudeReader:
         self.model = model
         self.last_usage = None   # token counts of the latest call
 
-    def read(self, text, radiotext, location_label, candidates, open_incidents):
+    def read(self, text, radiotext, location_label, candidates, open_incidents,
+             gaz=None):
         """Returns (corrected_text, [Mention]). Raises on any failure."""
+        by_id = {i + 1: p for i, p in enumerate(candidates)}
         payload = {
             "transcription": text,
             "radiotext": radiotext or [],
             "receiver_location": location_label,
-            "real_places_nearby": [
-                f"{p.name} ({p.kind}, {gz.COUNTIES.get(p.county, p.county)})"
-                for p in candidates],
-            "open_incidents": [
-                {"id": i["id"], "where": i["label"], "what": i["what"],
-                 "last_mentioned": i["last_seen"]} for i in open_incidents],
+            "real_places": [f"p{i}: {describe_place(p, gaz)}"
+                            for i, p in by_id.items()],
+            "known_incidents": [
+                {"id": i["id"], "road": i.get("road"), "place": i.get("label"),
+                 "what": i.get("what"), "status": i.get("status"),
+                 "first_heard": i.get("first_seen"),
+                 "last_heard": i.get("last_seen"),
+                 "last_said": i.get("last_evidence") or ""}
+                for i in open_incidents],
         }
         resp = self._client.messages.create(
             model=self.model,
@@ -549,20 +748,9 @@ class ClaudeReader:
         if resp.stop_reason != "end_turn":
             raise RuntimeError(f"Claude stopped: {resp.stop_reason}")
         data = json.loads(next(b.text for b in resp.content if b.type == "text"))
-        mentions = []
-        for it in data.get("incidents", []):
-            between = it.get("between")
-            mentions.append(Mention(
-                road=norm_road(it.get("road") or "") or it.get("road"),
-                town=it.get("town"),
-                between=tuple(between[:2]) if between and len(between) >= 2 else None,
-                places=[p for p in it.get("places") or [] if p],
-                toward=it.get("toward"), coming_from=it.get("coming_from"),
-                both_directions=bool(it.get("both_directions")),
-                what=(it.get("what") or "")[:160],
-                cleared=bool(it.get("cleared")),
-                updates_incident=it.get("updates_incident")))
         corrected = (data.get("corrected_text") or "").strip() or None
+        mentions = mentions_from_items(data.get("items"), by_id,
+                                       (corrected, text))
         return corrected, mentions
 
 
@@ -614,19 +802,25 @@ class Geolocator:
             try:
                 cands = candidate_names(text, gaz, center, self.area_km)
                 corrected, mentions = self._reader.read(
-                    text, radiotext, location_label, cands, list(open_incidents))
+                    text, radiotext, location_label, cands, list(open_incidents),
+                    gaz=gaz)
                 engine = "claude"
             except Exception as e:  # noqa: BLE001 - any API error -> rules
                 error = f"{type(e).__name__}: {e}"[:300]
                 log.warning("Claude geolocation failed (%s), using rules", error)
         if mentions is None:
             mentions = extract_rules(text or "")
-        placements = []
+        placements, areas = [], []
         for m in mentions:
+            if m.kind == "area_warning":
+                areas.append(m)
+                continue
+            if m.confidence == "low":
+                continue  # listed with the message, not put on the map
             p = resolve(m, gaz, center, self.area_km)
             if p:
                 placements.append(p)
-        return GeoResult(engine, placements, corrected, error)
+        return GeoResult(engine, placements, corrected, error, areas)
 
 
 # ---------------------------------------------------------------------------
@@ -656,6 +850,8 @@ CREATE TABLE IF NOT EXISTS incident_events (
     incident_id     INTEGER NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
     event_key       TEXT NOT NULL,
     seen_at         TEXT NOT NULL,
+    kind            TEXT,
+    evidence        TEXT,
     PRIMARY KEY (incident_id, event_key)
 );
 CREATE INDEX IF NOT EXISTS idx_incident_events_key ON incident_events(event_key);
@@ -664,6 +860,10 @@ CREATE INDEX IF NOT EXISTS idx_incident_events_key ON incident_events(event_key)
 
 def init_tables(conn):
     conn.executescript(SCHEMA)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(incident_events)")}
+    for column in ("kind", "evidence"):
+        if column not in have:   # stored before v0.7
+            conn.execute(f"ALTER TABLE incident_events ADD COLUMN {column} TEXT")
     # v0.6.1: the Trafikverket deviation an incident is linked to;
     # v0.6.2: why it was linked or not (the nearest deviations)
     for column in ("trv_id", "trv_note"):
@@ -687,14 +887,17 @@ def _incident_dict(row):
 
 
 def open_incidents(conn, since_iso, until_iso=None):
-    """Active incidents mentioned since since_iso. until_iso leaves out the
-    ones first heard after it (placing an older message afterwards)."""
-    sql, args = ("SELECT * FROM incidents WHERE last_seen >= ? "
-                 "AND status = 'active'", [since_iso])
+    """Incidents mentioned since since_iso (cleared ones too: a message can
+    say it again), with what was said last about each. until_iso leaves
+    out the ones first heard after it (placing an older message afterwards)."""
+    sql, args = ("SELECT i.*, (SELECT ie.evidence FROM incident_events ie "
+                 "WHERE ie.incident_id = i.id AND ie.evidence != '' "
+                 "ORDER BY ie.seen_at DESC LIMIT 1) AS last_evidence "
+                 "FROM incidents i WHERE i.last_seen >= ?", [since_iso])
     if until_iso:
-        sql += " AND first_seen <= ?"
+        sql += " AND i.first_seen <= ?"
         args.append(until_iso)
-    rows = conn.execute(sql + " ORDER BY last_seen DESC LIMIT 20",
+    rows = conn.execute(sql + " ORDER BY i.last_seen DESC LIMIT 30",
                         args).fetchall()
     return [_incident_dict(r) for r in rows]
 
@@ -715,7 +918,10 @@ def _match(inc, pl):
     dist = gz.km((inc["lat"], inc["lon"]), (pl.lat, pl.lon))
     r1, r2 = inc["radius_m"] / 1000, pl.radius_m / 1000
     if max(r1, r2) > 10 and min(r1, r2) * 1000 <= PRECISE_M:
-        return None  # "somewhere on 40 km of road" says too little to join
+        # "Somewhere on 40 km of road" says too little to join, unless it is
+        # the same road and the precise one lies on that stretch
+        if not (inc["road"] and inc["road"] == pl.road and dist <= max(r1, r2)):
+            return None
     if r1 * 1000 <= PRECISE_M and r2 * 1000 <= PRECISE_M:
         limit = max(2.0, r1 + r2)
     else:
@@ -729,19 +935,27 @@ def _shift_iso(iso, hours):
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t + hours * 3600)) + iso[19:]
 
 
-def merge_placements(conn, placements, event_key, now_iso, since_iso, engine):
+def merge_placements(conn, placements, event_key, now_iso, since_iso, engine,
+                     link_since_iso=None):
     """Store placements: update the incident they belong to or add a new one.
 
     The caller holds its write lock and commits. Returns the incident ids.
+
+    An update, repeat or "cleared" naming a known incident (updates_incident)
+    joins it if it was mentioned since link_since_iso (default LINK_HOURS
+    before now) and lies near; otherwise placements join an incident
+    mentioned since since_iso at the same place. What a placement may change
+    depends on its kind: a repeat only counts as a mention.
 
     now_iso is when the message was broadcast. It is in the past when older
     messages are placed afterwards: then incidents heard of up to 12 hours
     later can match too, and a message older than an incident's latest one
     does not change its status or description, only when it was first heard.
     """
+    link_since = link_since_iso or _shift_iso(now_iso, -LINK_HOURS)
     recent = [_incident_dict(r) for r in conn.execute(
         "SELECT * FROM incidents WHERE last_seen >= ? AND first_seen <= ?",
-        (since_iso, _shift_iso(now_iso, INCIDENT_HOURS)))]
+        (min(link_since, since_iso), _shift_iso(now_iso, INCIDENT_HOURS)))]
     ids = []
     for pl in placements:
         target = None
@@ -750,9 +964,10 @@ def merge_placements(conn, placements, event_key, now_iso, since_iso, engine):
                            and gz.km((i["lat"], i["lon"]), (pl.lat, pl.lon)) <= 30),
                           None)
         if target is None:
-            fits = [(d, i) for i in recent if (d := _match(i, pl)) is not None]
+            fits = [(d, i) for i in recent if i["last_seen"] >= since_iso
+                    and (d := _match(i, pl)) is not None]
             target = min(fits, key=lambda di: di[0])[1] if fits else None
-        status = "cleared" if pl.cleared else "active"
+        status = "cleared" if pl.cleared or pl.kind == "cleared" else "active"
         if target is None:
             cur = conn.execute(
                 "INSERT INTO incidents (road, label, what, lat, lon, radius_m, "
@@ -769,12 +984,14 @@ def merge_placements(conn, placements, event_key, now_iso, since_iso, engine):
         else:
             inc_id = target["id"]
             if now_iso >= (target.get("last_seen") or ""):
-                sets = {"last_seen": now_iso, "status": status, "engine": engine}
-                if pl.what:
-                    sets["what"] = pl.what
-                if pl.bearing is not None or pl.both_directions:
-                    sets["bearing"] = pl.bearing
-                    sets["both_directions"] = int(pl.both_directions)
+                sets = {"last_seen": now_iso, "engine": engine}
+                if pl.kind != "repeat":
+                    sets["status"] = status
+                    if pl.what:
+                        sets["what"] = pl.what
+                    if pl.bearing is not None or pl.both_directions:
+                        sets["bearing"] = pl.bearing
+                        sets["both_directions"] = int(pl.both_directions)
                 target["last_seen"] = now_iso
             else:
                 # An older message about it: the later ones say more
@@ -796,7 +1013,9 @@ def merge_placements(conn, placements, event_key, now_iso, since_iso, engine):
                     + " WHERE id = ?", [*sets.values(), inc_id])
         conn.execute(
             "INSERT OR REPLACE INTO incident_events (incident_id, event_key, "
-            "seen_at) VALUES (?, ?, ?)", (inc_id, str(event_key), now_iso))
+            "seen_at, kind, evidence) VALUES (?, ?, ?, ?, ?)",
+            (inc_id, str(event_key), now_iso, pl.kind or "new",
+             (pl.evidence or "")[:EVIDENCE_MAX]))
         ids.append(inc_id)
     return ids
 
@@ -825,7 +1044,8 @@ def incidents_for_events(conn, event_keys):
         part = keys[i:i + 500]
         for r in conn.execute(
                 "SELECT ie.event_key, i.id, i.label, i.lat, i.lon, i.radius_m, "
-                "i.bearing, i.both_directions, i.status, i.last_seen, i.trv_id "
+                "i.bearing, i.both_directions, i.status, i.last_seen, i.trv_id, "
+                "ie.kind, ie.evidence "
                 "FROM incident_events ie JOIN incidents i ON i.id = ie.incident_id "
                 f"WHERE ie.event_key IN ({','.join('?' * len(part))})", part):
             d = dict(r)

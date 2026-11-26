@@ -1,0 +1,14 @@
+# Places added by hand to the place-name registry (gazetteer.py).
+#
+# For names missing from OpenStreetMap, or one of several with the same name
+# that the traffic desk means. A name here replaces OpenStreetMap entries of
+# the same name within 5 km and wins over other places with that name.
+#
+# Columns, separated by TAB:
+#   name  kind  lat  lon  county  note
+# kind: landmark (a spot on a road, ±600 m), junction, roundabout, bridge,
+#       rest_area, locality, village, ... (see KIND_RADIUS_M in gazetteer.py)
+# county: county code, S = Värmlands län, T = Örebro län (see COUNTIES)
+#
+# name	kind	lat	lon	county	note
+Stolpen	landmark	59.36987	14.01174	S	vid E18 strax norr om Ölme (Kristinehamn)

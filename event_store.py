@@ -819,8 +819,8 @@ def save_geolocation(event_id, result, status, at=None):
     return ids
 
 
-def open_incidents(hours=geolocate.INCIDENT_HOURS, at=None):
-    """Incidents still open (at a past time at, default now)."""
+def open_incidents(hours=geolocate.LINK_HOURS, at=None):
+    """Incidents a new message may be about (at a past time at, default now)."""
     return geolocate.open_incidents(
         _conn(), _iso_hours_ago(hours, at), _norm_ts(at) if at else None)
 

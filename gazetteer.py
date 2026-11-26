@@ -30,6 +30,12 @@ log = logging.getLogger("rds-guard")
 
 DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "geodata", "gazetteer-se.tsv.gz")
+# Places added by hand: missing from OpenStreetMap, or one of several with
+# the same name that traffic messages mean. Plain text, edited in the repo.
+LOCAL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "geodata", "places-local.tsv")
+LOCAL_REPLACES_KM = 5     # an OSM name this close to a local one is the same place
+LOCAL_BONUS = 3           # a local name wins over others with the same name
 
 COUNTIES = {
     "AB": "Stockholms län", "C": "Uppsala län", "D": "Södermanlands län",
@@ -47,14 +53,14 @@ KIND_WEIGHT = {
     "city": 6, "town": 5, "village": 4, "junction": 4, "roundabout": 3,
     "tunnel": 3, "bridge": 3, "rest_area": 3, "suburb": 3, "quarter": 2,
     "neighbourhood": 2, "hamlet": 2, "locality": 1, "isolated_dwelling": 1,
-    "water": 1, "airport": 3,
+    "water": 1, "airport": 3, "landmark": 3,
 }
 KIND_RADIUS_M = {
     "junction": 500, "roundabout": 300, "tunnel": 500, "bridge": 400,
     "rest_area": 400, "isolated_dwelling": 800, "hamlet": 1000,
     "neighbourhood": 1000, "quarter": 1000, "suburb": 1500, "locality": 1500,
     "village": 1500, "airport": 1500, "water": 2500, "town": 3000,
-    "city": 4000,
+    "city": 4000, "landmark": 600,
 }
 SETTLEMENTS = ("city", "town", "village", "suburb", "quarter",
                "neighbourhood", "hamlet", "locality", "isolated_dwelling")
@@ -68,6 +74,7 @@ class Place:
     lon: float
     county: str = ""
     ref: str = ""
+    local: bool = False             # from places-local.tsv
 
     @property
     def point(self):
@@ -75,7 +82,7 @@ class Place:
 
     @property
     def weight(self):
-        return KIND_WEIGHT.get(self.kind, 1)
+        return KIND_WEIGHT.get(self.kind, 1) + (LOCAL_BONUS if self.local else 0)
 
     @property
     def radius_m(self):
@@ -100,6 +107,14 @@ def km(a, b):
     h = (math.sin((la2 - la1) / 2) ** 2
          + math.cos(la1) * math.cos(la2) * math.sin((lo2 - lo1) / 2) ** 2)
     return 12742 * math.asin(min(1.0, math.sqrt(h)))
+
+
+COMPASS_SV = ("N", "NO", "O", "SO", "S", "SV", "V", "NV")
+
+
+def compass(deg):
+    """A bearing in degrees as a Swedish compass point: 120 -> 'SO'."""
+    return COMPASS_SV[int(((deg % 360) + 22.5) // 45) % 8]
 
 
 def bearing(a, b):
@@ -236,13 +251,27 @@ class Gazetteer:
         return len(self.places)
 
     @classmethod
-    def load(cls, path=None, centers=None, radius_km=250):
+    def load(cls, path=None, centers=None, radius_km=250, local_path=None):
         """Read the registry, keeping names within radius_km of any center.
 
-        centers=None keeps the whole country.
+        centers=None keeps the whole country. The hand-made places
+        (places-local.tsv) are added when the bundled registry is read, or
+        from local_path; an OSM name next to a local one with the same name
+        is dropped.
         """
+        if local_path is None and not (path or os.environ.get("GAZETTEER_PATH")):
+            local_path = os.environ.get("GAZETTEER_LOCAL_PATH") or LOCAL_PATH
         path = path or os.environ.get("GAZETTEER_PATH") or DEFAULT_PATH
         centers = [c for c in (centers or []) if c]
+
+        def keep(lat, lon):
+            return not centers or any(km((lat, lon), c) <= radius_km
+                                      for c in centers)
+
+        local = [p for p in read_local(local_path) if keep(p.lat, p.lon)]
+        by_name = {}
+        for p in local:
+            by_name.setdefault(_norm(p.name), []).append(p)
         places = []
         with gzip.open(path, "rt", encoding="utf-8") as f:
             for line in f:
@@ -252,12 +281,16 @@ class Gazetteer:
                 if len(parts) < 5:
                     continue
                 lat, lon = float(parts[2]), float(parts[3])
-                if centers and not any(km((lat, lon), c) <= radius_km
-                                       for c in centers):
+                if not keep(lat, lon):
+                    continue
+                if any(km((lat, lon), q.point) <= LOCAL_REPLACES_KM
+                       for q in by_name.get(_norm(parts[0]), ())):
                     continue
                 places.append(Place(parts[0], parts[1], lat, lon, parts[4],
                                     parts[5] if len(parts) > 5 else ""))
-        log.info("Gazetteer: %d place names loaded from %s", len(places), path)
+        places += local
+        log.info("Gazetteer: %d place names loaded from %s (%d added by hand)",
+                 len(places), path, len(local))
         return cls(places)
 
     # -- lookups ------------------------------------------------------------
@@ -342,6 +375,22 @@ class Gazetteer:
         exact = [p for p in cands if _norm(p.name) == _norm(name)]
         return max(exact or cands, key=lambda p: p.weight)
 
+    def anchor(self, point, max_km=40, not_name=None):
+        """The nearest town or village to point (for "3 km SO om Storfors"),
+        or None. not_name skips a place's own name."""
+        towns = getattr(self, "_towns", None)
+        if towns is None:
+            towns = self._towns = [p for p in self.places
+                                   if p.kind in ("city", "town", "village")]
+        best, best_km = None, max_km
+        for p in towns:
+            if p.name == not_name:
+                continue
+            d = km(point, p.point)
+            if d < best_km:
+                best, best_km = p, d
+        return best
+
     def nearby(self, center, radius_km, kinds=None, limit=None):
         """Places within radius_km of center, most important and nearest first."""
         out = [p for p in self.places
@@ -372,6 +421,28 @@ class Gazetteer:
             if len(names) >= limit:
                 break
         return names[:limit]
+
+
+def read_local(path):
+    """Places from a hand-made file: name, kind, lat, lon, county, note
+    (tab-separated, # starts a comment). A missing file gives none."""
+    if not path or not os.path.exists(path):
+        return []
+    out = []
+    with open(path, encoding="utf-8") as f:
+        for n, line in enumerate(f, 1):
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            parts = line.rstrip("\n").split("\t")
+            try:
+                out.append(Place(parts[0].strip(), parts[1].strip(),
+                                 float(parts[2]), float(parts[3]),
+                                 parts[4].strip() if len(parts) > 4 else "",
+                                 local=True))
+            except (IndexError, ValueError):
+                log.warning("Gazetteer: line %d of %s is not 'name<TAB>kind"
+                            "<TAB>lat<TAB>lon<TAB>county', skipped", n, path)
+    return out
 
 
 def locate_in_file(text, path=None):
