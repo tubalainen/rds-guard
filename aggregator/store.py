@@ -771,14 +771,15 @@ def _near(rows, center, km):
 
 
 def open_incidents(center=None, km=geolocate.DEFAULT_AREA_KM, at=None):
-    """Incidents still open near center (at a past time at, default now)."""
+    """Incidents near center a new message may be about (at a past time at,
+    default now)."""
     if at:
         rows = geolocate.open_incidents(
-            _conn(), _iso_before(at, geolocate.INCIDENT_HOURS * 3600),
+            _conn(), _iso_before(at, geolocate.LINK_HOURS * 3600),
             _norm_ts(at))
     else:
         rows = geolocate.open_incidents(
-            _conn(), iso_ago(geolocate.INCIDENT_HOURS * 3600))
+            _conn(), iso_ago(geolocate.LINK_HOURS * 3600))
     return _near(rows, center, km)
 
 

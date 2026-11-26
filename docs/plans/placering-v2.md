@@ -1,21 +1,35 @@
 # Plan: bättre tolkning och placering av trafikmeddelanden (v2)
 
-Status 2026-11-26: steg 1 klart. Facit (`tests/fixtures/geo_corpus.json`)
+Status 2026-11-26: steg 1 och 2 klara. Facit (`tests/fixtures/geo_corpus.json`)
 har 61 riktiga meddelanden från P4 Värmland (12–26 nov), uppmärkta: 77
 händelseposter, 4 områdesvarningar, kedjor som E45 Värmlandsbro (11
 sändningar) och E18 Bergviksmotet (7). Handinlagda platser finns i
 `geodata/places-local.tsv` (först: Stolpen vid Ölme).
 
+Steg 2 byggt: poster med typ (`new`, `update`, `repeat`, `cleared`,
+`area_warning`), utdrag ur texten, tid och säkerhet; kandidatplatser med id
+och läge ("Stolpen (plats vid väg, i Ölme, Värmlands län)"); kända händelser
+från 36 h med det som sades sist; en upprepning räknas som omnämnande men
+ändrar inget; typ och utdrag sparas per sändning (`incident_events`).
+Områdesvarningar placeras inte längre som punkter (lagras i steg 3).
+Regelmotorn ger samma format. Vägnummer som "E45an" känns igen, och en
+grov placering på samma väg kopplas till en precis händelse på sträckan.
+
 Baslinje (`tools/eval_geolocation.py`):
 
-| | Regler | Claude i drift (`--stored`) |
-|---|---|---|
-| Hittade poster | 60/77 (78 %) | 62/74 (84 %) |
-| varav precisa | 41/77 (53 %) | 59/74 (80 %) |
-| Platser utan facit | 7 | 14 |
-| Rätt typ (ny/känd/avklarad) | 55/60 (92 %) | 55/62 (89 %) |
-| Rätt ihopknutna par | 66/92 (72 %) | 96/96 (100 %) |
-| Fel ihopslagna par | 1 | 5 |
+| | Regler före | Regler efter steg 2 | Claude i drift före (`--stored`) |
+|---|---|---|---|
+| Hittade poster | 60/77 (78 %) | 60/77 (78 %) | 62/74 (84 %) |
+| varav precisa | 41/77 (53 %) | 41/77 (53 %) | 59/74 (80 %) |
+| Platser utan facit | 7 | 6 | 14 |
+| Områdesvarningar | – | 4/4, 2 felaktiga | – |
+| Rätt typ (ny/känd/avklarad) | 55/60 (92 %) | 56/60 (93 %) | 55/62 (89 %) |
+| Rätt ihopknutna par | 66/92 (72 %) | 90/92 (98 %) | 96/96 (100 %) |
+| Fel ihopslagna par | 1 | 1 | 5 |
+
+Claude-motorn efter steg 2 är inte mätt än: kör
+`python3 /app/tools/eval_geolocation.py --engine claude` i containern
+(ca 1 kr för hela facit).
 
 Claudes vanligaste fel i drift: halkvarningar blir punkter (Sunne,
 Slottsbron), Skattkärr blir Väse, Odlingen i Karlskoga hamnar vid norska

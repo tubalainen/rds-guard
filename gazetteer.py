@@ -109,6 +109,14 @@ def km(a, b):
     return 12742 * math.asin(min(1.0, math.sqrt(h)))
 
 
+COMPASS_SV = ("N", "NO", "O", "SO", "S", "SV", "V", "NV")
+
+
+def compass(deg):
+    """A bearing in degrees as a Swedish compass point: 120 -> 'SO'."""
+    return COMPASS_SV[int(((deg % 360) + 22.5) // 45) % 8]
+
+
 def bearing(a, b):
     """Compass bearing in degrees from a to b."""
     la1, lo1, la2, lo2 = map(math.radians, (*a, *b))
@@ -366,6 +374,22 @@ class Gazetteer:
             return None
         exact = [p for p in cands if _norm(p.name) == _norm(name)]
         return max(exact or cands, key=lambda p: p.weight)
+
+    def anchor(self, point, max_km=40, not_name=None):
+        """The nearest town or village to point (for "3 km SO om Storfors"),
+        or None. not_name skips a place's own name."""
+        towns = getattr(self, "_towns", None)
+        if towns is None:
+            towns = self._towns = [p for p in self.places
+                                   if p.kind in ("city", "town", "village")]
+        best, best_km = None, max_km
+        for p in towns:
+            if p.name == not_name:
+                continue
+            d = km(point, p.point)
+            if d < best_km:
+                best, best_km = p, d
+        return best
 
     def nearby(self, center, radius_km, kinds=None, limit=None):
         """Places within radius_km of center, most important and nearest first."""

@@ -170,6 +170,7 @@ class CaseRun:
     corrected_text: str = None
     error: str = None
     usage: tuple = None              # (tokens in, tokens out) for Claude
+    areas: int = 0                   # area warnings the engine found
 
 
 def run(corpus, geolocator, reg, center, location_label=""):
@@ -182,7 +183,8 @@ def run(corpus, geolocator, reg, center, location_label=""):
     for case in sorted(corpus["cases"], key=lambda c: c["at"]):
         at = norm_ts(case["at"])
         since = geolocate._shift_iso(at, -geolocate.INCIDENT_HOURS)
-        known = geolocate.open_incidents(conn, since, at)
+        known = geolocate.open_incidents(
+            conn, geolocate._shift_iso(at, -geolocate.LINK_HOURS), at)
         result = geolocator.locate(case["text"], reg, center, location_label,
                                    case.get("radiotext"), known)
         before = conn.execute("SELECT COALESCE(MAX(id), 0) FROM incidents"
@@ -196,7 +198,7 @@ def run(corpus, geolocator, reg, center, location_label=""):
         usage = getattr(reader, "last_usage", None) if result.engine == "claude" else None
         out.append(CaseRun(case, result.engine, predicted, result.corrected_text,
                            result.error, (usage.input_tokens, usage.output_tokens)
-                           if usage else None))
+                           if usage else None, len(result.areas)))
     conn.close()
     return out
 
@@ -247,8 +249,8 @@ def _match_case(expect, predicted, reg, center):
     pairs = []
     for ii, res in enumerate(items):
         if KIND_GROUP[res.item["kind"]] == "area":
-            # The engines have no area warnings yet: a point they make of
-            # one is a place without a match, not a hit
+            # Area warnings are not points: they are scored per message
+            # (score()), and a point made of one is a place without a match
             continue
         exp_road = geolocate.norm_road(res.item.get("road") or "") or res.item.get("road")
         for pi, pr in enumerate(predicted):
@@ -272,11 +274,15 @@ def _match_case(expect, predicted, reg, center):
 def score(runs, reg, center):
     """Numbers for a run, plus the per-message detail for the report."""
     items, extras, labelled = [], [], 0
+    area_found = area_false = 0
     for r in runs:
         expect = r.case.get("expect")
         if expect is None:
             continue
         labelled += 1
+        wants_area = any(KIND_GROUP[e["kind"]] == "area" for e in expect)
+        area_found += bool(wants_area and r.areas)
+        area_false += bool(r.areas and not wants_area)
         got, extra = _match_case(expect, r.predicted, reg, center)
         for g in got:
             g.case_id = r.case["id"]
@@ -315,6 +321,7 @@ def score(runs, reg, center):
         "messages": len(runs), "labelled": labelled,
         "expected": len(items), "found": len(found),
         "precise": len(precise), "area_warnings": len(areas),
+        "area_found": area_found, "area_false": area_false,
         "extra": len(extras),
         "kind_scored": len(kinds), "kind_ok": len(kind_ok),
         "link_pairs": same_ok + same_missed, "linked_ok": same_ok,
@@ -370,7 +377,8 @@ def print_report(engine_name, runs, s, verbose=True):
     print(f"  varav precisa:       {_pct(s['precise'], s['expected'])}"
           "  (radien högst facits km, minst 2,5 km)")
     print(f"Platser utan facit:    {s['extra']}")
-    print(f"Områdesvarningar:      {s['area_warnings']} i facit (mäts inte än)")
+    print(f"Områdesvarningar:      {_pct(s['area_found'], s['area_warnings'])},"
+          f" felaktiga {s['area_false']}")
     if s["median_km_off"] is not None:
         print(f"Avstånd till facit:    median {s['median_km_off']:.1f} km,"
               f" radie median {s['median_radius_m']} m")
