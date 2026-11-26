@@ -724,7 +724,7 @@ and existing rows are not changed. The outbox is only used in satellite mode.
 
 **Pinning a version:** `ghcr.io/tubalainen/rds-guard:latest` follows
 `master`. To stay on a release, set the image to
-`ghcr.io/tubalainen/rds-guard:0.3.0` (or `:0.3` to get 0.3.x patch releases).
+`ghcr.io/tubalainen/rds-guard:0.4.0` (or `:0.4` to get 0.4.x patch releases).
 
 **Rolling back:** set the image to `ghcr.io/tubalainen/rds-guard:0.1.3`, and
 restore `rds-data.backup-0.1.3` if you want the database exactly as it was.
