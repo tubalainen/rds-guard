@@ -235,6 +235,7 @@ class Gazetteer:
     places: list = field(default_factory=list)
 
     def __post_init__(self):
+        self.roads = None       # roads.Roads near the same area, if loaded
         self._by_name = {}
         self._keys = []
         # Letter pairs of each sound key -> entries, so a fuzzy search only

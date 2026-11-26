@@ -11,6 +11,7 @@ import threading
 
 import gazetteer as gz
 import geolocate
+import roads
 
 log = logging.getLogger("rds-guard")
 
@@ -19,12 +20,15 @@ AREA_KM = 250          # registry kept in memory around each node
 
 class GeoService:
     def __init__(self, geolocator, keyterms_auto=True, prompt_auto=True,
-                 area_km=geolocate.DEFAULT_AREA_KM, gazetteer_path=None):
+                 area_km=geolocate.DEFAULT_AREA_KM, gazetteer_path=None,
+                 roads_path=None):
         self._geo = geolocator
         self.keyterms_auto = keyterms_auto
         self.prompt_auto = prompt_auto
         self.area_km = area_km
         self._path = gazetteer_path
+        # A test registry gets no roads unless it names a road file
+        self._roads_path = roads_path or ("" if gazetteer_path else None)
         self._lock = threading.Lock()
         self._located = {}      # location text -> Place or None
         self._areas = {}        # rounded center -> Gazetteer
@@ -69,6 +73,8 @@ class GeoService:
         if reg is None:
             reg = gz.Gazetteer.load(self._path, centers=[center],
                                     radius_km=AREA_KM)
+            reg.roads = roads.Roads.load(self._roads_path, centers=[center],
+                                         radius_km=AREA_KM)
             with self._lock:
                 self._areas[key] = reg
         return reg

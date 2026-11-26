@@ -301,6 +301,7 @@ def _best(matches, key):
 
 
 FUZZY_MIN = 0.84        # how alike two names must sound to count as the same
+ROAD_PENALTY = 0.03     # per km a place lies off the named road (max 20 km)
 
 
 def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
@@ -314,6 +315,16 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
     if center is None:
         return None
     used = []
+    road_net = getattr(gaz, "roads", None)
+    road_known = bool(road_net) and mention.road in road_net
+
+    def off_road(p):
+        """How far (km, at most 20) a place lies from the named road; 0 when
+        the road is not known."""
+        if not road_known:
+            return 0.0
+        d = road_net.distance(mention.road, p.point, 20)
+        return 20.0 if d is None else d
 
     def look(name, kinds=None, pins=True):
         # Names written in lower case are common words as often as names:
@@ -340,7 +351,8 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
         pairs = [(a, b) for a in ca for b in cb
                  if 1 <= gz.km(a.place.point, b.place.point) <= 50]
         best = _best(pairs, lambda ab: (
-            ab[0].score + ab[1].score + 0.03 * (ab[0].place.weight + ab[1].place.weight),
+            ab[0].score + ab[1].score + 0.03 * (ab[0].place.weight + ab[1].place.weight)
+            - ROAD_PENALTY * (off_road(ab[0].place) + off_road(ab[1].place)),
             -gz.km(ab[0].place.point, ab[1].place.point)))
         if best and (seg is None or gz.km(best[0].place.point, best[1].place.point)
                      < gz.km(seg[0].place.point, seg[1].place.point)):
@@ -366,7 +378,8 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
         if seg:
             ms = [m for m in ms if gz.segment_km(m.place.point, seg[0].place.point,
                                                  seg[1].place.point) <= 15]
-        town = _best(ms, lambda m: (m.score + 0.03 * m.place.weight,
+        town = _best(ms, lambda m: (m.score + 0.03 * m.place.weight
+                                    - ROAD_PENALTY * off_road(m.place),
                                     -gz.km(center, m.place.point)))
         if town is None:
             # "E18 vid Bergviksmotet": the word after the road is a place
@@ -397,7 +410,8 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
                 ms = [m for m in look(name, pins=False) if m.exact
                       and near_anchor(m.place, tw) and m.place not in taken]
             m = _best(ms, lambda m: (m.score + 0.02 * m.place.weight
-                                     - 0.002 * gz.km(anchor(tw), m.place.point)))
+                                     - 0.002 * gz.km(anchor(tw), m.place.point)
+                                     - ROAD_PENALTY * off_road(m.place)))
             if m:
                 found.append(m)
                 taken.add(m.place)
@@ -472,6 +486,12 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
         radius *= 1.2 if level == "på en sträcka" else 1.5
     if radius > MAX_RADIUS_M:
         return None
+    if road_known:
+        # The incident is on the road: move the pin onto it when the road
+        # passes through the circle
+        hit = road_net.nearest(mention.road, point, max(1.0, radius / 1000))
+        if hit:
+            point = hit[1]
 
     pl = Placement(lat=round(point[0], 5), lon=round(point[1], 5),
                    radius_m=int(round(radius, -1)), road=mention.road,
@@ -651,8 +671,15 @@ def candidate_names(text, gaz, center, area_km=DEFAULT_AREA_KM, limit=100):
     return out[:limit]
 
 
-def describe_place(p, gaz):
-    """'Stolpen (plats vid väg, 1 km N om Ölme, Värmlands län)'."""
+def roads_in(text):
+    """The road numbers a text names, normalised: ['E18', 'Rv 61']."""
+    return list(dict.fromkeys(
+        r for r in (norm_road(m.group(0)) for m in ROAD_RE.finditer(text or "")) if r))
+
+
+def describe_place(p, gaz, refs=()):
+    """'Stolpen (plats vid väg, 1 km N om Ölme, vid E18, Värmlands län)'.
+    refs: the roads the message names; those passing the place are said."""
     parts = [KIND_SV.get(p.kind, p.kind)]
     town = None
     if p.kind not in ("city", "town") and hasattr(gaz, "anchor"):
@@ -664,6 +691,11 @@ def describe_place(p, gaz):
         else:
             parts.append(f"{d:.0f} km {gz.compass(gz.bearing(town.point, p.point))}"
                          f" om {town.name}")
+    road_net = getattr(gaz, "roads", None)
+    if road_net and refs:
+        near = road_net.roads_near(p.point, 2.0, [r for r in refs if r in road_net])
+        if near:
+            parts.append("vid " + " och ".join(near))
     if p.county:
         parts.append(gz.COUNTIES.get(p.county, p.county))
     return f"{p.name} ({', '.join(parts)})"
@@ -749,11 +781,12 @@ class ClaudeReader:
              gaz=None):
         """Returns (corrected_text, [Mention]). Raises on any failure."""
         by_id = {i + 1: p for i, p in enumerate(candidates)}
+        refs = roads_in(text)
         payload = {
             "transcription": text,
             "radiotext": radiotext or [],
             "receiver_location": location_label,
-            "real_places": [f"p{i}: {describe_place(p, gaz)}"
+            "real_places": [f"p{i}: {describe_place(p, gaz, refs)}"
                             for i, p in by_id.items()],
             "known_incidents": [
                 {"id": i["id"], "road": i.get("road"), "place": i.get("label"),

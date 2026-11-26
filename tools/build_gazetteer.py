@@ -143,6 +143,7 @@ def county_borders(cache):
         g = hit["geojson"]
         polys = g["coordinates"] if g["type"] == "MultiPolygon" else [g["coordinates"]]
         borders[code] = [ring for poly in polys for ring in poly]
+        print(f"county border {len(borders):2}/{len(COUNTIES)} {name}", flush=True)
         time.sleep(1.2)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(borders, f)
