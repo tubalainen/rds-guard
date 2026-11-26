@@ -108,6 +108,13 @@ STATUS_INTERVAL = _int(os.environ.get("STATUS_INTERVAL"), 30)
 # Web UI
 WEB_UI_PORT = _int(os.environ.get("WEB_UI_PORT"), 8022)
 EVENT_RETENTION_DAYS = _int(os.environ.get("EVENT_RETENTION_DAYS"), 30)
+# Address the web UI is reached on, e.g. https://rds.example.se. Optional:
+# when set, push messages carry a link to the event and its audio.
+WEB_UI_URL = os.environ.get("WEB_UI_URL", "").strip().rstrip("/")
+
+# Push notification rules (edited in the web UI) check days and times in
+# this time zone.
+NOTIFY_TIMEZONE = os.environ.get("NOTIFY_TIMEZONE", "Europe/Stockholm")
 
 # --- Audio Recording (always on) ---
 AUDIO_DIR = os.environ.get("AUDIO_DIR", "/data/audio")

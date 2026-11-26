@@ -11,6 +11,7 @@ const Console = (() => {
     let messages = [];
     const MAX_MESSAGES = 500;
     let reconnectTimer = null;
+    let wanted = false;   // reconnect only while the debug view is open
 
     /** Human-readable labels for RDS group types. */
     const GROUP_LABELS = {
@@ -31,6 +32,10 @@ const Console = (() => {
     };
 
     function init() {
+        // The debug view is rebuilt each time it is opened
+        paused = false;
+        filterText = '';
+        groupFilter = '';
         document.getElementById('console-pause').addEventListener('click', togglePause);
         const clearBtn = document.getElementById('console-clear');
         if (clearBtn) clearBtn.addEventListener('click', clearLog);
@@ -53,6 +58,7 @@ const Console = (() => {
     }
 
     function connect() {
+        wanted = true;
         if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
             return;
         }
@@ -84,7 +90,7 @@ const Console = (() => {
 
         ws.onclose = () => {
             App.setWsStatus(false);
-            scheduleReconnect();
+            if (wanted) scheduleReconnect();
         };
 
         ws.onerror = () => {
@@ -93,6 +99,7 @@ const Console = (() => {
     }
 
     function disconnect() {
+        wanted = false;
         clearReconnectTimer();
         if (ws) {
             ws.close();
@@ -117,10 +124,10 @@ const Console = (() => {
         paused = !paused;
         const btn = document.getElementById('console-pause');
         if (paused) {
-            btn.textContent = 'Resume';
+            btn.textContent = 'Fortsätt';
             btn.classList.add('paused');
         } else {
-            btn.textContent = 'Pause';
+            btn.textContent = 'Pausa';
             btn.classList.remove('paused');
             renderAll();
         }
@@ -136,6 +143,7 @@ const Console = (() => {
         if (!matchesFilter(msg)) return;
 
         const log = document.getElementById('console-log');
+        if (!log) return;
         const wasAtBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 50;
 
         const line = createLine(msg);
@@ -153,6 +161,7 @@ const Console = (() => {
 
     function renderAll() {
         const log = document.getElementById('console-log');
+        if (!log) return;
         log.innerHTML = '';
         const filtered = messages.filter(matchesFilter);
         filtered.forEach(msg => {
@@ -332,9 +341,9 @@ const Console = (() => {
     }
 
     function updateCount() {
-        document.getElementById('console-count').textContent =
-            `${messages.length} message${messages.length !== 1 ? 's' : ''}`;
+        const el = document.getElementById('console-count');
+        if (el) el.textContent = `${messages.length} meddelanden`;
     }
 
-    return { init, connect, disconnect };
+    return { init, connect, disconnect, renderAll };
 })();

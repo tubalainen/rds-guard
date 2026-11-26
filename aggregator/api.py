@@ -13,12 +13,14 @@ from urllib.parse import urlsplit
 
 from aiohttp import web
 
-from . import config, nodes, store
+import notify_rules
+
+from . import config, nodes, notifier, store
 from .ingest import valid_uid
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
-# The satellite's stylesheet is the base theme (one source for both UIs)
-BASE_CSS = pathlib.Path(__file__).resolve().parent.parent / "static" / "css" / "style.css"
+# The web UI code and styles shared with the satellite (static/shared/)
+SHARED_DIR = pathlib.Path(__file__).resolve().parent.parent / "static" / "shared"
 
 PIPELINE = web.AppKey("pipeline", object)
 MQTT = web.AppKey("mqtt", object)
@@ -45,6 +47,17 @@ def public_event(row):
     ev["audio_url"] = (f"/api/v1/audio/{row['event_uid']}.ogg"
                        if row.get("audio_path") else None)
     return ev
+
+
+def _with_notify(rows):
+    """Public events with their push log attached."""
+    log_rows = store.notify_for_events([r["event_uid"] for r in rows])
+    out = []
+    for r in rows:
+        ev = public_event(r)
+        ev["notify"] = log_rows.get(r["event_uid"], [])
+        out.append(ev)
+    return out
 
 
 def public_node(node, pipeline=None):
@@ -119,15 +132,19 @@ async def handle_events(request):
     q = request.query
     active = {"1": True, "true": True, "0": False, "false": False}.get(
         q.get("active", "").lower())
-    rows, total = await _run(
-        store.query_events,
-        event_type=q.get("type") or None, pi=q.get("pi") or None,
-        node=q.get("node") or None, since=q.get("since") or None,
-        active=active,
-        limit=_int_param(request, "limit", 50, 1, 200),
-        offset=_int_param(request, "offset", 0, 0, 10**9))
-    return web.json_response({"events": [public_event(r) for r in rows],
-                              "total": total})
+    def work():
+        rows, total = store.query_events(
+            event_type=q.get("type") or None, pi=q.get("pi") or None,
+            node=q.get("node") or None, since=q.get("since") or None,
+            active=active,
+            limit=_int_param(request, "limit", 50, 1, 200),
+            offset=_int_param(request, "offset", 0, 0, 10**9),
+            q=q.get("q") or None, start=q.get("from") or None,
+            end=q.get("to") or None)
+        return _with_notify(rows), total
+
+    events, total = await _run(work)
+    return web.json_response({"events": events, "total": total})
 
 
 async def handle_events_active(request):
@@ -140,7 +157,122 @@ async def handle_event(request):
     row = await _run(store.get_event, uid) if valid_uid(uid) else None
     if row is None:
         return _error(404, "not_found")
-    return web.json_response(public_event(row))
+    return web.json_response((await _run(_with_notify, [row]))[0])
+
+
+async def handle_calendar(request):
+    """Light rows for the archive calendar over the retention period."""
+    def work():
+        rows = store.calendar_events(store.iso_ago((config.EVENT_RETENTION_DAYS + 1) * 86400))
+        log_rows = store.notify_for_events([r["event_uid"] for r in rows])
+        for r in rows:
+            r["pushed"] = any(x["status"] == store.NOTIFY_SENT
+                              for x in log_rows.get(r["event_uid"], []))
+        return rows
+    return web.json_response({
+        "events": await _run(work),
+        "retention_days": config.EVENT_RETENTION_DAYS,
+        "timezone": config.NOTIFY_TIMEZONE,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Push notification rules
+# ---------------------------------------------------------------------------
+
+def _rule_id(request):
+    try:
+        return int(request.match_info["rule_id"])
+    except (TypeError, ValueError):
+        return None
+
+
+async def _rule_body(request):
+    body = await _json_body(request)
+    return notify_rules.validate(body), body
+
+
+async def handle_notify(request):
+    mqtt = request.app[MQTT]
+    return web.json_response({
+        "rules": await _run(store.list_rules),
+        "mqtt": {"enabled": mqtt is not None,
+                 "connected": bool(mqtt and mqtt.connected),
+                 "host": config.MQTT_HOST or None, "port": config.MQTT_PORT,
+                 "client_id": config.MQTT_CLIENT_ID,
+                 "prefix": config.MQTT_TOPIC_PREFIX},
+        "web_ui_url": config.WEB_UI_URL or None,
+        "timezone": config.NOTIFY_TIMEZONE,
+        "retention_days": config.EVENT_RETENTION_DAYS,
+    })
+
+
+async def handle_create_rule(request):
+    try:
+        rule, _ = await _rule_body(request)
+    except notify_rules.RuleError as e:
+        return _error(422, "invalid", str(e))
+    return web.json_response(await _run(store.create_rule, rule), status=201)
+
+
+async def handle_update_rule(request):
+    rule_id = _rule_id(request)
+    try:
+        rule, _ = await _rule_body(request)
+    except notify_rules.RuleError as e:
+        return _error(422, "invalid", str(e))
+    saved = await _run(store.update_rule, rule_id, rule) if rule_id else None
+    if saved is None:
+        return _error(404, "not_found")
+    return web.json_response(saved)
+
+
+async def handle_delete_rule(request):
+    rule_id = _rule_id(request)
+    if not rule_id or not await _run(store.delete_rule, rule_id):
+        return _error(404, "not_found")
+    return web.json_response({"deleted": True})
+
+
+async def handle_preview_rule(request):
+    try:
+        rule, _ = await _rule_body(request)
+    except notify_rules.RuleError as e:
+        return _error(422, "invalid", str(e))
+
+    def work():
+        events = store.events_for_preview(
+            store.iso_ago((config.EVENT_RETENTION_DAYS + 1) * 86400))
+        res = notify_rules.preview(rule, events, notifier.zone())
+        res["samples"] = [{k: e.get(k) for k in (
+            "event_uid", "type", "pi", "station_ps", "radiotext", "started_at",
+            "duration_sec", "node_name")} for e in res["samples"]]
+        return res
+
+    return web.json_response(await _run(work))
+
+
+async def handle_test_rule(request):
+    try:
+        rule, body = await _rule_body(request)
+    except notify_rules.RuleError as e:
+        return _error(422, "invalid", str(e))
+    if isinstance(body.get("id"), int):
+        rule["id"] = body["id"]
+    mqtt = request.app[MQTT]
+
+    def publish(topic, payload):
+        return None if mqtt is None else mqtt.publish(topic, payload, qos=1)
+
+    status, topic, payload = await _run(notifier.send_test, rule, publish)
+    return web.json_response({"status": status,
+                              "topic": f"{config.MQTT_TOPIC_PREFIX}/{topic}",
+                              "payload": payload})
+
+
+async def handle_notify_log(request):
+    limit = _int_param(request, "limit", 30, 1, 100)
+    return web.json_response({"log": await _run(store.notify_log_recent, limit)})
 
 
 async def handle_audio(request):
@@ -249,12 +381,6 @@ async def handle_index(request):
     return web.FileResponse(STATIC_DIR / "index.html")
 
 
-async def handle_base_css(request):
-    if not BASE_CSS.exists():
-        return web.Response(status=404)
-    return web.FileResponse(BASE_CSS)
-
-
 @web.middleware
 async def security_headers(request, handler):
     resp = await handler(request)
@@ -263,7 +389,10 @@ async def security_headers(request, handler):
     resp.headers.setdefault("X-Frame-Options", "DENY")
     resp.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; media-src 'self'; object-src 'none'; "
+        # blob: media for the audio player (wavesurfer.js); inline styles
+        # for the player's waveform and the UI's layout attributes
+        "default-src 'self'; media-src 'self' blob:; "
+        "style-src 'self' 'unsafe-inline'; object-src 'none'; "
         "frame-ancestors 'none'")
     return resp
 
@@ -278,6 +407,14 @@ def create_web_app(pipeline=None, mqtt=None):
     r.add_get("/api/v1/events", handle_events)
     r.add_get("/api/v1/events/active", handle_events_active)
     r.add_get("/api/v1/events/{uid}", handle_event)
+    r.add_get("/api/v1/calendar", handle_calendar)
+    r.add_get("/api/v1/notify", handle_notify)
+    r.add_get("/api/v1/notify/log", handle_notify_log)
+    r.add_post("/api/v1/notify/rules", handle_create_rule)
+    r.add_put("/api/v1/notify/rules/{rule_id}", handle_update_rule)
+    r.add_delete("/api/v1/notify/rules/{rule_id}", handle_delete_rule)
+    r.add_post("/api/v1/notify/preview", handle_preview_rule)
+    r.add_post("/api/v1/notify/test", handle_test_rule)
     r.add_get("/api/v1/audio/{uid}.ogg", handle_audio)
     r.add_get("/api/v1/stations", handle_stations)
     r.add_get("/api/v1/nodes", handle_nodes)
@@ -285,7 +422,8 @@ def create_web_app(pipeline=None, mqtt=None):
     r.add_post("/api/v1/nodes/{node_id}/rotate", handle_rotate_node)
     r.add_patch("/api/v1/nodes/{node_id}", handle_update_node)
     r.add_delete("/api/v1/nodes/{node_id}", handle_delete_node)
-    r.add_get("/static/css/base.css", handle_base_css)
+    if SHARED_DIR.exists():
+        r.add_static("/static/shared/", SHARED_DIR, show_index=False)
     r.add_static("/static/", STATIC_DIR, show_index=False)
     r.add_get("/", handle_index)
     return app

@@ -1,6 +1,6 @@
 # RDS Guard
 
-FM radio traffic and emergency monitoring for Sweden. Decodes RDS data from an RTL-SDR dongle, captures traffic announcements and emergency broadcasts, transcribes the captured audio with ElevenLabs Scribe (falling back to a local, Swedish-tuned Whisper model), optionally push the transcribed message to MQTT and serves a live web dashboard.
+FM radio traffic and emergency monitoring for Sweden. Decodes RDS data from an RTL-SDR dongle, captures traffic announcements and emergency broadcasts, transcribes the captured audio with ElevenLabs Scribe (falling back to a local, Swedish-tuned Whisper model), sends push notifications over MQTT by rules you set in the web UI, and serves a web archive of everything it has heard.
 
 Built for Sveriges Radio P4, Sweden's primary traffic announcement carrier and emergency broadcast channel (VMA).
 
@@ -14,7 +14,8 @@ Built for Sveriges Radio P4, Sweden's primary traffic announcement carrier and e
 - Records broadcast audio during traffic and emergency events, removes the FM pre-emphasis and converts to OGG/WAV via ffmpeg
 - Transcribes recorded audio with ElevenLabs Scribe, or locally with the bundled Swedish KB-Whisper model (used automatically as fallback, or without an API key)
 - Stores events in a local SQLite database with 30-day retention
-- Serves a dark-themed web dashboard with live event feed, audio playback, and transcriptions
+- Serves a web archive (in Swedish) with a calendar, search in transcriptions, audio playback and the push rules
+- Sends ready-made push messages to MQTT (`rds/notify/<rule>`) for the events that match your rules, e.g. VMA always and traffic that mentions your roads on weekday mornings
 - Optionally forwards events and decoded data to an MQTT broker for Home Assistant or other automation
 - Optionally reports to a central [aggregator](aggregator/README.md) that collects events from several installations (see [Run as a satellite](#run-as-a-satellite))
 
@@ -189,10 +190,10 @@ sent to the aggregator.
 ### Before you start
 
 1. Get the standalone installation working first ([Quick start](#quick-start)):
-   the web UI shows your station and a decode rate above 5 grp/s.
+   the *Debug* page of the web UI (link in the footer) shows your station and a decode rate above 5 grp/s.
 2. Ask the aggregator's owner for three values: the aggregator address, a
    node token, and the name to use for your node. They create the token in the
-   aggregator's web UI (*Nodes → Add node*) and get the lines to send you.
+   aggregator's web UI (*Noder → Lägg till nod*) and get the lines to send you.
 
 No ports need to be opened on your router: the satellite only makes outbound
 HTTPS requests.
@@ -217,7 +218,7 @@ docker compose up -d
 
 Within a minute:
 
-- The status bar at the bottom of the web UI shows **`uplink`** in green.
+- The footer of the web UI shows **Uplink ansluten**.
 - The log shows `Mode: satellite` at start-up and then `Uplink connected`:
 
 ```bash
@@ -315,6 +316,8 @@ All settings are in the `.env` file:
 |----------|---------|-------------|
 | `WEB_UI_PORT` | `8022` | HTTP port for the web UI and API |
 | `EVENT_RETENTION_DAYS` | `30` | Auto-delete events older than this |
+| `WEB_UI_URL` | | Address the web UI is reached on, e.g. `https://rds.example.se`. When set, push messages link to the event and its audio |
+| `NOTIFY_TIMEZONE` | `Europe/Stockholm` | Time zone for the days and times in push rules |
 
 ### Audio recording
 
@@ -377,28 +380,117 @@ Each transcription is logged with the engine that served it, e.g. `Transcription
 
 ## Web UI
 
-The dashboard has two views:
+The web UI is in Swedish and works on phones and desktops. It is built
+around the history of what the receiver has heard:
 
-**Events** — Traffic announcements, emergency broadcasts, and other alerts from the database. Active announcements pulse red. Filter by event type. Polls every 10 seconds. Events with recorded audio show an inline audio player. Completed transcriptions are displayed below each event card.
+- **Arkiv** — a calendar over the stored days (colour = number of
+  messages, red ring = VMA) and the messages of the chosen day, each with
+  audio, transcription and whether a push was sent. Figures at the top sum
+  up the period: number of traffic messages, VMA, the most common time of
+  day and pushes sent.
+- **Sök** — search in RadioText and transcriptions, filtered by type,
+  period and station. A search can be turned into a push rule with one
+  click (*Bevaka*).
+- **Aviseringar** — the push rules (see [Push notifications](#push-notifications)),
+  the MQTT connection and the latest messages sent.
+- **Händelse** — one event: audio, full transcription, RadioText, pushes
+  and details. Push messages link here when `WEB_UI_URL` is set.
 
-**Console** — Live stream of all decoded RDS groups via WebSocket. Pause/resume, text filter, 500-message buffer. Useful for debugging and seeing raw data flow.
+The audio player is [wavesurfer.js](https://wavesurfer.xyz/) 7 (BSD-3,
+bundled in `static/shared/vendor/`, no CDN): a waveform you can click in,
+playback speed and download.
 
-The status bar at the bottom shows two rows of live data:
-- **Top row:** Station name, PI code, frequency, programme type (PTY), TP/TA flags, pipeline health indicator, decode rate, and uptime
-- **Bottom row:** Current RadioText and now-playing info (artist/title from RT+)
+**Debug** (link in the footer) shows the receiver status (PI, PTY, TP/TA,
+RadioText, decode rate, pipeline, uplink) and the live stream of all
+decoded RDS groups over WebSocket, with pause and filters.
+
+## Push notifications
+
+Every finished event is checked against the rules you set under
+**Aviseringar**. For each rule that matches, a ready-to-show message is
+published to `rds/notify/<topic of the rule>`, which Home Assistant,
+Node-RED or similar can send on to a phone.
+
+A rule reads like a sentence: *when* a traffic message and/or VMA is sent
+on *these stations*, *and* the text mentions *any of these words*, *on
+these days* and *between these times*, *send* to this topic with this
+priority. Words are searched in RadioText and the transcription. Every
+change is tried against the stored history right away ("the rule would
+have sent 31 pushes in the last 30 days"), and *Skicka test* sends a
+made-up message.
+
+- Traffic messages are checked when the broadcast has ended and the
+  transcription is ready (or has timed out), so keywords also match what
+  was said.
+- VMA is pushed as soon as the broadcast starts.
+- A fresh install starts with two rules: **VMA** (`rds/notify/vma`,
+  critical) and **Trafik** (`rds/notify/trafik`, all traffic messages).
+- Rules are stored in the database (`/data/events.db`); the broker itself
+  is still set in `.env`. Without MQTT nothing is sent, but rules can still
+  be made and tried.
+
+The message:
+
+```json
+{
+  "title": "Trafik: Kö Essingeleden norrut",
+  "message": "Två bilar har kört ihop vid Stora Essingen. Ett körfält är avstängt.",
+  "priority": "normal",
+  "event_type": "traffic",
+  "rule": {"id": 3, "name": "Pendling"},
+  "matched_keywords": ["Essingeleden"],
+  "station": {"pi": "0xE203", "ps": "P4 Sthlm"},
+  "frequency": "103.3M",
+  "started": "2026-11-24T16:12:04",
+  "duration_sec": 64,
+  "event_id": 1234,
+  "url": "https://rds.example.se/#/event/1234",
+  "audio_url": "https://rds.example.se/api/audio/1234.ogg",
+  "test": false,
+  "timestamp": "2026-11-24T16:13:20Z"
+}
+```
+
+`url` and `audio_url` are `null` without `WEB_UI_URL`. Home Assistant
+example:
+
+```yaml
+automation:
+  - alias: "RDS Guard push"
+    trigger:
+      - platform: mqtt
+        topic: "rds/notify/#"
+    action:
+      - service: notify.mobile_app_your_phone
+        data:
+          title: "{{ trigger.payload_json.title }}"
+          message: "{{ trigger.payload_json.message }}"
+          data:
+            url: "{{ trigger.payload_json.url }}"
+```
 
 ## REST API
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/events` | GET | Query events. Params: `type`, `since`, `limit`, `offset` |
+| `/api/events` | GET | Query events. Params: `type`, `since`, `q` (words in RadioText/transcription), `from`/`to` (UTC, on the start time), `pi`, `limit`, `offset` |
+| `/api/events/{id}` | GET | One event |
 | `/api/events/active` | GET | In-progress announcements only |
+| `/api/calendar` | GET | Light rows for the whole retention period (calendar and figures) |
 | `/api/status` | GET | Decoder status (uptime, station info, decode rate) |
 | `/api/audio/{filename}` | GET | Stream recorded audio file (OGG/WAV) |
 | `/api/events` | DELETE | Clear all events |
+| `/api/notify` | GET | Push rules and the MQTT connection |
+| `/api/notify/rules` | POST | Create a rule |
+| `/api/notify/rules/{id}` | PUT / DELETE | Change or remove a rule |
+| `/api/notify/preview` | POST | Try a rule (unsaved) on the stored history |
+| `/api/notify/test` | POST | Send a test message for a rule |
+| `/api/notify/log` | GET | Latest push messages |
 | `/ws/console` | WS | Live stream of all decoded RDS messages |
 
-Event responses include `audio_url` and `transcription` fields when available.
+Event responses include `audio_url`, `transcription` and `notify` (the push
+messages sent for the event). Writes to `/api/notify` must be JSON and, from
+a browser, same-origin.
 
 ## MQTT topics
 
@@ -412,6 +504,7 @@ rds/{pi}/station/pty               # Programme Type
 rds/{pi}/eon/{other_pi}/ta         # Linked station TA via EON
 rds/{pi}/{type}/transcription      # Transcription text (retained)
 rds/alert                          # Traffic & emergency events (see below)
+rds/notify/{topic}                 # Push messages from your rules (see Push notifications)
 rds/system/status                  # Bridge health (periodic)
 ```
 
@@ -562,13 +655,18 @@ rds-guard/
 ├── tests/                # pytest suite (pip install -r requirements-dev.txt; pytest)
 ├── event_store.py        # SQLite wrapper
 ├── web_server.py         # aiohttp REST API + WebSocket + static serving
+├── notify_rules.py       # Push rules: validation, matching, message (shared with aggregator)
+├── notifier.py           # Push dispatch on the satellite
 └── static/
     ├── index.html
+    ├── shared/           # Web UI shared with the aggregator
+    │   ├── app.css
+    │   ├── rdsui.js      # Arkiv, Sök, Händelse, Aviseringar, audio player
+    │   └── vendor/       # wavesurfer.js
     ├── css/
-    │   └── style.css
+    │   └── debug.css     # Debug view
     └── js/
-        ├── app.js        # Tab routing, status bar
-        ├── events.js     # Event cards, filters, audio player, transcriptions
+        ├── satellite.js  # Status, Debug view
         └── console.js    # WebSocket console, pause/filter
 ```
 
@@ -682,7 +780,7 @@ curl http://localhost:8022/api/status
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
-| Web UI loads but shows `---` everywhere | Pipeline hasn't started or RTL-SDR not found | Check logs for `[rtl_fm]` errors. Verify dongle is plugged in and driver is blacklisted |
+| Header says *Inte startad* or *Fel i mottagaren* | Pipeline hasn't started or RTL-SDR not found | Check logs for `[rtl_fm]` errors. Verify dongle is plugged in and driver is blacklisted |
 | `usb_open error` in logs | Kernel DVB driver still loaded | Run `sudo modprobe -r dvb_usb_rtl28xxu` on the host |
 | `No RTL-SDR devices found` | Dongle not passed to container | Verify `privileged: true` in docker-compose.yml or add the device explicitly |
 | Pipeline status shows `error` | rtl_fm or redsea crashed | Check logs for `[rtl_fm]` / `[redsea]` error lines. Rebuild with `--no-cache` |
@@ -734,7 +832,7 @@ Station names are decoded live from the RDS Programme Service (PS) field — no 
 }
 ```
 
-Events in the database and web UI are always tagged with `frequency` and `station_ps`, so the Events tab works identically regardless of mode.
+Events in the database and web UI are always tagged with `frequency` and `station_ps`, so the archive works identically regardless of mode.
 
 ### Backward compatibility
 
