@@ -205,6 +205,40 @@ Samma utdata, enklare: dela på meningar/`_NEW_PART` som i dag, plus:
 - `area_warning` vid väglagsord utan vägnummer/trafikplats;
 - `evidence` = meningen/delen som posten bygger på.
 
+### 8. Vägnumret som ledtråd (steg 6)
+
+Radion säger nästan alltid vilken väg det gäller ("E18", "riksväg 61",
+"länsväg 734"). Servern vet i dag inte var vägarna går, så vägnumret
+används bara för att skilja händelser åt. Felen som finns kvar i facit är
+nästan alla av den sorten: en plats med rätt namn men vid fel väg (Karlskoga-
+gården vid Kil för E18, Brunsberg vid Nysäter för Rv 61), en sträcka
+mellan två orter som dras rakt i stället för längs vägen, och nålar som
+hamnar bredvid vägen.
+
+Vägnätet (E-vägar, riksvägar och länsvägar med nummer) hämtas från
+OpenStreetMap med ett verktyg (`tools/build_roads.py`, som
+`build_gazetteer.py`), förenklas till några meter och läggs i imagen
+(`geodata/roads-se.json.gz`, uppskattat några MB). Inga anrop när RDS Guard
+kör.
+
+Det används till:
+1. **Välja rätt plats**: bland platser med samma namn vinner den som ligger
+   vid den nämnda vägen. Ligger ingen inom ett par km från vägen sänks
+   säkerheten.
+2. **Kandidatlistan till Claude** får vägen: "Stolpen (plats vid väg, i
+   Ölme, vid E18)". Platser långt från de vägar som nämns i meddelandet
+   sorteras bort.
+3. **Nålen läggs på vägen**: punkten flyttas till närmaste punkt på den
+   nämnda vägen (högst några km), och riktningen ("mot Karlstad") räknas
+   längs vägen.
+4. **Sträckor längs vägen**: "mellan A och B" blir vägens del mellan A och
+   B, ritad på kartan, med mitten och radien längs vägen i stället för
+   fågelvägen.
+5. **Regelmotorn** får samma nytta utan Claude.
+
+Mätning: facit och uppspelning av Claudes sparade svar (`--replay`),
+gratis.
+
 ## Facit och mätning (görs först)
 
 1. Samla 40–60 riktiga meddelanden från docker01
@@ -242,7 +276,9 @@ och mäts mot facit: `low` om det håller.
 5. **Placera om**: knapp under Inställningar som bygger om händelserna från
    sparade meddelanden med den nya modellen (samma mekanism som
    "Placerar äldre meddelanden …").
-6. Senare: Trafikverkets händelser som kandidater (se
+6. **Vägnumret som ledtråd** (punkt 8): vägnätet från OpenStreetMap i
+   imagen, platser vid rätt väg, nålen på vägen, sträckor längs vägen.
+7. Senare: Trafikverkets händelser som kandidater (se
    `trafikverket-situation.md`).
 
 ## Öppna frågor

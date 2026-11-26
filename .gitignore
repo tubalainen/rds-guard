@@ -32,3 +32,4 @@ web-ui.md
 
 # Download cache of tools/build_gazetteer.py
 .gazetteer-cache/
+.roads-cache/

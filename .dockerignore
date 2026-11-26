@@ -8,3 +8,4 @@ rds-data/
 tests/
 **/__pycache__/
 .gazetteer-cache/
+.roads-cache/
