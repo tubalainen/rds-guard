@@ -173,14 +173,15 @@ class CaseRun:
     areas: int = 0                   # area warnings the engine found
 
 
-def run(corpus, geolocator, reg, center, location_label=""):
+def run(corpus, geolocator, reg, center, location_label="", progress=None):
     """Every message of the set through placing and merging. Returns
-    [CaseRun] in broadcast order."""
+    [CaseRun] in broadcast order. progress(i, n, run) is called after each."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     geolocate.init_tables(conn)
     out = []
-    for case in sorted(corpus["cases"], key=lambda c: c["at"]):
+    cases = sorted(corpus["cases"], key=lambda c: c["at"])
+    for case in cases:
         at = norm_ts(case["at"])
         since = geolocate._shift_iso(at, -geolocate.INCIDENT_HOURS)
         known = geolocate.open_incidents(
@@ -199,6 +200,8 @@ def run(corpus, geolocator, reg, center, location_label=""):
         out.append(CaseRun(case, result.engine, predicted, result.corrected_text,
                            result.error, (usage.input_tokens, usage.output_tokens)
                            if usage else None, len(result.areas)))
+        if progress:
+            progress(len(out), len(cases), out[-1])
     conn.close()
     return out
 
@@ -460,7 +463,14 @@ def main():
         else:
             g = geolocate.Geolocator(None)
         t0 = time.monotonic()
-        runs = run(corpus, g, reg, node.point, corpus["node_location"])
+        def progress(i, n, r):
+            print(f"  {i}/{n}  {r.case['id']}  {r.engine}"
+                  + (f"  {r.usage[0]}+{r.usage[1]} tokens" if r.usage else "")
+                  + (f"  FEL: {r.error}" if r.error else ""),
+                  file=sys.stderr, flush=True)
+
+        runs = run(corpus, g, reg, node.point, corpus["node_location"],
+                   progress if name == "claude" else None)
         s = score(runs, reg, node.point)
         print_report(name, runs, s, verbose=not args.quiet)
         tin = sum(r.usage[0] for r in runs if r.usage)
