@@ -497,3 +497,37 @@ def test_claude_new_joins_only_the_same_place_name(db):
 def test_a_town_on_the_stretch_beats_the_stretch(reg):
     [p] = place("E18 mellan Väse och Karlstad, vid Skattkärr, olycka.", reg)
     assert p.label == "E18 Skattkärr" and p.radius_m < 9000
+
+
+def test_a_named_hamlet_beats_the_stretch_it_is_on(reg):
+    m = geo.Mention(road="Rv 61", town="Hynboholm", between=("Karlstad", "Kil"))
+    p = geo.resolve(m, reg, KARLSTAD)
+    assert p.label == "Rv 61 Hynboholm" and p.radius_m <= 1500
+
+
+def test_a_stretch_ends_in_towns_not_farms_of_the_same_name(tmp_path):
+    path = tmp_path / "gaz.tsv.gz"
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        f.write("Karlstad\tcity\t59.38091\t13.50276\tS\t\n"
+                "Kristinehamn\ttown\t59.31136\t14.11176\tS\t\n"
+                "Karlskoga\tisolated_dwelling\t59.54191\t13.21301\tS\t\n"
+                "Karlskoga\ttown\t59.32917\t14.51769\tT\t\n")
+    reg = gz.Gazetteer.load(str(path))
+    [p] = place("Lastbil på E18 mellan Kristinehamn och Karlskoga.", reg)
+    assert 14.1 < p.lon < 14.52 and p.label == "E18 Kristinehamn–Karlskoga"
+
+
+def test_a_wrong_pick_among_same_names_falls_back_to_the_one_on_the_stretch(tmp_path):
+    path = tmp_path / "gaz.tsv.gz"
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        f.write("Arvika\ttown\t59.65436\t12.59162\tS\t\n"
+                "Fagerås\tvillage\t59.51985\t13.2227\tS\t\n"
+                "Brunsberg\tisolated_dwelling\t59.61885\t12.96314\tS\t\n"
+                "Brunsberg\tisolated_dwelling\t59.30664\t12.74718\tS\t\n")
+    reg = gz.Gazetteer.load(str(path))
+    far = [p for p in reg.exact("Brunsberg") if p.lat < 59.4][0]
+    by = {1: reg.exact("Arvika")[0], 2: reg.exact("Fagerås")[0], 3: far}
+    [m] = geo.mentions_from_items([{"kind": "new", "road": "Rv 61", "between": ["p1", "p2"],
+                                    "places": ["p3"]}], by, ())
+    p = geo.resolve(m, reg, (59.38, 13.5))
+    assert p.label == "Rv 61 Brunsberg" and p.lat > 59.6
