@@ -70,10 +70,7 @@ code { font-family: var(--mono); font-size: .9em; }
     text-decoration: none; color: var(--text); white-space: nowrap;
 }
 .brand:hover { color: var(--text); }
-.brand-mark {
-    width: 34px; height: 34px; border-radius: 10px; background: var(--accent);
-    display: flex; align-items: center; justify-content: center; flex: none;
-}
+.brand-mark { width: 34px; height: 34px; display: block; flex: none; }
 .brand-name { font-weight: 700; font-size: 18px; letter-spacing: -0.01em; }
 .brand-sub { color: var(--muted); font-weight: 600; }
 
