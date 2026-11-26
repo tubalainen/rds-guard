@@ -2,6 +2,17 @@
 
 Status: förslag, inget är byggt. Undersökt 2026-11-26.
 
+## Beslut (2026-11-26)
+
+- Körs på **både satellit och aggregator**, samma modul.
+- Trafikverkets händelser som inte hörts i radion visas som ett **eget
+  lager** på kartan, som går att slå av och på.
+- **Inga vägarbeten**: `MessageType="Vägarbete"` hämtas inte.
+- **Push**: Trafikverkets uppdateringar för händelser som matchat en
+  pushregel skickas som push (t.ex. "E18 öppen igen").
+- **Testdata**: riktiga svar från Värmland samlas in från docker01 och
+  används som testunderlag för matchningen.
+
 ## Varför
 
 Radion säger "E18 vid Bergviksmotet mot Grums". Vår placering blir då
@@ -36,7 +47,7 @@ Med det kan vi:
 | Fält | Användning |
 |---|---|
 | `Id`, `VersionTime` | identitet och version, för tidslinjen |
-| `MessageType` / `MessageTypeValue` | Olycka, Hinder, Restriktion, Trafikmeddelande, Viktig trafikinformation, Vägarbete, Färjor |
+| `MessageType` / `MessageTypeValue` | Olycka, Hinder, Restriktion, Trafikmeddelande, Viktig trafikinformation (Vägarbete och Färjor hämtas inte) |
 | `MessageCode` / `MessageCodeValue` | t.ex. "Beläggningsarbete" |
 | `Header`, `Message` | rubrik och fri text, det som uppdateras ("Bärgning pågår") |
 | `LocationDescriptor`, `PositionalDescription`, `RoadName` | platsbeskrivning, platsnamn till matchning och transkribering |
