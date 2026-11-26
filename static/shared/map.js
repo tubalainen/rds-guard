@@ -79,6 +79,68 @@ const RDSMap = (() => {
         return map;
     }
 
+    // ------------------------------------------------------------- full screen
+
+    const EXPAND = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>';
+    const SHRINK = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></svg>';
+
+    /** A button that fills the screen with the map box (map and legend):
+     *  the browser's full screen where it can, else the whole window
+     *  (Safari on iPhone has no full screen for elements). Returns an exit
+     *  function for the view's cleanup. */
+    function fullscreenControl(map, box) {
+        let btn = null;
+        const native = () => document.fullscreenElement === box;
+        const isFull = () => box.classList.contains('map-full');
+        function set(on) {
+            box.classList.toggle('map-full', on);
+            document.documentElement.classList.toggle('map-full-open', on);
+            if (btn) {
+                btn.innerHTML = on ? SHRINK : EXPAND;
+                btn.title = on ? 'Lämna helskärm' : 'Helskärm';
+                btn.setAttribute('aria-label', btn.title);
+                btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+            }
+            // Leaflet must measure the new size, after the layout has changed
+            requestAnimationFrame(() => map.invalidateSize());
+        }
+        function enter() {
+            set(true);
+            if (box.requestFullscreen) box.requestFullscreen().catch(() => { /* window fill is enough */ });
+        }
+        function exit() {
+            if (native() && document.exitFullscreen) document.exitFullscreen().catch(() => {});
+            set(false);
+        }
+        const onChange = () => { if (!document.fullscreenElement && isFull()) set(false); };
+        const onKey = (e) => { if (e.key === 'Escape' && isFull() && !native()) exit(); };
+        document.addEventListener('fullscreenchange', onChange);
+        document.addEventListener('keydown', onKey);
+
+        const Control = L.Control.extend({
+            options: { position: 'topleft' },
+            onAdd() {
+                const wrap = L.DomUtil.create('div', 'leaflet-bar map-fs');
+                btn = L.DomUtil.create('a', '', wrap);
+                btn.href = '#';
+                btn.setAttribute('role', 'button');
+                L.DomEvent.disableClickPropagation(wrap);
+                L.DomEvent.on(btn, 'click', (e) => {
+                    L.DomEvent.preventDefault(e);
+                    if (isFull()) exit(); else enter();
+                });
+                set(false);
+                return wrap;
+            },
+        });
+        new Control().addTo(map);
+        return () => {
+            document.removeEventListener('fullscreenchange', onChange);
+            document.removeEventListener('keydown', onKey);
+            if (isFull()) exit();
+        };
+    }
+
     // ------------------------------------------------------------- formatting
 
     function ageHours(inc) {
@@ -478,6 +540,7 @@ const RDSMap = (() => {
         if (!ctx.alive()) return;
         const map = newMap(root.querySelector('#map'));
         map.fitBounds(SWEDEN);
+        const exitFull = fullscreenControl(map, root.querySelector('.map-box'));
         const layer = L.layerGroup().addTo(map);
         const nodeLayer = L.layerGroup().addTo(map);
         const trvLayer = L.layerGroup().addTo(map);
@@ -640,7 +703,7 @@ const RDSMap = (() => {
             if (m.circle) map.fitBounds(m.circle.getBounds().pad(0.4), { maxZoom: 13 });
             else map.setView(m.marker.getLatLng(), 13);
             m.marker.openPopup();
-            if (window.matchMedia('(max-width: 760px)').matches) {
+            if (!root.querySelector('.map-box.map-full') && window.matchMedia('(max-width: 760px)').matches) {
                 root.querySelector('#map').scrollIntoView({ behavior: 'smooth', block: 'center' });
             }
         }
@@ -659,6 +722,7 @@ const RDSMap = (() => {
         schedule();
         ctx.cleanup = () => {
             clearTimeout(timer);
+            exitFull();
             map.remove();
         };
     }

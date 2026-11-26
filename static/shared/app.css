@@ -560,6 +560,17 @@ details.help[open] summary { margin-bottom: 10px; }
     background: var(--surface-2); z-index: 0;
 }
 .map.mini { height: 240px; min-height: 0; margin-bottom: 10px; }
+/* Full screen: the map box fills the screen (or the window, where the
+   browser has no full screen for elements) */
+.map-fs a { display: flex !important; align-items: center; justify-content: center; }
+.map-box.map-full {
+    position: fixed; inset: 0; z-index: 1000; background: var(--bg);
+    display: flex; flex-direction: column;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+.map-box.map-full .map { flex: 1; height: auto; min-height: 0; border-radius: 0; border: 0; }
+.map-box.map-full .map-legend { margin: 0; padding: 8px 12px; }
+html.map-full-open, html.map-full-open body { overflow: hidden; }
 .map-legend {
     display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px;
     font-size: 13px; color: var(--muted);
