@@ -9,7 +9,10 @@ nothing is downloaded while RDS Guard runs.
 
 Sweden is fetched from the Overpass API in tiles (OVERPASS_URL, default
 overpass-api.de); finished tiles are cached in .roads-cache/ so an
-interrupted run continues where it stopped. Roads outside Sweden are left
+interrupted run continues where it stopped. ROADS_BBOX="south,west,north,east"
+(degrees) fetches only the tiles touching that box, e.g. around one receiver:
+
+    ROADS_BBOX=58,10,61,16 python3 tools/build_roads.py Roads outside Sweden are left
 out (the county borders come from tools/build_gazetteer.py's cache or
 Nominatim). It prints a line per tile as it goes.
 
@@ -120,6 +123,11 @@ def main():
     tiles = [t for t in TILES if any(
         x0 <= t[3] and x1 >= t[1] and y0 <= t[2] and y1 >= t[0]
         for _, _, x0, x1, y0, y1 in finder.parts)]
+    box = os.environ.get("ROADS_BBOX")
+    if box:
+        s_, w_, n_, e_ = (float(v) for v in box.split(","))
+        tiles = [t for t in tiles if t[0] < n_ and t[2] > s_ and t[1] < e_ and t[3] > w_]
+        print(f"ROADS_BBOX {box}: {len(tiles)} tiles", flush=True)
     roads, seen, points_in, points_out = {}, set(), 0, 0
     t0 = time.monotonic()
     for n, tile in enumerate(tiles, 1):
