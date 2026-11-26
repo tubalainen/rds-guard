@@ -650,40 +650,45 @@ def deviation_ended(dev, now_iso):
                 and _epoch(end) < _epoch(now_iso))
 
 
-def match_score(inc, dev, heard_at, text=""):
-    """How well a radio incident fits a deviation: a score (higher is
-    better, at least MIN_SCORE to link), or None when they cannot be the
-    same.
+def evaluate(inc, dev, heard_at, text=""):
+    """How well a radio incident fits a deviation, and why.
 
-    inc: an incidents row (road, lat, lon, radius_m, what); heard_at: when
-    the radio spoke of it; text: the message, for the kind of incident.
+    Returns (score, reason): score is None when they cannot be the same
+    (reason says what stopped it), else higher is better and at least
+    MIN_SCORE links them. inc: an incidents row (road, lat, lon, radius_m,
+    what); heard_at: when the radio spoke of it; text: the message, for the
+    kind of incident.
     """
     if dev.get("lat") is None or inc.get("lat") is None:
-        return None
+        return None, "no position"
     heard = _epoch(heard_at)
     # When: published long after the broadcast, or over before it
     published = _epoch(dev.get("created") or dev.get("start_time"))
     if heard is not None and published is not None:
         if published > heard + RADIO_BEFORE_MIN * 60:
-            return None
+            return None, (f"published {round((published - heard) / 60)} min "
+                          f"after the broadcast (limit {RADIO_BEFORE_MIN})")
     if heard is not None:
         if dev.get("status") == STATUS_DELETED:
             gone = _epoch(dev.get("changed_at"))
             if gone is not None and gone < heard - ENDED_BEFORE_MIN * 60:
-                return None
+                return None, (f"removed {round((heard - gone) / 60)} min "
+                              "before the broadcast")
         end = _epoch(dev.get("end_time"))
         if (end is not None and not dev.get("until_further_notice")
                 and end < heard - ENDED_BEFORE_MIN * 60):
-            return None
+            return None, (f"ended {round((heard - end) / 60)} min "
+                          "before the broadcast")
     # Where
     dist = distance_km(dev, inc["lat"], inc["lon"])
     limit = (inc.get("radius_m") or 0) / 1000 + MATCH_SLACK_KM
     if dist is None or dist > limit:
-        return None
+        return None, (f"{dist:.1f} km away (limit {limit:.1f} km)"
+                      if dist is not None else "no position")
     # Which road
     r1, r2 = road_key(inc.get("road")), deviation_road(dev)
     if r1 and r2 and r1 != r2:
-        return None
+        return None, f"other road (radio {r1}, Trafikverket {r2})"
     same_road = bool(r1 and r2)
     # What
     radio_kinds = kinds_in(" ".join([text or "", inc.get("what") or ""]))
@@ -692,18 +697,31 @@ def match_score(inc, dev, heard_at, text=""):
     if KIND_WORK in dev_kinds and KIND_WORK not in radio_kinds:
         if radio_kinds or (published is not None and heard is not None
                            and published < heard - PLANNED_DAYS * 86400):
-            return None     # planned works are not what the radio is about
+            return None, "planned works, the radio speaks of something else"
     if radio_kinds and dev_kinds and not same_kind:
-        return None
+        return None, (f"other kind (radio {'/'.join(sorted(radio_kinds))}, "
+                      f"Trafikverket {'/'.join(sorted(dev_kinds))})")
     if not same_road and not same_kind:
-        return None
+        return None, ("neither the road nor the kind of incident is known "
+                      f"on both sides (road {r1 or '?'}/{r2 or '?'}, kind "
+                      f"{'/'.join(sorted(radio_kinds)) or '?'}/"
+                      f"{'/'.join(sorted(dev_kinds)) or '?'})")
     score = 1.0 - 0.5 * dist / limit
     score += 0.4 if same_road else 0.0
     score += 0.4 if same_kind else 0.0
     if heard is not None and published is not None \
             and heard - 3 * 3600 <= published <= heard + RADIO_BEFORE_MIN * 60:
         score += 0.2        # new around the time of the broadcast
-    return score
+    why = (f"{dist:.1f} km, " + ("same road, " if same_road else "")
+           + ("same kind, " if same_kind else "") + f"score {score:.2f}")
+    if score < MIN_SCORE:
+        return score, why + f" (below {MIN_SCORE})"
+    return score, why
+
+
+def match_score(inc, dev, heard_at, text=""):
+    """The score of evaluate(), without the reason."""
+    return evaluate(inc, dev, heard_at, text)[0]
 
 
 def best_match(inc, devs, heard_at, text=""):
@@ -745,18 +763,52 @@ def link_incidents(conn, incident_ids, heard_at, text=""):
     commits. Returns {incident_id: deviation_id} for the new links.
     """
     out = {}
+    if not conn.execute("SELECT 1 FROM trv_deviations LIMIT 1").fetchone():
+        return out      # Trafikverket is not used here (no key)
     for inc_id in incident_ids:
         row = conn.execute("SELECT * FROM incidents WHERE id = ?",
                            (inc_id,)).fetchone()
         if row is None or row["trv_id"]:
             continue
         inc = dict(row)
-        dev, _ = best_match(inc, _candidates(conn, inc["lat"], inc["lon"]),
-                            heard_at, text)
+        candidates = _candidates(conn, inc["lat"], inc["lon"])
+        dev, _ = best_match(inc, candidates, heard_at, text)
         if dev is not None:
             _apply_link(conn, inc_id, dev, heard_at)
             out[inc_id] = dev["id"]
+            why = evaluate(inc, dev, heard_at, text)[1]
+            note = f"linked to {dev['id']}: {why}"
+            log.info("Trafikverket: incident #%s (%s) linked to %s (%s), %s",
+                     inc_id, inc.get("label"), dev["id"],
+                     dev.get("location") or dev.get("message_type"), why)
+        else:
+            note = no_match_note(inc, candidates, heard_at, text)
+            log.info("Trafikverket: incident #%s (%s) not linked: %s",
+                     inc_id, inc.get("label"), note)
+        conn.execute("UPDATE incidents SET trv_note = ? WHERE id = ?",
+                     (note, inc_id))
     return out
+
+
+def no_match_note(inc, candidates, heard_at, text=""):
+    """Why a radio incident was not linked: the nearest deviations and
+    what stopped each, for the log and the incident."""
+    near = []
+    for dev in candidates:
+        d = (distance_km(dev, inc["lat"], inc["lon"])
+             if dev.get("lat") is not None else None)
+        if d is not None:
+            near.append((d, dev))
+    if not near:
+        return "no Trafikverket deviation within 30 km"
+    near.sort(key=lambda dd: dd[0])
+    parts = []
+    for _, dev in near[:3]:
+        _, why = evaluate(inc, dev, heard_at, text)
+        what = dev.get("message_type") or "?"
+        where = dev.get("location") or dev.get("road_number") or ""
+        parts.append(f"{dev['id']} ({what}, {where[:60]}): {why}")
+    return "nearest: " + "; ".join(parts)
 
 
 def relink_deviations(conn, dev_ids, now_iso, since_iso):
@@ -801,6 +853,12 @@ def relink_deviations(conn, dev_ids, now_iso, since_iso):
             if s is not None and s >= MIN_SCORE:
                 _apply_link(conn, inc["id"], dev, now_iso)
                 new_links[inc["id"]] = dev_id
+                why = evaluate(inc, dev, inc["first_seen"])[1]
+                conn.execute("UPDATE incidents SET trv_note = ? WHERE id = ?",
+                             (f"linked to {dev_id} later: {why}", inc["id"]))
+                log.info("Trafikverket: incident #%s (%s) linked to %s (%s), "
+                         "published after the radio, %s", inc["id"],
+                         inc.get("label"), dev_id, dev.get("location"), why)
     return new_links, updated
 
 

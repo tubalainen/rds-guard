@@ -664,12 +664,14 @@ CREATE INDEX IF NOT EXISTS idx_incident_events_key ON incident_events(event_key)
 
 def init_tables(conn):
     conn.executescript(SCHEMA)
-    # v0.6.1: the Trafikverket deviation an incident is linked to
-    try:
-        conn.execute("ALTER TABLE incidents ADD COLUMN trv_id TEXT")
-    except sqlite3.OperationalError as e:
-        if "duplicate column" not in str(e).lower():
-            raise
+    # v0.6.1: the Trafikverket deviation an incident is linked to;
+    # v0.6.2: why it was linked or not (the nearest deviations)
+    for column in ("trv_id", "trv_note"):
+        try:
+            conn.execute(f"ALTER TABLE incidents ADD COLUMN {column} TEXT")
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
     conn.execute("CREATE INDEX IF NOT EXISTS idx_incidents_trv "
                  "ON incidents(trv_id)")
 
