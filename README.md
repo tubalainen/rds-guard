@@ -604,6 +604,20 @@ docker compose exec rds-guard python3 /app/tools/measure_geolocation.py
 docker compose exec rds-guard python3 /app/tools/measure_geolocation.py --keyterms --limit 20
 ```
 
+To score the engines against a labelled set of real messages
+(`tests/fixtures/geo_corpus.json`: which incidents each message holds,
+where, of what kind, and which messages are about the same incident):
+
+```bash
+python3 tools/eval_geolocation.py                   # rules engine, free
+docker compose exec rds-guard python3 /app/tools/eval_geolocation.py --engine claude
+python3 tools/eval_geolocation.py --import events.json   # add messages to label
+```
+
+It reports incidents found, places without a match, distance and radius,
+the right kind (new, known, cleared) and how well messages about one
+incident are linked together.
+
 The first shows where the rules engine and (with `ANTHROPIC_API_KEY`)
 Claude place each message, Claude's corrected text and its token cost. The
 second also transcribes the clips again with ElevenLabs with and without

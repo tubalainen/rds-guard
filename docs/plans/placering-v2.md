@@ -1,6 +1,11 @@
 # Plan: bättre tolkning och placering av trafikmeddelanden (v2)
 
-Status: plan 2026-11-26. Inget byggt ännu.
+Status 2026-11-26: steg 1 påbörjat. Mätverktyget
+(`tools/eval_geolocation.py`) och facit-formatet
+(`tests/fixtures/geo_corpus.json`) finns, med ett uppmärkt meddelande.
+Facit behöver fyllas med 40–60 riktiga meddelanden från docker01.
+Handinlagda platser finns i `geodata/places-local.tsv` (först: Stolpen vid
+Ölme).
 
 ## Problemet
 
@@ -122,7 +127,37 @@ specifik plats.
 den händelsen i stället för början av meddelandet. Servern kontrollerar att
 utdraget finns i texten (annars: meningen som innehåller platsnamnet).
 
-### 6. Regelmotorn (lokalt, gratis)
+### 6. Knyta ihop sändningar till en händelse, med tidslinje och ljud
+
+En krock vid Bergviksmotet som nämns i fyra sändningar ska vara **en**
+händelse, och från den ska man se alla fyra:
+
+```
+E18 Bergviksmotet · Olycka, två personbilar          [Pågår]
+  16:02  Ny          "olycka på E18 vid Bergviksmotet, ett körfält …"   ▶ 0:42
+  16:31  Uppdatering "bärgning pågår, köer mot Karlstad"                ▶ 0:35
+  17:00  Påminnelse  "fortfarande köer vid Bergviksmotet"               ▶ 0:28
+  17:24  Avklarad    "vägen är fri och framkomlig igen"                 ▶ 0:19
+```
+
+- **Koppling**: det är punkt 1–3 ovan som gör den (typ, `incident_id`,
+  36 h-fönster), plus att servern kopplar på plats och väg när Claude inte
+  gör det (som i dag). Hur bra den blir mäts i facit (se nedan): sändningar
+  som hör ihop ska hamna i samma händelse, andra inte.
+- **Data**: `incident_events` har redan händelse ↔ sändning. Den får
+  `kind` och `evidence` per rad. Nytt API `GET /api/incidents/{id}` ger
+  händelsen med alla sändningar i tidsordning: tid, typ, utdrag, ljud-URL,
+  länk till sändningen.
+- **Kartan**: popupen får "Visa förlopp (4 sändningar)" som öppnar
+  tidslinjen i sidopanelen, med en spelare per sändning och "spela alla i
+  ordning".
+- **Sändningssidan**: varje händelse under "Plats" länkar till samma
+  tidslinje, så man kan gå från en sändning till de andra om samma sak.
+- **Rätta för hand** (senare): flytta en sändning till en annan händelse
+  eller dela en händelse som blivit hopslagen fel. Rättelserna sparas och
+  kan läggas till i facit.
+
+### 7. Regelmotorn (lokalt, gratis)
 
 Samma utdata, enklare: dela på meningar/`_NEW_PART` som i dag, plus:
 - `repeat` vid "nämnde", "som jag sa", "fortfarande", "kvar", "sedan
@@ -137,9 +172,12 @@ Samma utdata, enklare: dela på meningar/`_NEW_PART` som i dag, plus:
 2. Märk upp förväntat resultat i `tests/fixtures/geo_corpus.json`: poster,
    typ, väg, plats (namn + ungefärlig position), vilken tidigare post en
    uppdatering gäller.
-3. Bygg ut `tools/measure_geolocation.py` att räkna: rätt antal poster,
-   rätt typ, placering inom radien, rätt koppling till tidigare händelse.
-   Kör regelmotorn (gratis) och Claude (Haiku ≈ 0,5 kr för hela korpusen).
+3. Mätverktyget `tools/eval_geolocation.py` kör korpusen i tidsordning
+   genom samma kedja som systemet (placering + sammanslagning i en tom
+   databas) och räknar: hittade poster, felaktiga extra platser, avstånd och
+   radie, rätt typ, och **koppling** (par av sändningar som ska vara samma
+   händelse och är det, och par som slagits ihop fel). Kör regelmotorn
+   (gratis) och Claude (Haiku ≈ 0,5 kr för hela korpusen).
 4. Varje steg nedan ska förbättra siffrorna, annars backas det.
 
 ## Kostnad
@@ -160,7 +198,7 @@ och mäts mot facit: `low` om det håller.
    `evidence`. Regelmotorn ger samma format. Tester.
 3. **Områdesvarningar**: tabell, API, lista på kartsidan.
 4. **UI**: citat per händelse i popup, märken "Uppdatering"/"Påminnelse",
-   "tidigare rapporterad".
+   "tidigare rapporterad", och tidslinjen per händelse med ljud (punkt 6).
 5. **Placera om**: knapp under Inställningar som bygger om händelserna från
    sparade meddelanden med den nya modellen (samma mekanism som
    "Placerar äldre meddelanden …").

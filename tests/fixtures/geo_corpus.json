@@ -1,0 +1,51 @@
+{
+ "about": "Riktiga trafikmeddelanden från P4 Värmland med facit för tools/eval_geolocation.py. Tider i UTC. 'expect': null = inte uppmärkt ännu.",
+ "node_location": "Karlstad, Värmlands län",
+ "cases": [
+  {
+   "id": "2026-10-28-1700",
+   "event_id": null,
+   "at": "2026-10-28T16:00:00",
+   "station": "P4 Värml",
+   "text": "Jag vänder mig till trafikanter på riksväg 63. Kommer man från Molkom och åker mot Brattfors-Filipstad– –så är det precis vid kommungränsen till Filipstads kommun– –som det rörde sig i Stora älget med riksväg 63 för några minuter sen. Extra uppmärksamhet mellan Molkom och Filipstad är i kommungränsen. Vad har vi mer att rapportera? Ni som lyssnade för en stund sen hörde att jag nämnde en bil med haveri. Den stod på E18 från Kristinehamn mot Karlskoga. Den stod väldigt nära rastplatsen Ristjärn där. Den tog högersvar för ett ianspråk riktning Karlskoga– –om man har Kristinehamn i ryggen. Det är de senaste inrapporterade trafikstörningarna. Den näst senaste trafikstörningen är Vildajur. Det var precis samma i går. Det rörde sig på fel sida av Viltstängslet– –utanför utkanten av Karlstad mellan Universitetsmotet och Alstermotet. Det var rådjur på fel sida av Stängslet. Jag får flera samtal nu senast tiden också. 020 999 444.",
+   "radiotext": [
+    "Eftermiddag i P4 Värmland",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "rv63-alg-filipstadsgransen",
+     "kind": "new",
+     "road": "Rv 63",
+     "near": [
+      "Molkom",
+      "Filipstad"
+     ],
+     "km": 20,
+     "what": "Stor älg på vägen vid kommungränsen till Filipstad, mot Filipstad"
+    },
+    {
+     "incident": "e18-ristjarn-haveri",
+     "kind": "repeat",
+     "road": "E18",
+     "near": [
+      "Ristjärn"
+     ],
+     "km": 2,
+     "what": "Bil med haveri nära rastplatsen Ristjärn, mot Karlskoga (nämnd tidigare)"
+    },
+    {
+     "incident": "e18-universitetsmotet-alstermotet-vilt",
+     "kind": "repeat",
+     "road": "E18",
+     "near": [
+      "Universitetsmotet",
+      "Alstermotet"
+     ],
+     "km": 2,
+     "what": "Rådjur på fel sida av viltstängslet (näst senaste störningen)"
+    }
+   ]
+  }
+ ]
+}
