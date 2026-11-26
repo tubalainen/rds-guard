@@ -3,7 +3,7 @@ paho-mqtt>=2.2.0,<3.0.0
 faster-whisper>=1.2.1
 # PyAV 19 removed av.open(metadata_errors=...), which faster-whisper 1.2.1
 # still passes when decoding audio: local transcription fails on every clip.
-av>=11,<19
+av>=19.0.2,<20
 requests>=2.34.2
 # Time zone data for push rule times (zoneinfo), in case the image has none
-tzdata>=2025.2
+tzdata>=2026.6
