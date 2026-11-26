@@ -32,7 +32,7 @@ class FakeTranscriber:
     def __init__(self):
         self.jobs = []
 
-    def enqueue(self, path, event_id, callback):
+    def enqueue(self, path, event_id, callback, hints=None):
         self.jobs.append((path, event_id, callback))
 
 

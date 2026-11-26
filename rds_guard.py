@@ -706,10 +706,12 @@ def _fire_deferred_alert_timeout(event_id):
             _notify(event_id)
 
 
-def _fire_deferred_alert(event_id, transcribed_text, error=False):
+def _fire_deferred_alert(event_id, transcribed_text, error=False, geo=None):
     """Fire a deferred alert with transcription result (or error).
 
-    Returns True if a pending alert was found and published.
+    geo is the geolocation result: it adds the corrected text and the
+    places to the alert. Returns True if a pending alert was found and
+    published.
     """
     with _pending_alerts_lock:
         payload = _pending_alerts.pop(event_id, None)
@@ -723,6 +725,9 @@ def _fire_deferred_alert(event_id, transcribed_text, error=False):
         else:
             payload["transcribed_text"] = transcribed_text
             payload["transcription_status"] = "done"
+        if geo is not None:
+            payload["transcribed_text_corrected"] = geo.corrected_text
+            payload["locations"] = [_location_payload(p) for p in geo.placements]
         _mqtt_pub(mqtt_client, "alert", payload)
         if payload.get("event_type") == "traffic_announcement":
             _notify(event_id)
@@ -747,8 +752,12 @@ def _on_transcription_complete(event_id, text, error, duration_sec=None):
     event_store.update_event_transcription(event_id, text, status="done",
                                            duration_sec=duration_sec)
 
+    # Place the message on the map (and correct misheard words) before the
+    # alert goes out, so the alert carries the places too
+    geo = _geolocate(event_id, text)
+
     # Fire deferred alert with transcription text
-    _fire_deferred_alert(event_id, text)
+    _fire_deferred_alert(event_id, text, geo=geo)
 
     # Fetch event context for the retained per-station transcription topic
     try:
@@ -796,6 +805,119 @@ def _on_transcription_complete(event_id, text, error, duration_sec=None):
         "transcription_duration_sec": duration_sec,
         "timestamp": ts,
     })
+
+
+# ---------------------------------------------------------------------------
+# Geolocation — places a transcribed message on the map
+# ---------------------------------------------------------------------------
+
+geo_service = None       # GeoService, set by main() when processing is on
+_node_place = None       # this receiver's location (gazetteer.Place)
+_geo_ready = threading.Event()
+
+
+def _init_geo():
+    """Load the place-name registry and find NODE_LOCATION (background)."""
+    global _node_place
+    try:
+        if config.NODE_LOCATION:
+            _node_place = geo_service.locate_node(config.NODE_LOCATION)
+            if _node_place:
+                geo_service.area(_node_place.point)
+        else:
+            log.warning("NODE_LOCATION is not set: traffic messages are not "
+                        "placed on the map. Set it to 'Ort, Län', e.g. "
+                        "'Örebro, Örebro län'.")
+    except Exception:
+        log.exception("Could not load the place-name registry")
+    _geo_ready.set()
+
+
+def geo_snapshot():
+    """Map settings for /api/status."""
+    if geo_service is None:
+        return {"enabled": False,
+                "reason": "off" if not config.LOCAL_PROCESSING else "none"}
+    out = {"enabled": geo_service.engine != "none", "engine": geo_service.engine,
+           "location": config.NODE_LOCATION or None, "located": None,
+           "ready": _geo_ready.is_set()}
+    if geo_service.engine == "none":
+        out["reason"] = "none"
+    if _node_place:
+        out["located"] = {"name": _node_place.name, "lat": _node_place.lat,
+                          "lon": _node_place.lon}
+    return out
+
+
+def _transcription_hints():
+    """Local place names for the transcriber (ElevenLabs keyterms, prompt)."""
+    if (geo_service is None or _node_place is None
+            or not config.TRANSCRIPTION_PLACE_NAMES):
+        return None
+    try:
+        history = event_store.recent_place_names()
+        return geo_service.hints(_node_place.point, history)
+    except Exception:
+        log.exception("Could not build place-name hints")
+        return None
+
+
+class _HintingTranscriber:
+    """Passes this receiver's place names along with every clip."""
+
+    def __init__(self, transcriber):
+        self._t = transcriber
+
+    def enqueue(self, audio_path, event_id, callback):
+        self._t.enqueue(audio_path, event_id, callback,
+                        hints=_transcription_hints())
+
+    def __getattr__(self, name):
+        return getattr(self._t, name)
+
+
+def _location_payload(p):
+    return {"label": p.label, "road": p.road, "lat": p.lat, "lon": p.lon,
+            "radius_m": p.radius_m, "bearing": p.bearing,
+            "both_directions": p.both_directions, "cleared": p.cleared,
+            "what": p.what}
+
+
+def _geolocate(event_id, text):
+    """Place a transcription's incidents and store them. Never raises."""
+    if geo_service is None:
+        return None
+    try:
+        _geo_ready.wait(timeout=120)
+        if _node_place is None:
+            event_store.save_geolocation(event_id, None, "no_location")
+            return None
+        event = event_store.get_event(event_id) or {}
+        try:
+            radiotext = json.loads(event.get("radiotext") or "[]")
+        except (TypeError, ValueError):
+            radiotext = []
+        result = geo_service.locate(
+            text, _node_place.point, config.NODE_LOCATION, radiotext,
+            event_store.open_incidents())
+        if result is None:
+            event_store.save_geolocation(event_id, None, "none")
+            return None
+        status = "done" if result.placements else "none"
+        ids = event_store.save_geolocation(event_id, result, status)
+        log.info("Event %d placed with %s: %s", event_id, result.engine,
+                 "; ".join(f"{p.label} (±{p.radius_m} m)" for p in result.placements)
+                 or "no place found")
+        broadcast_ws({"topic": "geolocation", "event_id": event_id,
+                      "incidents": ids, "timestamp": now_iso()})
+        return result
+    except Exception:
+        log.exception("Geolocation failed for event %d", event_id)
+        try:
+            event_store.save_geolocation(event_id, None, "error")
+        except Exception:
+            pass
+        return None
 
 # ---------------------------------------------------------------------------
 # Statistics
@@ -1297,6 +1419,10 @@ def _uplink_status():
         "uptime_sec": snap.get("uptime_sec"),
         "pipeline": {"state": pipe.get("state"), "error": pipe.get("error")},
         "stations": status.station_list(snap),
+        # Where this receiver is ("Ort, Län") and whether it processes its
+        # recordings itself or leaves everything to the aggregator
+        "location": config.NODE_LOCATION or None,
+        "local_processing": config.LOCAL_PROCESSING,
     }
 
 
@@ -1395,7 +1521,7 @@ def _on_pipeline_line(raw_line):
 # ---------------------------------------------------------------------------
 
 def main():
-    global _mqtt_available, _event_loop, _last_stats_log, uplink
+    global _mqtt_available, _event_loop, _last_stats_log, uplink, geo_service
 
     log.info("════════════════════════════════════════════")
     log.info("  RDS Guard starting")
@@ -1409,7 +1535,13 @@ def main():
     log.info("  Web UI:     port %d", config.WEB_UI_PORT)
     log.info("  MQTT:       %s", "enabled" if config.MQTT_ENABLED else "disabled")
     log.info("  Recording:  always on → %s", config.AUDIO_DIR)
-    log.info("  Transcribe: %s", config.TRANSCRIPTION_ENGINE)
+    if config.LOCAL_PROCESSING:
+        log.info("  Transcribe: %s", config.TRANSCRIPTION_ENGINE)
+        log.info("  Map:        %s, location %s", config.GEO_ENGINE,
+                 config.NODE_LOCATION or "(NODE_LOCATION not set)")
+    else:
+        log.info("  Processing: off — raw recordings go to the aggregator, "
+                 "which transcribes and maps them")
     if config.MQTT_ENABLED:
         log.info("  MQTT host:  %s:%s", config.MQTT_HOST or "(empty)", config.MQTT_PORT)
         log.info("  MQTT user:  %s", config.MQTT_USER or "(none)")
@@ -1450,7 +1582,7 @@ def main():
     from audio_recorder import AudioRecorder
 
     transcriber_instance = create_transcriber(
-        engine=config.TRANSCRIPTION_ENGINE,
+        engine=config.TRANSCRIPTION_ENGINE if config.LOCAL_PROCESSING else "none",
         language=config.TRANSCRIPTION_LANGUAGE,
         model_size=config.TRANSCRIPTION_MODEL,
         device=config.TRANSCRIPTION_DEVICE,
@@ -1467,6 +1599,16 @@ def main():
     )
     if transcriber_instance:
         transcriber_instance.start()
+
+    if config.LOCAL_PROCESSING:
+        import geo_service as geo_service_mod
+        geo_service = geo_service_mod.create_service(
+            config.GEO_ENGINE, api_key=config.ANTHROPIC_API_KEY,
+            model=config.CLAUDE_MODEL, timeout=config.CLAUDE_TIMEOUT,
+            place_names=config.TRANSCRIPTION_PLACE_NAMES)
+        threading.Thread(target=_init_geo, daemon=True, name="geo-init").start()
+        if transcriber_instance:
+            transcriber_instance = _HintingTranscriber(transcriber_instance)
 
     record_types_set = set(t.strip() for t in config.RECORD_EVENT_TYPES.split(","))
 

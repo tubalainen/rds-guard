@@ -9,6 +9,9 @@ import sqlite3
 import threading
 import time
 
+import geolocate
+import gazetteer as gz
+
 log = logging.getLogger("rds-aggregator")
 
 _DB_PATH = None
@@ -143,6 +146,14 @@ def init_db(db_path):
         CREATE INDEX IF NOT EXISTS idx_notify_log_event ON notify_log(event_uid);
         CREATE INDEX IF NOT EXISTS idx_notify_log_created ON notify_log(created_at);
     """)
+    # Geolocation (added in a later version: migrate older databases)
+    for column in ("transcription_corrected", "geo_status", "geo_engine"):
+        try:
+            conn.execute(f"ALTER TABLE events ADD COLUMN {column} TEXT")
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
+    geolocate.init_tables(conn)
     conn.commit()
     log.info("Aggregator store initialized at %s", _DB_PATH)
 
@@ -363,6 +374,7 @@ def set_event_audio(node_id, event_uid, audio_path, transcription_status):
         cur = conn.execute(
             "UPDATE events SET audio_path = ?, audio_received_at = ?, "
             "transcription = NULL, transcription_duration_sec = NULL, "
+            "transcription_corrected = NULL, geo_status = NULL, "
             "transcription_status = ? "
             "WHERE event_uid = ? AND node_id = ?",
             (audio_path, now_iso(), transcription_status, event_uid, node_id))
@@ -427,7 +439,8 @@ def query_events(event_type=None, pi=None, node=None, since=None,
         where.append("COALESCE(e.started_at, e.received_at) < ?")
         params.append(end)
     for word in (q or "").split()[:8]:
-        where.append("rg_contains(e.radiotext, e.transcription, e.station_ps, ?)")
+        where.append("rg_contains(e.radiotext, COALESCE(e.transcription, '') || ' ' "
+                     "|| COALESCE(e.transcription_corrected, ''), e.station_ps, ?)")
         params.append(word)
     if event_type:
         types = [t.strip() for t in event_type.split(",") if t.strip()]
@@ -537,6 +550,7 @@ def purge_old_events(days):
             "AND audio_path IS NOT NULL", (cutoff,)).fetchall()
         cur = conn.execute("DELETE FROM events WHERE received_at < ?",
                            (cutoff,))
+        geolocate.purge_incidents(conn, cutoff)
         conn.commit()
     if cur.rowcount:
         log.info("Purged %d events older than %d days", cur.rowcount, days)
@@ -708,3 +722,74 @@ def events_for_preview(since):
         "ORDER BY COALESCE(e.started_at, e.received_at) DESC",
         (since, *ACTIVE_STATES)).fetchall()
     return [_event_dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Geolocation: incidents on the map
+# ---------------------------------------------------------------------------
+
+def save_geolocation(event_uid, result, status):
+    """Store a message's corrected text and merge its incidents."""
+    with _lock:
+        conn = _conn()
+        ids = []
+        if result is not None and result.placements:
+            ids = geolocate.merge_placements(
+                conn, result.placements, event_uid, now_iso(),
+                iso_ago(geolocate.INCIDENT_HOURS * 3600), result.engine)
+        conn.execute(
+            "UPDATE events SET transcription_corrected = ?, geo_status = ?, "
+            "geo_engine = ? WHERE event_uid = ?",
+            (result.corrected_text if result else None, status,
+             result.engine if result else None, event_uid))
+        conn.commit()
+    return ids
+
+
+def _near(rows, center, km):
+    if center is None:
+        return rows
+    return [r for r in rows if gz.km(center, (r["lat"], r["lon"])) <= km]
+
+
+def open_incidents(center=None, km=geolocate.DEFAULT_AREA_KM):
+    rows = geolocate.open_incidents(
+        _conn(), iso_ago(geolocate.INCIDENT_HOURS * 3600))
+    return _near(rows, center, km)
+
+
+def list_incidents(hours=geolocate.INCIDENT_HOURS):
+    """Incidents for the map, with the nodes whose messages mentioned them."""
+    conn = _conn()
+    rows = geolocate.list_incidents(conn, iso_ago(hours * 3600))
+    for inc in rows:
+        nodes = conn.execute(
+            "SELECT DISTINCT n.name FROM incident_events ie "
+            "JOIN events e ON e.event_uid = ie.event_key "
+            "JOIN nodes n ON n.id = e.node_id WHERE ie.incident_id = ?",
+            (inc["id"],)).fetchall()
+        inc["nodes"] = sorted(r[0] for r in nodes)
+    return rows
+
+
+def incidents_for_events(event_uids):
+    return geolocate.incidents_for_events(_conn(), event_uids)
+
+
+def recent_place_names(center=None, days=90, limit=60):
+    """Names from recent incidents near center, most mentioned first."""
+    conn = _conn()
+    since = iso_ago(days * 86400)
+    if center is None:
+        return geolocate.recent_names(conn, since, limit)
+    counts = {}
+    for r in conn.execute("SELECT names, lat, lon FROM incidents "
+                          "WHERE last_seen >= ?", (since,)):
+        if gz.km(center, (r["lat"], r["lon"])) > geolocate.DEFAULT_AREA_KM:
+            continue
+        try:
+            for n in json.loads(r["names"] or "[]"):
+                counts[n] = counts.get(n, 0) + 1
+        except ValueError:
+            continue
+    return [n for n, _ in sorted(counts.items(), key=lambda kv: -kv[1])][:limit]

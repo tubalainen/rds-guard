@@ -214,6 +214,9 @@ def event_text(event):
     parts = [str(r) for r in rt]
     if event.get("transcription"):
         parts.append(event["transcription"])
+    if event.get("transcription_corrected"):
+        # Corrected place names match keywords the misheard ones missed
+        parts.append(event["transcription_corrected"])
     return " ".join(parts)
 
 
@@ -298,8 +301,9 @@ def build_payload(event, rule, event_ref, public_url="", audio_path=None,
     """
     etype = event.get("type", "traffic")
     station = {"pi": event.get("pi"), "ps": event.get("station_ps")}
-    message = event.get("transcription") or " – ".join(
-        str(r) for r in (event.get("radiotext") or []) if r)
+    message = (event.get("transcription_corrected") or event.get("transcription")
+               or " – ".join(
+                   str(r) for r in (event.get("radiotext") or []) if r))
     if not message:
         message = headline(event)
     base = (public_url or "").rstrip("/")

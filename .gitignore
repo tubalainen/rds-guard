@@ -29,3 +29,6 @@ Thumbs.db
 *.plan.md
 rds-traffic-mqtt-plan.md
 web-ui.md
+
+# Download cache of tools/build_gazetteer.py
+.gazetteer-cache/

@@ -172,8 +172,10 @@ const Aggregator = (() => {
             idOf: (ev) => ev.event_uid,
             loadStations,
             loadNodes,
-            views: { noder: nodesView },
-            extraNav: [['noder', 'Noder', RDSUI.ICON.nodes]],
+            views: { noder: nodesView, karta: RDSMap.view },
+            extraNav: [RDSMap.nav, ['noder', 'Noder', RDSUI.ICON.nodes]],
+            cardMeta: RDSMap.cardMeta,
+            eventExtras: RDSMap.eventExtras,
         });
         poll();
         setInterval(() => { if (!document.hidden) poll(); }, 15000);

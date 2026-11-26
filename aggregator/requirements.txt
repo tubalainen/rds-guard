@@ -7,3 +7,5 @@ av>=11,<19
 requests>=2.34.2
 # Time zone data for push rule times (zoneinfo), in case the image has none
 tzdata>=2026.6
+# Claude API for the optional map engine (GEO_ENGINE=claude)
+anthropic>=2.14.0,<3

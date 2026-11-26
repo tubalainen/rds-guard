@@ -393,13 +393,30 @@ const RDSUI = (() => {
         return `<span class="pill">${ICON.bell} Ingen push – ingen regel matchade</span>`;
     }
 
+    /**
+     * Transcription as HTML. When Claude corrected misheard words, the
+     * corrected text is shown, with a "Rättad" tag that switches to the
+     * original (see the click handler in start()).
+     */
+    function txHtml(ev, words) {
+        const orig = ev.transcription || '';
+        const fixed = ev.transcription_corrected || '';
+        if (!fixed || fixed === orig) return { text: orig ? hl(orig, words) : '', toggle: '' };
+        return {
+            text: `<span class="tx-fixed">${hl(fixed, words)}</span><span class="tx-orig" hidden>${hl(orig, words)}</span>`,
+            toggle: '<button type="button" class="pill info fix-toggle" aria-pressed="false" '
+                + 'title="Felhörda ortnamn och ord är rättade. Tryck för att se originaltranskriptionen.">Rättad</button>',
+        };
+    }
+
     function evCard(ev, opt = {}) {
         const id = cfg.idOf(ev);
         const start = evStart(ev);
         const live = isLive(ev);
         const title = headline(ev);
         const words = opt.highlight || [];
-        const text = ev.transcription || radiotext(ev).filter((r) => r !== title).join(' – ');
+        const tx = txHtml(ev, words);
+        const text = tx.text || hl(radiotext(ev).filter((r) => r !== title).join(' – '), words);
         const meta = [typePill(ev), `<span>${esc(stationLabel(ev))}</span>`];
         if (opt.showDate) meta.push(`<span>· ${esc(fmtRelDay(start))}</span>`);
         if (ev.node_name) meta.push(`<span>· ${esc(ev.node_name)}</span>`);
@@ -415,9 +432,9 @@ const RDSUI = (() => {
             <div class="ev-body">
                 <div class="ev-meta">${meta.join('')}</div>
                 <h3 class="ev-title"><a href="#/event/${encodeURIComponent(id)}">${hl(title, words)}</a></h3>
-                ${text ? `<p class="ev-text clamp">${hl(text, words)}</p>` : ''}
+                ${text ? `<p class="ev-text clamp">${text}</p>` : ''}
                 ${ev.audio_url ? Player.html(ev.audio_url, ev.duration_sec) : ''}
-                <div class="ev-foot">${transcriptionStatus(ev)}${pushPill(ev)}</div>
+                <div class="ev-foot">${tx.toggle}${transcriptionStatus(ev)}${pushPill(ev)}</div>
             </div>
         </article>`;
     }
@@ -701,6 +718,7 @@ const RDSUI = (() => {
         const notify = ev.notify || [];
         const tStatus = transcriptionStatus(ev);
         const engine = ev.transcription_duration_sec != null ? `klar på ${fmtDur(ev.transcription_duration_sec)}` : '';
+        const tx = txHtml(ev, []);
         const kv = [
             ['Station', ev.station_ps || ev.long_ps || '–'],
             ['Frekvens', fmtFreq(ev.frequency) || '–'],
@@ -725,8 +743,8 @@ const RDSUI = (() => {
                 <div class="col-main">
                     ${ev.audio_url ? `<section class="card" aria-label="Ljud">${Player.html(ev.audio_url, ev.duration_sec, true)}</section>` : ''}
                     <section class="card">
-                        <div class="card-head"><h2>Transkription</h2><span class="small muted">${esc(engine)}</span></div>
-                        ${ev.transcription ? `<p class="prose">${esc(ev.transcription)}</p>`
+                        <div class="card-head"><h2>Transkription</h2>${tx.toggle}<span class="small muted">${esc(engine)}</span></div>
+                        ${ev.transcription ? `<p class="prose">${tx.text}</p>`
         : `<p class="muted" style="margin:0">${tStatus || 'Ingen transkription för den här händelsen.'}</p>`}
                     </section>
                     <div id="event-extras"></div>
@@ -1154,11 +1172,24 @@ const RDSUI = (() => {
                 form.q.blur();
             });
         }
+        // "Rättad" tag: switch between the corrected and the original text
+        document.addEventListener('click', (e) => {
+            const b = e.target.closest('.fix-toggle');
+            if (!b) return;
+            e.preventDefault();
+            const box = b.closest('.ev, .card');
+            const showOrig = b.getAttribute('aria-pressed') !== 'true';
+            box.querySelectorAll('.tx-fixed').forEach((x) => { x.hidden = showOrig; });
+            box.querySelectorAll('.tx-orig').forEach((x) => { x.hidden = !showOrig; });
+            b.setAttribute('aria-pressed', String(showOrig));
+            b.textContent = showOrig ? 'Original' : 'Rättad';
+            b.classList.toggle('info', !showOrig);
+        });
         window.addEventListener('hashchange', route);
         route();
     }
 
     return {
-        start, api, esc, route, go, toast, parseTs, fmtTime, fmtRelDay, fmtDur, fmtFreq, ICON, Player,
+        start, api, esc, route, go, toast, parseTs, fmtTime, fmtRelDay, fmtDur, fmtFreq, ICON, Player, txHtml,
     };
 })();

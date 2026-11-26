@@ -29,7 +29,8 @@ _PUBLIC_EVENT_FIELDS = (
     "event_uid", "node_name", "type", "state", "pi", "station_ps", "long_ps",
     "frequency", "prog_type", "radiotext", "started_at", "ended_at",
     "duration_sec", "received_at", "transcription", "transcription_status",
-    "transcription_duration_sec", "alert_status",
+    "transcription_duration_sec", "alert_status", "transcription_corrected",
+    "geo_status",
 )
 
 
@@ -50,12 +51,15 @@ def public_event(row):
 
 
 def _with_notify(rows):
-    """Public events with their push log attached."""
-    log_rows = store.notify_for_events([r["event_uid"] for r in rows])
+    """Public events with their push log and map incidents attached."""
+    uids = [r["event_uid"] for r in rows]
+    log_rows = store.notify_for_events(uids)
+    places = store.incidents_for_events(uids)
     out = []
     for r in rows:
         ev = public_event(r)
         ev["notify"] = log_rows.get(r["event_uid"], [])
+        ev["incidents"] = places.get(r["event_uid"], [])
         out.append(ev)
     return out
 
@@ -78,7 +82,19 @@ def public_node(node, pipeline=None):
         "pipeline": status.get("pipeline"),
         "stations": status.get("stations") or [],
         "queue_depth": status.get("queue_depth"),
+        "location": status.get("location"),
+        "located": _located(node, pipeline),
+        "local_processing": status.get("local_processing"),
     }
+
+
+def _located(node, pipeline):
+    """Where the node's NODE_LOCATION was found, for the Nodes view."""
+    place = pipeline.node_place(node["id"]) if pipeline is not None and hasattr(
+        pipeline, "node_place") else None
+    if place is None:
+        return None
+    return {"name": place.name, "lat": place.lat, "lon": place.lon}
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +312,45 @@ async def handle_audio(request):
         "Accept-Ranges": "none", "Cache-Control": "no-store"})
 
 
+async def handle_incidents(request):
+    """GET /api/v1/incidents — incidents for the map (default: 12 hours)."""
+    hours = _int_param(request, "hours", 12, 1, 24 * 7)
+    pipeline = request.app[PIPELINE]
+
+    def work():
+        rows = store.list_incidents(hours)
+        for inc in rows:
+            ev = store.get_event(inc["events"][0]) if inc["events"] else None
+            inc["latest"] = {
+                "id": ev["event_uid"],
+                "started_at": ev.get("started_at"),
+                "station_ps": ev.get("station_ps"),
+                "node_name": ev.get("node_name"),
+                "transcription": ev.get("transcription_corrected")
+                or ev.get("transcription"),
+                "audio_url": (f"/api/v1/audio/{ev['event_uid']}.ogg"
+                              if ev.get("audio_path") else None),
+            } if ev else None
+        nodes = []
+        for n in store.list_nodes():
+            place = (pipeline.node_place(n["id"])
+                     if pipeline is not None and hasattr(pipeline, "node_place")
+                     else None)
+            if place:
+                nodes.append({"name": n["name"], "lat": place.lat,
+                              "lon": place.lon})
+        return rows, nodes
+
+    rows, nodes = await _run(work)
+    return web.json_response({
+        "incidents": rows, "hours": hours, "nodes": nodes,
+        "geo": {"enabled": config.GEO_ENGINE != "none",
+                "engine": ("claude" if config.GEO_ENGINE == "claude"
+                           and config.ANTHROPIC_API_KEY else
+                           "none" if config.GEO_ENGINE == "none" else "rules")},
+    })
+
+
 async def handle_stations(request):
     return web.json_response({"stations": await _run(store.list_stations)})
 
@@ -391,7 +446,9 @@ async def security_headers(request, handler):
         "Content-Security-Policy",
         # blob: media for the audio player (wavesurfer.js); inline styles
         # for the player's waveform and the UI's layout attributes
+        # img-src: map tiles from OpenStreetMap for the map view
         "default-src 'self'; media-src 'self' blob:; "
+        "img-src 'self' data: https://tile.openstreetmap.org; "
         "style-src 'self' 'unsafe-inline'; object-src 'none'; "
         "frame-ancestors 'none'")
     return resp
@@ -417,6 +474,7 @@ def create_web_app(pipeline=None, mqtt=None):
     r.add_post("/api/v1/notify/test", handle_test_rule)
     r.add_get("/api/v1/audio/{uid}.ogg", handle_audio)
     r.add_get("/api/v1/stations", handle_stations)
+    r.add_get("/api/v1/incidents", handle_incidents)
     r.add_get("/api/v1/nodes", handle_nodes)
     r.add_post("/api/v1/nodes", handle_create_node)
     r.add_post("/api/v1/nodes/{node_id}/rotate", handle_rotate_node)

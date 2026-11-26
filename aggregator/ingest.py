@@ -210,6 +210,11 @@ def clean_heartbeat(body):
             },
             "stations": clean_stations,
             "queue_depth": _num(body.get("queue_depth")),
+            # "Ort, Län" the satellite owner gave (NODE_LOCATION)
+            "location": _cap(body.get("location"), 80),
+            "local_processing": (body.get("local_processing")
+                                 if isinstance(body.get("local_processing"), bool)
+                                 else None),
         },
     }
 

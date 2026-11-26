@@ -12,6 +12,8 @@ import threading
 import time
 import uuid
 
+import geolocate
+
 log = logging.getLogger("rds-guard")
 
 _DB_PATH = "/data/events.db"
@@ -93,6 +95,13 @@ def init_db(db_path=None):
     _migrate_add_column(conn, "transcription_duration_sec", "REAL")
     # Globally unique event identity (used by the uplink to the aggregator)
     _migrate_add_column(conn, "event_uid", "TEXT")
+    # Geolocation: the transcription with misheard words corrected (Claude
+    # engine only) and how the message was placed on the map
+    _migrate_add_column(conn, "transcription_corrected", "TEXT")
+    _migrate_add_column(conn, "geo_status", "TEXT")
+    _migrate_add_column(conn, "geo_engine", "TEXT")
+    geolocate.init_tables(conn)
+    conn.commit()
 
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS outbox (
@@ -216,7 +225,8 @@ def query_events(event_type=None, since=None, limit=50, offset=0,
         where.append("pi = ?")
         params.append(pi)
     for word in (q or "").split()[:8]:
-        where.append("rg_contains(radiotext, transcription, station_ps, ?)")
+        where.append("rg_contains(radiotext, COALESCE(transcription, '') || ' ' "
+                     "|| COALESCE(transcription_corrected, ''), station_ps, ?)")
         params.append(word)
 
     where_clause = " WHERE " + " AND ".join(where) if where else ""
@@ -351,6 +361,7 @@ def purge_old_events(days):
         cur = conn.execute(
             "DELETE FROM events WHERE created_at < ?", (cutoff,)
         )
+        geolocate.purge_incidents(conn, cutoff)
         conn.commit()
         deleted = cur.rowcount
         if deleted > 0:
@@ -752,3 +763,51 @@ def events_for_preview(since):
             d["radiotext"] = []
         out.append(d)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Geolocation: incidents on the map
+# ---------------------------------------------------------------------------
+
+def _iso_hours_ago(hours):
+    return time.strftime("%Y-%m-%dT%H:%M:%S",
+                         time.gmtime(time.time() - hours * 3600))
+
+
+def save_geolocation(event_id, result, status):
+    """Store how a message was placed: corrected text and its incidents.
+
+    result is a geolocate.GeoResult or None; status is "done", "none" (no
+    place found), "error", "no_location" or "off".
+    """
+    with _lock:
+        conn = _conn()
+        ids = []
+        if result is not None and result.placements:
+            ids = geolocate.merge_placements(
+                conn, result.placements, event_id,
+                time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+                _iso_hours_ago(geolocate.INCIDENT_HOURS), result.engine)
+        conn.execute(
+            "UPDATE events SET transcription_corrected = ?, geo_status = ?, "
+            "geo_engine = ? WHERE id = ?",
+            (result.corrected_text if result else None, status,
+             result.engine if result else None, event_id))
+        conn.commit()
+    return ids
+
+
+def open_incidents(hours=geolocate.INCIDENT_HOURS):
+    return geolocate.open_incidents(_conn(), _iso_hours_ago(hours))
+
+
+def list_incidents(hours=geolocate.INCIDENT_HOURS):
+    return geolocate.list_incidents(_conn(), _iso_hours_ago(hours))
+
+
+def incidents_for_events(event_ids):
+    return geolocate.incidents_for_events(_conn(), event_ids)
+
+
+def recent_place_names(days=90, limit=60):
+    return geolocate.recent_names(_conn(), _iso_hours_ago(days * 24), limit)

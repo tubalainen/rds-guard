@@ -202,12 +202,14 @@ class Transcriber:
         self._thread.start()
         log.info("Transcriber worker thread started")
 
-    def enqueue(self, audio_path, event_id, callback):
+    def enqueue(self, audio_path, event_id, callback, hints=None):
         """Add a transcription job to the queue.
 
         callback(event_id, text, error, duration_sec) is called when done.
+        hints = {"keyterms": [...], "prompt": "..."} adds words to listen for
+        in this clip (local place names), on top of the configured ones.
         """
-        self._queue.put((audio_path, event_id, callback))
+        self._queue.put((audio_path, event_id, callback, hints))
 
     def shutdown(self):
         """Signal the worker to stop."""
@@ -227,10 +229,10 @@ class Transcriber:
             item = self._queue.get()
             if item is None:
                 break  # Shutdown sentinel
-            audio_path, event_id, callback = item
+            audio_path, event_id, callback, hints = item
             try:
                 t0 = time.monotonic()
-                text = self.transcribe(Path(audio_path))
+                text = self.transcribe(Path(audio_path), hints)
                 duration_sec = round(time.monotonic() - t0, 1)
                 log.info("Transcription complete for event %d via %s "
                          "(%d chars, %.1fs)", event_id, self._last_engine,
@@ -241,14 +243,31 @@ class Transcriber:
                           event_id, e)
                 callback(event_id, None, e, None)
 
-    def transcribe(self, audio_path):
+    def _prompt(self, hints):
+        """Whisper prompt: the configured one plus this clip's place names.
+
+        Whisper reads at most ~224 prompt tokens, so the hint is cut short.
+        """
+        extra = ((hints or {}).get("prompt") or "").strip()
+        prompt = " ".join(x for x in (self._initial_prompt, extra) if x)
+        return prompt[:600] or None
+
+    def _keyterms(self, hints):
+        terms = list(self._el_keyterms)
+        for term in (hints or {}).get("keyterms") or []:
+            if term not in terms and len(terms) < _KEYTERM_MAX:
+                terms.extend(parse_keyterms(term.replace(",", " ")))
+        return terms[:_KEYTERM_MAX]
+
+    def transcribe(self, audio_path, hints=None):
         """Transcribe one file synchronously with the configured engine."""
         if self._engine == "remote":
             self._last_engine = f"remote ASR ({self._remote_url})"
-            return self._transcribe_remote(audio_path)
+            return self._transcribe_remote(audio_path, self._prompt(hints))
         if self._engine == "elevenlabs":
             try:
-                text = self._transcribe_elevenlabs(audio_path)
+                text = self._transcribe_elevenlabs(audio_path,
+                                                   self._keyterms(hints))
                 self._last_engine = f"ElevenLabs {self._el_model}"
                 return text
             except Exception as e:
@@ -261,7 +280,7 @@ class Transcriber:
         self._last_engine = (f"local {self._model_size}"
                              + (" (fallback)" if self._engine == "elevenlabs"
                                 else ""))
-        return self._transcribe_local(audio_path)
+        return self._transcribe_local(audio_path, self._prompt(hints))
 
     def check_elevenlabs(self):
         """Confirm at startup that ElevenLabs answers and accepts the key.
@@ -340,7 +359,7 @@ class Transcriber:
         )
         log.info("Whisper model loaded successfully")
 
-    def _transcribe_local(self, audio_path):
+    def _transcribe_local(self, audio_path, prompt=None):
         """Run transcription locally via faster-whisper."""
         segments, info = self._model.transcribe(
             str(audio_path),
@@ -350,14 +369,14 @@ class Transcriber:
             # window back as context mostly causes repetition loops and
             # hallucinated text (KBLab recommends turning it off).
             condition_on_previous_text=False,
-            initial_prompt=self._initial_prompt,
+            initial_prompt=prompt,
             vad_filter=True,
             vad_parameters=dict(min_silence_duration_ms=500),
         )
         texts = [seg.text.strip() for seg in segments if seg.text.strip()]
         return " ".join(texts)
 
-    def _transcribe_elevenlabs(self, audio_path):
+    def _transcribe_elevenlabs(self, audio_path, keyterms=None):
         """Send audio to the ElevenLabs Scribe speech-to-text API."""
         import requests
 
@@ -378,7 +397,8 @@ class Transcriber:
             # Road numbers and phone numbers as digits ("E18", "020-99 94 44");
             # scribe_v2 does not accept this option
             data.append(("numbers_format", "digits"))
-        data.extend(("keyterms", term) for term in self._el_keyterms)
+        data.extend(("keyterms", term) for term in
+                    (self._el_keyterms if keyterms is None else keyterms))
 
         with open(audio_path, "rb") as f:
             resp = requests.post(
@@ -393,7 +413,7 @@ class Transcriber:
                                f"{resp.text[:300]}")
         return (resp.json().get("text") or "").strip()
 
-    def _transcribe_remote(self, audio_path):
+    def _transcribe_remote(self, audio_path, prompt=None):
         """Send audio to remote Whisper ASR server via /asr endpoint."""
         import requests
 
@@ -408,8 +428,8 @@ class Transcriber:
             "output": "json",
             "vad_filter": "true",
         }
-        if self._initial_prompt:
-            params["initial_prompt"] = self._initial_prompt
+        if prompt:
+            params["initial_prompt"] = prompt
 
         with open(audio_path, "rb") as f:
             files = {"audio_file": (Path(audio_path).name, f, "audio/wav")}
