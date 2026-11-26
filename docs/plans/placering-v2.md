@@ -1,11 +1,29 @@
 # Plan: bättre tolkning och placering av trafikmeddelanden (v2)
 
-Status 2026-11-26: steg 1 påbörjat. Mätverktyget
-(`tools/eval_geolocation.py`) och facit-formatet
-(`tests/fixtures/geo_corpus.json`) finns, med ett uppmärkt meddelande.
-Facit behöver fyllas med 40–60 riktiga meddelanden från docker01.
-Handinlagda platser finns i `geodata/places-local.tsv` (först: Stolpen vid
-Ölme).
+Status 2026-11-26: steg 1 klart. Facit (`tests/fixtures/geo_corpus.json`)
+har 61 riktiga meddelanden från P4 Värmland (12–26 nov), uppmärkta: 77
+händelseposter, 4 områdesvarningar, kedjor som E45 Värmlandsbro (11
+sändningar) och E18 Bergviksmotet (7). Handinlagda platser finns i
+`geodata/places-local.tsv` (först: Stolpen vid Ölme).
+
+Baslinje (`tools/eval_geolocation.py`):
+
+| | Regler | Claude i drift (`--stored`) |
+|---|---|---|
+| Hittade poster | 60/77 (78 %) | 62/74 (84 %) |
+| varav precisa | 41/77 (53 %) | 59/74 (80 %) |
+| Platser utan facit | 7 | 14 |
+| Rätt typ (ny/känd/avklarad) | 55/60 (92 %) | 55/62 (89 %) |
+| Rätt ihopknutna par | 66/92 (72 %) | 96/96 (100 %) |
+| Fel ihopslagna par | 1 | 5 |
+
+Claudes vanligaste fel i drift: halkvarningar blir punkter (Sunne,
+Slottsbron), Skattkärr blir Väse, Odlingen i Karlskoga hamnar vid norska
+gränsen, "Kristineberg" (Kristinehamn) och påhittade sträckor som
+"Odlingen–Stora Rålen". Regelmotorn knyter ihop sämre och ger stora
+cirklar. Claude-motorn har inte körts mot facit än (kräver
+`ANTHROPIC_API_KEY`, ca 0,6 kr för hela facit); siffrorna ovan är det som
+sparades i drift. Facit är märkt av Claude från texterna och bör granskas.
 
 ## Problemet
 

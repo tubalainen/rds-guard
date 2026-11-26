@@ -11,6 +11,7 @@ about the same incident is measured too.
     python3 tools/eval_geolocation.py                      # rules engine (free)
     python3 tools/eval_geolocation.py --engine claude      # needs ANTHROPIC_API_KEY
     python3 tools/eval_geolocation.py --import events.json # add messages to label
+    python3 tools/eval_geolocation.py --stored events.json # score what an installation stored
 
 events.json is the output of
     curl -s 'http://<host>:8022/api/events?type=traffic&limit=60'
@@ -22,8 +23,10 @@ Each expected item:
     {"incident": "e18-ristjarn",      same key = same incident, across messages
      "kind": "new",                   new | update | repeat | cleared | area_warning
      "road": "E18",                   or null
-     "near": ["Ristjärn"],            names in the registry (midpoint of several)
-                                      or "lat"/"lon" for a spot without a name
+     "near": ["Ristjärn"],            names in the registry (midpoint of several);
+                                      "Karlskoga (town)" picks a kind when the
+                                      name has several places; or "lat"/"lon"
+                                      for a spot without a name
      "km": 2,                         how far off a placement may be (plus its radius)
      "what": "Bil med haveri"}        for the reader; not scored
 
@@ -33,6 +36,7 @@ Costs: the rules engine is free; Claude Haiku about 1 öre per message.
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -108,10 +112,12 @@ def expected_point(item, reg, center):
     if item.get("lat") is not None and item.get("lon") is not None:
         return (item["lat"], item["lon"])
     points = []
-    for name in item.get("near") or []:
-        found = reg.exact(name)
+    for entry in item.get("near") or []:
+        m = re.fullmatch(r"(.+?) \((\w+)\)", entry.strip())
+        name, kind = (m.group(1), m.group(2)) if m else (entry, None)
+        found = [p for p in reg.exact(name) if kind is None or p.kind == kind]
         if not found:
-            raise ValueError(f"'{name}' finns inte i ortnamnsregistret")
+            raise ValueError(f"'{entry}' finns inte i ortnamnsregistret")
         points.append(min(found, key=lambda p: gz.km(center, p.point)).point)
     if not points:
         raise ValueError("varken 'near' eller 'lat'/'lon'")
@@ -195,6 +201,31 @@ def run(corpus, geolocator, reg, center, location_label=""):
     return out
 
 
+def stored_runs(corpus, events):
+    """[CaseRun] from the incidents an installation already stored for these
+    messages (the "incidents" of each /api/events row), without placing
+    anything again. Whether a message cleared its incident is not stored
+    per message, so the kind is only new or known."""
+    by_id = {e.get("id"): e for e in events}
+    seen, out = set(), []
+    for case in sorted(corpus["cases"], key=lambda c: c["at"]):
+        ev = by_id.get(case.get("event_id"))
+        if ev is None:
+            continue
+        predicted = []
+        for inc in ev.get("incidents") or []:
+            pl = geolocate.Placement(
+                lat=inc["lat"], lon=inc["lon"], radius_m=inc["radius_m"],
+                road=geolocate.norm_road(inc.get("label") or ""),
+                label=inc.get("label") or "")
+            predicted.append(Predicted(pl, inc["id"],
+                                       "linked" if inc["id"] in seen else "new"))
+            seen.add(inc["id"])
+        out.append(CaseRun(case, ev.get("geo_engine") or "stored", predicted,
+                           ev.get("transcription_corrected")))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Score
 # ---------------------------------------------------------------------------
@@ -215,6 +246,10 @@ def _match_case(expect, predicted, reg, center):
     items = [ItemResult(None, it, expected_point(it, reg, center)) for it in expect]
     pairs = []
     for ii, res in enumerate(items):
+        if KIND_GROUP[res.item["kind"]] == "area":
+            # The engines have no area warnings yet: a point they make of
+            # one is a place without a match, not a hit
+            continue
         exp_road = geolocate.norm_road(res.item.get("road") or "") or res.item.get("road")
         for pi, pr in enumerate(predicted):
             pl = pr.placement
@@ -247,15 +282,19 @@ def score(runs, reg, center):
             g.case_id = r.case["id"]
         items += got
         extras += [(r.case["id"], e) for e in extra]
+    areas = [i for i in items if KIND_GROUP[i.item["kind"]] == "area"]
+    items = [i for i in items if KIND_GROUP[i.item["kind"]] != "area"]
     found = [i for i in items if i.match]
-    kinds = [i for i in found if KIND_GROUP[i.item["kind"]] != "area"]
+    kinds = found
     kind_ok = [i for i in kinds if KIND_GROUP[i.item["kind"]] == i.match.group]
 
-    # Linking: every pair of found items, across all messages
+    # Linking: every pair of found incidents (not area warnings), across
+    # all messages
     same_ok = same_missed = merged_wrong = 0
-    for a in range(len(found)):
-        for b in range(a + 1, len(found)):
-            x, y = found[a], found[b]
+    linkable = found
+    for a in range(len(linkable)):
+        for b in range(a + 1, len(linkable)):
+            x, y = linkable[a], linkable[b]
             if x.case_id == y.case_id:
                 continue
             should = x.item["incident"] == y.item["incident"]
@@ -267,11 +306,15 @@ def score(runs, reg, center):
             elif did:
                 merged_wrong += 1
 
+    # A hit that says where: its circle no wider than the facit allows
+    precise = [i for i in found
+               if i.match.placement.radius_m <= max(1000 * i.item["km"], 2500)]
     offs = sorted(i.km_off for i in found)
     radii = sorted(i.match.placement.radius_m for i in found)
     return {
         "messages": len(runs), "labelled": labelled,
         "expected": len(items), "found": len(found),
+        "precise": len(precise), "area_warnings": len(areas),
         "extra": len(extras),
         "kind_scored": len(kinds), "kind_ok": len(kind_ok),
         "link_pairs": same_ok + same_missed, "linked_ok": same_ok,
@@ -306,6 +349,8 @@ def print_report(engine_name, runs, s, verbose=True):
             print(f"{cid}  {r.case['at']}"
                   + (f"  [{r.engine}: {r.error}]" if r.error else ""))
             for it in by_case.get(cid, []):
+                if KIND_GROUP[it.item["kind"]] == "area":
+                    continue
                 want = KIND_GROUP[it.item["kind"]]
                 label = f"{it.item.get('road') or ''} {'–'.join(it.item.get('near') or [])}".strip()
                 if not it.match:
@@ -322,7 +367,10 @@ def print_report(engine_name, runs, s, verbose=True):
     print("=" * 78)
     print(f"Motor: {engine_name}. {s['messages']} meddelanden, {s['labelled']} med facit.")
     print(f"Hittade poster:        {_pct(s['found'], s['expected'])}")
+    print(f"  varav precisa:       {_pct(s['precise'], s['expected'])}"
+          "  (radien högst facits km, minst 2,5 km)")
     print(f"Platser utan facit:    {s['extra']}")
+    print(f"Områdesvarningar:      {s['area_warnings']} i facit (mäts inte än)")
     if s["median_km_off"] is not None:
         print(f"Avstånd till facit:    median {s['median_km_off']:.1f} km,"
               f" radie median {s['median_radius_m']} m")
@@ -347,6 +395,8 @@ def main():
     ap.add_argument("--engine", choices=("rules", "claude", "both"), default="rules")
     ap.add_argument("--import", dest="import_file", metavar="EVENTS_JSON",
                     help="add the messages in a saved /api/events answer to the set")
+    ap.add_argument("--stored", metavar="EVENTS_JSON",
+                    help="score the incidents stored with a saved /api/events answer")
     ap.add_argument("--check", action="store_true", help="only check the set")
     ap.add_argument("--quiet", action="store_true", help="only the totals")
     ap.add_argument("--json", metavar="FILE", help="also write the totals here")
@@ -377,8 +427,20 @@ def main():
         print(f"Facit ok: {len(corpus['cases'])} meddelanden, {n} med facit.")
         return
 
-    engines = ["rules", "claude"] if args.engine == "both" else [args.engine]
     totals = {}
+    if args.stored:
+        with open(args.stored, encoding="utf-8") as f:
+            data = json.load(f)
+        runs = stored_runs(corpus, data.get("events", data) if isinstance(data, dict) else data)
+        s = score(runs, reg, node.point)
+        print_report("sparade händelser (avklarad syns inte per sändning)", runs, s,
+                     verbose=not args.quiet)
+        totals["stored"] = summary(s)
+        if args.json:
+            with open(args.json, "w", encoding="utf-8") as f:
+                json.dump(totals, f, ensure_ascii=False, indent=1)
+        return
+    engines = ["rules", "claude"] if args.engine == "both" else [args.engine]
     for name in engines:
         if name == "claude":
             import config

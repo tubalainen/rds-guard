@@ -118,3 +118,19 @@ def test_bundled_corpus_is_valid():
     svc = geo_service.GeoService(geo.create_geolocator("rules"))
     node = svc.locate_node(c["node_location"])
     assert ev.validate(c, svc.area(node.point), node.point) == []
+
+
+def test_stored_incidents_are_scored_without_placing_again(reg):
+    c = corpus(
+        {"id": "ev1", "event_id": 1, "at": "2026-11-26T10:00:00", "text": "x",
+         "expect": [item("berg", "new", ["Bergviksmotet"])]},
+        {"id": "ev2", "event_id": 2, "at": "2026-11-26T10:30:00", "text": "y",
+         "expect": [item("berg", "update", ["Bergviksmotet"])]},
+    )
+    inc = {"id": 81, "label": "E18 Bergviksmotet", "lat": 59.379,
+           "lon": 13.43247, "radius_m": 500}
+    runs = ev.stored_runs(c, [{"id": 2, "incidents": [inc]},
+                              {"id": 1, "incidents": [inc]}])
+    s = ev.score(runs, reg, KARLSTAD)
+    assert [p.group for r in runs for p in r.predicted] == ["new", "linked"]
+    assert (s["found"], s["precise"], s["linked_ok"]) == (2, 2, 1)

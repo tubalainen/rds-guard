@@ -612,6 +612,7 @@ where, of what kind, and which messages are about the same incident):
 python3 tools/eval_geolocation.py                   # rules engine, free
 docker compose exec rds-guard python3 /app/tools/eval_geolocation.py --engine claude
 python3 tools/eval_geolocation.py --import events.json   # add messages to label
+python3 tools/eval_geolocation.py --stored events.json   # score what was stored, free
 ```
 
 It reports incidents found, places without a match, distance and radius,

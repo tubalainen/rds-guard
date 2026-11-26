@@ -46,6 +46,1558 @@
      "what": "Rådjur på fel sida av viltstängslet (näst senaste störningen)"
     }
    ]
+  },
+  {
+   "id": "ev906",
+   "event_id": 906,
+   "at": "2026-11-12T16:47:01",
+   "station": "P4 SR",
+   "text": "På E18 mellan Karlstad och Kristinehamn, strax i höjd med Ölmö– –när man kör mot Karlstad, ska ett körfält vara blockerat. Två bilar som har krockat och räddningstjänsten är på plats. Från Kristinehamn mot Karlstad vid Ölmö. Sen i andra riktningen på E18, från Karlstad mot Kristinehamn– –innan Väse, ska det vara en bil i diket på två fil i sträcka. Sen tidigare kan det vara att andra står kvar där. Det hjälper till på Länsväg 175 mellan Säffle och Knösta korset. Där har bilen kört av vägen ungefär mitt på sträckan. Norr om Säffle på Länsväg 175. Det är ett myckihalt läge just nu på många vägar i Värmlands län. Bland annat på E18, hela vägen Grums Kristinehamn. Runt Säffle, runt Sunne och så vidare. Många fuktiga vägar har återfrusit. Trafikverket är informerade och personal är på väg ut. Men det tar länge att halkbekämpa.",
+   "radiotext": [
+    "Kvällspasset i P4 med Sarit Monastyrski",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-olme-krock-1112",
+     "kind": "new",
+     "road": "E18",
+     "near": [
+      "Ölme"
+     ],
+     "km": 2,
+     "what": "Två bilar har krockat, ett körfält blockerat, mot Karlstad"
+    },
+    {
+     "incident": "e18-vase-dike-1112",
+     "kind": "new",
+     "road": "E18",
+     "near": [
+      "Väse"
+     ],
+     "km": 3,
+     "what": "Bil i diket före Väse, mot Kristinehamn"
+    },
+    {
+     "incident": "lv175-saffle-avkorning-1112",
+     "kind": "new",
+     "road": "Lv 175",
+     "near": [
+      "Säffle",
+      "Knöstad"
+     ],
+     "km": 8,
+     "what": "Bil har kört av vägen norr om Säffle"
+    },
+    {
+     "incident": "halka-1112",
+     "kind": "area_warning",
+     "road": null,
+     "near": [
+      "Karlstad"
+     ],
+     "km": 100,
+     "what": "Mycket halt i Värmlands län: E18 Grums–Kristinehamn, runt Säffle, runt Sunne"
+    }
+   ]
+  },
+  {
+   "id": "ev907",
+   "event_id": 907,
+   "at": "2026-11-12T17:25:56",
+   "station": "P4 SR",
+   "text": "Fortsatt halkvarning för stora delar av Värmlands länfuktiga vägar– –som återfryser. Bland annat har det här under eftermiddagen varit mycket halt på E18– –mellan Grums och Kristinehamn, men även på andra platser som norr om Säffle på länsväg 175. På E18, när man kör från Karlstad mot Kristinehamn, kan det vara– –att det är en bil kvar i diket innan avfarten mot Väse, riktning Kristinehamn. Det var en bil där som körde i diket på tvåfile i sträcka. Det kan vara att den är kvar där i diket. Tipsnumret till trafikredaktionen om man ser akuta störningar är 0-20-99-444.",
+   "radiotext": [
+    "Benjamin Ingrosso - Dancing On A Sunny Day",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "halka-1112",
+     "kind": "area_warning",
+     "road": null,
+     "near": [
+      "Karlstad"
+     ],
+     "km": 100,
+     "what": "Fortsatt halkvarning, E18 Grums–Kristinehamn, Lv 175 norr om Säffle"
+    },
+    {
+     "incident": "e18-vase-dike-1112",
+     "kind": "repeat",
+     "road": "E18",
+     "near": [
+      "Väse"
+     ],
+     "km": 3,
+     "what": "Bilen i diket före Väse kan stå kvar"
+    }
+   ]
+  },
+  {
+   "id": "ev908",
+   "event_id": 908,
+   "at": "2026-11-12T17:35:27",
+   "station": "P4 SR",
+   "text": "Först gäller det Länsväg 244 mellan Grythyttan och Norra. Det är strax norr om Malbäcken som trafiken nu dirigeras förbi växelvis– –efter att en personbil med husvagn kört i diket. Rättningstjänsten och ambulansen jobbar på platsen här. Räkna med köer. Bergarna inväntas här närmaste halvtimmen. Men räkna med trafikpåverkan fortsättningsvis här på Länsväg 244– –mellan Grythyttan och Norra, strax norr om Malbäcken. Sen på Länsväg 50 mellan Lindesberg och Storå. Där hade det kommit in larm om en singelolycka med personbil. Det här ska vara mellan Hellabacken och Fanthyttan på 50. Olyckan ska ha inträffat i norrgående riktning mot Storå. Sen en generell halkvarning för både Värmlands län och Örebro län. Det är fuktiga vägar som återfryser nu på flera håll. Mycket halt. Trafikverket har halkbekämpningsresurser ute– –men det dröjer innan det inte är halt på vägarna.",
+   "radiotext": [
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "lv244-malbacken-husvagn-1112",
+     "kind": "new",
+     "road": "Lv 244",
+     "near": [
+      "Malbäcken"
+     ],
+     "km": 3,
+     "what": "Personbil med husvagn i diket, trafiken dirigeras växelvis"
+    },
+    {
+     "incident": "lv50-hallabacken-1112",
+     "kind": "new",
+     "road": "Lv 50",
+     "near": [
+      "Hällabacken (hamlet)",
+      "Fanthyttan"
+     ],
+     "km": 3,
+     "what": "Singelolycka med personbil, norrgående mot Storå"
+    },
+    {
+     "incident": "halka-1112",
+     "kind": "area_warning",
+     "road": null,
+     "near": [
+      "Karlstad"
+     ],
+     "km": 100,
+     "what": "Generell halkvarning för Värmlands och Örebro län"
+    }
+   ]
+  },
+  {
+   "id": "ev909",
+   "event_id": 909,
+   "at": "2026-11-12T18:54:06",
+   "station": "P4 SR",
+   "text": "Man kan inte lyckas ta sig över den. Vi avbryter kort för ett trafikmeddelande som gäller riksväg 26 mellan Länsjöfors och Vansbro. Där har det inträffat en trafikolycka mellan en lastbil och en personbil. Det är söder om Tyfors i höjd med länsgränsen där som den här olyckan har inträffat. Trafiken i båda riktningarna kan vara trångt att passera där. Riksväg 26 mellan Länsjöfors och Vansbro höjd med länsgränsen. Passa på lite kort och bara nämna en olycka på riksväg 70 mellan Älvdalen och Mora. Då är det i höjd med avfarten mot Våmhus i riktning mot Mora som en bil har kört i diket. Inväntarbergar kan vara lite trångt att passera där också. Riksväg 70 mellan Älvdalen och Mora i höjd med avfarten mot Våmhus.",
+   "radiotext": [
+    "Sportextra",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "rv26-tyfors-krock-1112",
+     "kind": "new",
+     "road": "Rv 26",
+     "near": [
+      "Tyfors"
+     ],
+     "km": 8,
+     "what": "Lastbil och personbil har krockat söder om Tyfors vid länsgränsen"
+    }
+   ]
+  },
+  {
+   "id": "ev910",
+   "event_id": 910,
+   "at": "2026-11-12T23:36:02",
+   "station": "P4 SR",
+   "text": "På E18 mellan Kristinehamn och Karlstad i höjd med Ölmö, Stolpen och i riktning mot Karlstad, där håller man på att bärja en personbil, så att ni var uppmärksam på detta. Ni som är på väg från Kristinehamn mot Karlstad på E18 ungefär i höjd med Ölmö, där håller man på med bärjning av en personbil.",
+   "radiotext": [
+    "Texas - Another Way To Cry",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-stolpen-bargning-1112",
+     "kind": "new",
+     "road": "E18",
+     "near": [
+      "Stolpen"
+     ],
+     "km": 2,
+     "what": "Bärgning av personbil vid Ölme/Stolpen, mot Karlstad"
+    }
+   ]
+  },
+  {
+   "id": "ev911",
+   "event_id": 911,
+   "at": "2026-11-13T11:52:52",
+   "station": "P4 Värml",
+   "text": "På E45 mellan Grums och Säffle hade det kommit in larm om en olycka vid Värmlandsbro. Larmet säger att det är i södergående riktning mot Säffle som det här ska påverka mest. Det är två personbilar som har krockat här. Räddningstjänsten är på väg fram. Räkna med begränsad framkomlighet här på E45 i höjd med Värmlandsbro. Tack så mycket, Rebecca Björkholm.",
+   "radiotext": [
+    "Alex Warren - Ordinary",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e45-varmlandsbro-krock-1113",
+     "kind": "new",
+     "road": "E45",
+     "near": [
+      "Värmlandsbro (village)"
+     ],
+     "km": 2,
+     "what": "Två personbilar har krockat, söderut mot Säffle"
+    }
+   ]
+  },
+  {
+   "id": "ev912",
+   "event_id": 912,
+   "at": "2026-11-13T12:04:53",
+   "station": "P4 SR",
+   "text": "På E45 mellan Grums och Säffle är vägen avstängd i höjd med Värmlandsbro. Avstängningen är i båda riktningar. Räddningstjänsterna har precis kommit fram– –efter en krock mellan åtminstone två personbilar här strax söder om Värmlandsbro. Ungefär 100 meter söder om Värmlandsbro. Okänt hur länge det kommer att vara avstängt här. Värlig annan väg om möjligt. E45 mellan Grums och Säffle, avstängd vid Värmlandsbro i båda riktningar.",
+   "radiotext": [
+    "P4 Extra  med Karin Bengtsson",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e45-varmlandsbro-krock-1113",
+     "kind": "update",
+     "road": "E45",
+     "near": [
+      "Värmlandsbro (village)"
+     ],
+     "km": 2,
+     "what": "Avstängd i båda riktningar"
+    }
+   ]
+  },
+  {
+   "id": "ev913",
+   "event_id": 913,
+   "at": "2026-11-13T12:20:54",
+   "station": "P4 SR",
+   "text": "E45 mellan Säffle och Grums är fortfarande avstängd i höjd med Värmlandsbro i bägge riktningar. Efter en krock mellan två personbilar räddningsarbete pågår, välj annan väg om möjligt. Det är okänt än hur länge vägen kommer att vara avstängd här på E45 i höjd med Värmlandsbro i bägge riktningar.",
+   "radiotext": [
+    "P4 Extra  med Karin Bengtsson",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e45-varmlandsbro-krock-1113",
+     "kind": "repeat",
+     "road": "E45",
+     "near": [
+      "Värmlandsbro (village)"
+     ],
+     "km": 2,
+     "what": "Fortfarande avstängd"
+    }
+   ]
+  },
+  {
+   "id": "ev914",
+   "event_id": 914,
+   "at": "2026-11-13T12:28:39",
+   "station": "P4 Värml",
+   "text": "Nu har det kommit en prognos på avstängningen på E45 vid Värmlandsbro. Man beräknar att det kommer att vara avstängt en timme framåt till klockan 14.40. Avstängt i båda riktningar. E45 Värmlandsbro. Välj annan väg om möjligt.",
+   "radiotext": [
+    "Victor Leksell & Molly Sandén - Tänk Om",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e45-varmlandsbro-krock-1113",
+     "kind": "update",
+     "road": "E45",
+     "near": [
+      "Värmlandsbro (village)"
+     ],
+     "km": 2,
+     "what": "Prognos 14.40"
+    }
+   ]
+  },
+  {
+   "id": "ev915",
+   "event_id": 915,
+   "at": "2026-11-13T12:47:32",
+   "station": "P4 SR",
+   "text": "Trafikredaktionen påminner om att E45an är avstängd söder om Värmlandsbro i båda riktningar. Man har satt en prognos till klockan 14.40 där. Väldigt annan väg om möjligt. Det ska vara en krock mellan två personbilar som orsakar detta. Räddningsarbete pågår ännu. Avstängd här på E45an, då mellan Säffle och Grums. Det är precis söder om Värmlandsbro som avstängningen är i bägge riktningar.",
+   "radiotext": [
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e45-varmlandsbro-krock-1113",
+     "kind": "repeat",
+     "road": "E45",
+     "near": [
+      "Värmlandsbro (village)"
+     ],
+     "km": 2,
+     "what": "Påminnelse: avstängd, prognos 14.40"
+    }
+   ]
+  },
+  {
+   "id": "ev916",
+   "event_id": 916,
+   "at": "2026-11-13T13:04:08",
+   "station": "P4 SR",
+   "text": "Då gäller det E45 mellan Sefle och Grums. Vägen är fortfarande avstängd i båda riktningar strax söder om Värmlandsbro. Det är en krock med två bilar där som inträffade för en stund sedan. Prognosen när man kan öppna igen är 14.40 så det kommer vara avstängd minst en halv timme till alltså enligt prognosen. Det här gäller E45 strax söder om Värmlandsbro.",
+   "radiotext": [
+    "P4 Extra  med Karin Bengtsson",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e45-varmlandsbro-krock-1113",
+     "kind": "repeat",
+     "road": "E45",
+     "near": [
+      "Värmlandsbro (village)"
+     ],
+     "km": 2,
+     "what": "Fortfarande avstängd, prognos 14.40"
+    }
+   ]
+  },
+  {
+   "id": "ev917",
+   "event_id": 917,
+   "at": "2026-11-13T13:33:57",
+   "station": "P4 SR",
+   "text": "Då ska vi tillbaka till E45 mellan Seffle och Grums strax söder om Värmlandsbro. Där är vägen avstängd i båda riktningarna. Det är en krock mellan två personbilar i höjd med Värmlandsbro. Prognosen har nu förlängts. Den är satt till klockan 15 ungefär. Uppmaningen är att välja en annan väg om möjligt. E45 mellan Seffle och Grums strax söder om Värmlandsbro. En trafikolycka. Prognosen är satt till klockan 15. Välj annan väg om möjligt.",
+   "radiotext": [
+    "P4 Extra  med Karin Bengtsson",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e45-varmlandsbro-krock-1113",
+     "kind": "update",
+     "road": "E45",
+     "near": [
+      "Värmlandsbro (village)"
+     ],
+     "km": 2,
+     "what": "Prognos förlängd till 15"
+    }
+   ]
+  },
+  {
+   "id": "ev918",
+   "event_id": 918,
+   "at": "2026-11-13T14:06:38",
+   "station": "P4 Värml",
+   "text": "Det är fortfarande avstängt på E45 mellan Säffle och Grums– –i båda riktningar, strax söder om Värmlandsbro. Det var en krock mellan två personbilar– –som inträffade strax efter klockan halv ett. Det senaste är att räddningstjänsterna börjar sanera vägen. Polisen har utfört en teknisk undersökning tidigare på platsen. Nu är senaste prognosen satt till klockan halv fyra. Det är fortfarande avstängt på E45, strax söder om Värmlandsbro– –i båda riktningar, nu åtminstone en 20 minuter till. Tips nummer 020-99444. Tack för det så länge, Rebecca.",
+   "radiotext": [
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e45-varmlandsbro-krock-1113",
+     "kind": "update",
+     "road": "E45",
+     "near": [
+      "Värmlandsbro (village)"
+     ],
+     "km": 2,
+     "what": "Sanering, prognos 15.30"
+    }
+   ]
+  },
+  {
+   "id": "ev919",
+   "event_id": 919,
+   "at": "2026-11-13T14:42:07",
+   "station": "P4 Värml",
+   "text": "–Vad berättar du om trafikredaktionen? En uppdatering från E45, mellan Säffle och Grums. Den här olycksplatsen strax söder om Värmlandsbro– –där det har varit avstängt i flera timmar. Nu öppnar man upp ett körfält. Räkna med att det är trångt att passera och långa köer. Polisen är kvar här på platsen och väntar bergare– –efter den tidigare kollisionen mellan två personbilar. Prognosen på bergningen satt till klockan halv fem. Räkna med att en träck vart framåt kommer det köa på– –på E45 vid Värmlandsbro i båda riktningar. Men det är alltså inte längre helt avstängt.",
+   "radiotext": [
+    "Eftermiddag i P4 Värmland",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e45-varmlandsbro-krock-1113",
+     "kind": "update",
+     "road": "E45",
+     "near": [
+      "Värmlandsbro (village)"
+     ],
+     "km": 2,
+     "what": "Ett körfält öppnat, långa köer"
+    }
+   ]
+  },
+  {
+   "id": "ev920",
+   "event_id": 920,
+   "at": "2026-11-13T15:06:23",
+   "station": "P4 Värml",
+   "text": "På E45 mellan Säffle och Grums, strax söder om Värmlandsbro. Här är det trångt att passera efter en tidigare olycka. Polisen är kvar här efter att rätningskörelsen har lämnat. Man inväntar Bergade efter den tidigare krocken mellan två personbilar. I samband med att Bergade är på plats kan kortare stopp förekomma. Förhoppningsvis börjar det rulla på bättre om en halv timme. Då beräknar man att Bergningen förhoppningsvis ska vara överstökad. Men just nu går det långsamt i båda riktningar. På E45 vid Värmlandsbro, men det är inte helt avstängt. I övrigt kan jag nämna att det kan förekomma återfrysning av fuktiga vägar– –när temperaturen på vägarna på flera ställen går under nollan. Tips nummer 020 999 44. Tack så länge, Rebecca. Våra stora nyheter...",
+   "radiotext": [
+    "Eftermiddag i P4 Värmland",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e45-varmlandsbro-krock-1113",
+     "kind": "update",
+     "road": "E45",
+     "near": [
+      "Värmlandsbro (village)"
+     ],
+     "km": 2,
+     "what": "Inväntar bärgare, kortare stopp"
+    },
+    {
+     "incident": "frys-1113",
+     "kind": "area_warning",
+     "road": null,
+     "near": [
+      "Karlstad"
+     ],
+     "km": 100,
+     "what": "Återfrysning av fuktiga vägar på flera ställen"
+    }
+   ]
+  },
+  {
+   "id": "ev921",
+   "event_id": 921,
+   "at": "2026-11-13T15:35:11",
+   "station": "P4 Värml",
+   "text": "På E45, strax söder om Värmlandsbro. Här är det fortsättningsvis långa köer. De här två bilar som krockade tidigare i samband med Bergningen– –kan kortare stopp förekomma, men man hoppas inom tio minuter– –att det ska vara klarbärgat här på E45 vid Värmlandsbro. På E18, när man kör från Karlstad mot Grums– –ska det vara en stillastående personbil i höjd med söromonumotet– –påverkar i riktning mot Grums, så den kan sticka ut mot körfältet. Till sist en viltvarning för länsväg 246 i södra delen av Uddeholm– –där det är tre älgar in vid vägen.",
+   "radiotext": [
+    "Eftermiddag i P4 Värmland",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e45-varmlandsbro-krock-1113",
+     "kind": "update",
+     "road": "E45",
+     "near": [
+      "Värmlandsbro (village)"
+     ],
+     "km": 2,
+     "what": "Bärgning, klart inom tio minuter"
+    },
+    {
+     "incident": "e18-sormomotet-stillastaende-1113",
+     "kind": "new",
+     "road": "E18",
+     "near": [
+      "Sörmomotet"
+     ],
+     "km": 2,
+     "what": "Stillastående personbil, mot Grums"
+    },
+    {
+     "incident": "lv246-uddeholm-alg-1113",
+     "kind": "new",
+     "road": "Lv 246",
+     "near": [
+      "Uddeholm (village)"
+     ],
+     "km": 5,
+     "what": "Tre älgar vid vägen i södra Uddeholm"
+    }
+   ]
+  },
+  {
+   "id": "ev922",
+   "event_id": 922,
+   "at": "2026-11-13T16:16:43",
+   "station": "P4 Värml",
+   "text": "Då gäller det riksväg 61, när man kör från Arvika i riktning mot Karlstam. Det är nån typ av incident som har inträffat mellan Wickene och Finnebäck. Det står stilla i den riktningen. Jag har fått in flera tips och antal från allmänheten om att det verkar ha stått stilla här. Det verkar som att ambulans, polis och bärgare har passerat här. Det är troligtvis nån typ av olycka eller sjukdomsfall– –som gör att trafiken står stilla i detta nu på riksväg 61. Alltså mellan Wickene och Finnebäck när man kör i riktning mot Karlstam. Tyvärr har jag ingen mer information om hur långvarigt det här stoppet blir.",
+   "radiotext": [
+    "Eftermiddag i P4 Värmland",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "rv61-vikene-finneback-stopp-1113",
+     "kind": "new",
+     "road": "Rv 61",
+     "near": [
+      "Vikene (isolated_dwelling)",
+      "Finnebäck (isolated_dwelling)"
+     ],
+     "km": 4,
+     "what": "Stopp mot Karlstad, okänd orsak"
+    }
+   ]
+  },
+  {
+   "id": "ev923",
+   "event_id": 923,
+   "at": "2026-11-13T16:29:04",
+   "station": "P4 Värml",
+   "text": "–Vad berättar du om det? –Fortfarande kan det vara stökigt på 61-an– –när man kör från Arvika mot Karlstad, Mellanvikken och Finnebäck mot Karlstad. Här fick jag flera samtal om att det är stopp av okänd anledning. Det kan vara en incident eller olycka som gör att det står stilla. Längre fram, närmare Finnebäck, är det också ett broarbete som har kommit igång– –där trafiken reageras med trafikljus. Det är mycket körbildning här– –mellan Mellanvikken och Finnebäck på 61-an. Det eventuella stoppet som fortfarande kan vara igång är i riktning mot Karlstad. –Tips nummer 020 994 44. –Perfekt med tips numret där. Tack så länge.",
+   "radiotext": [
+    "Kent - Pärlor",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "rv61-vikene-finneback-stopp-1113",
+     "kind": "repeat",
+     "road": "Rv 61",
+     "near": [
+      "Vikene (isolated_dwelling)",
+      "Finnebäck (isolated_dwelling)"
+     ],
+     "km": 4,
+     "what": "Fortfarande stopp mot Karlstad"
+    },
+    {
+     "incident": "rv61-finneback-broarbete-1113",
+     "kind": "new",
+     "road": "Rv 61",
+     "near": [
+      "Finnebäck (isolated_dwelling)"
+     ],
+     "km": 3,
+     "what": "Broarbete med trafikljus nära Finnebäck"
+    }
+   ]
+  },
+  {
+   "id": "ev924",
+   "event_id": 924,
+   "at": "2026-11-14T20:47:28",
+   "station": "P4 SR",
+   "text": "Då ska vi ut med en varning på E18 i Åregäng, mer precis i höjd med travbanan, där vi har fått in samtal om en älg som befinner sig på felsida vildstängset, alltså vägsidan då. Så det är en varning då om du kommer från båda hållen där på E18 i Åregäng, i höjd med travbanan då. Håll lite extra uppsikt för den här älgen i båda riktningarna som är på felsida vildstängset.",
+   "radiotext": [
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-arjang-alg-1114",
+     "kind": "new",
+     "road": "E18",
+     "near": [
+      "Årjäng"
+     ],
+     "km": 4,
+     "what": "Älg på fel sida viltstängslet vid travbanan"
+    }
+   ]
+  },
+  {
+   "id": "ev925",
+   "event_id": 925,
+   "at": "2026-11-16T12:24:54",
+   "station": "P4 SR",
+   "text": "Då gäller det Riksväg 61 mellan Arvika och Fagerås. Det har inträffat en olycka i höjd med Brunnsberg. Det är en singelolycka med en personbil. Riksväg 61, alltså mellan Arvika och Fagerås. I höjd med Brunnsberg. En olycka som inträffade alldeles nyss.",
+   "radiotext": [
+    "Fun - Some Nights",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "rv61-brunsberg-1116",
+     "kind": "new",
+     "road": "Rv 61",
+     "near": [
+      "Brunsberg"
+     ],
+     "km": 2,
+     "what": "Singelolycka med personbil"
+    }
+   ]
+  },
+  {
+   "id": "ev926",
+   "event_id": 926,
+   "at": "2026-11-16T12:37:31",
+   "station": "P4 SR",
+   "text": "Då en uppdatering vad gäller olyckan på riksväg 61 mellan Arvika och Fagerås i höjd med Brunnsberg. Där är vägen avstängd just nu i båda riktningarna och räddningstjänsten är på väg till platsen. Riksväg 61 alltså mellan Arvika och Fagerås. Vägen avstängd i höjd med Brunnsberg och det är avstängt där i båda riktningarna.",
+   "radiotext": [
+    "Alesha Dixon - The Boy Does Nothing",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "rv61-brunsberg-1116",
+     "kind": "update",
+     "road": "Rv 61",
+     "near": [
+      "Brunsberg"
+     ],
+     "km": 2,
+     "what": "Avstängd i båda riktningar"
+    }
+   ]
+  },
+  {
+   "id": "ev927",
+   "event_id": 927,
+   "at": "2026-11-16T13:15:28",
+   "station": "P4 SR",
+   "text": "Riksdags 61 mellan Arvika och Fagerås, höjd med Brunnsberg, vägen fortsatt avstängd. Där beror det på en singolycka med en personbil. Räddningstjänsten jobbar. Finns det fortfarande ingen prognos? Ta en annan väg om du kan. Riksdags 61, höjd med Brunnsberg, vägen avstängd, både riktningar. Singolycka med en personbil. Ta en annan väg om du kan.",
+   "radiotext": [
+    "LIAMOO - Break Through The Ceiling",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "rv61-brunsberg-1116",
+     "kind": "repeat",
+     "road": "Rv 61",
+     "near": [
+      "Brunsberg"
+     ],
+     "km": 2,
+     "what": "Fortsatt avstängd"
+    }
+   ]
+  },
+  {
+   "id": "ev928",
+   "event_id": 928,
+   "at": "2026-11-16T13:42:33",
+   "station": "P4 SR",
+   "text": "Det höll riksex 61 mellan Arvika och Fagerås och då höjde vi Brunnsbergen där vägen öppen igen efter tidigare olycka. Riksex 61 alltså är höjd med Brunnsberg öppet igen efter tidigare olycka.",
+   "radiotext": [
+    "Orup - Sjung Halleluja (Och Prisa Gud)",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "rv61-brunsberg-1116",
+     "kind": "cleared",
+     "road": "Rv 61",
+     "near": [
+      "Brunsberg"
+     ],
+     "km": 2,
+     "what": "Öppen igen"
+    }
+   ]
+  },
+  {
+   "id": "ev929",
+   "event_id": 929,
+   "at": "2026-11-16T14:34:41",
+   "station": "P4 Värml",
+   "text": "Två minuter, elva sekunder kvar. Då gäller det E18 Karlskoga. Det har inträffat en olycka mellan trafikplats Odlingen och Stora Rondellen. Det är i riktning mot Örebro som det här gäller. En lastbil ska vara inblandad i den här olyckan. E18 Karlskoga alltså. Mellan Odlingen och Stora Rondellen. Nu såg jag precis att vägen stängs av också. Vägen avstängdes alltså mot Örebro. För damer i socky.",
+   "radiotext": [
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-odlingen-lastbil-1116",
+     "kind": "new",
+     "road": "E18",
+     "near": [
+      "Odlingen (junction)"
+     ],
+     "km": 4,
+     "what": "Olycka med lastbil mellan Odlingen och Stora rondellen, mot Örebro, avstängt"
+    }
+   ]
+  },
+  {
+   "id": "ev930",
+   "event_id": 930,
+   "at": "2026-11-16T15:03:07",
+   "station": "P4 SR",
+   "text": "Tidigare, vi har sett här under VM. Då en uppdatering vad gäller olyckan på E18 i Kallskoga. Det är öppet nu men begränsad framkomlighet var avstängt här en stund mellan Odlingen och stora Rondellen mot Örebro. Det var en lastbilsolycka där. Berger är på väg i alla fall och det är begränsad framkomlighet som gäller nu just nu på E18 i Kallskoga. Han tappar pucken när hon ska behandla den.",
+   "radiotext": [
+    "Sportextra",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-odlingen-lastbil-1116",
+     "kind": "update",
+     "road": "E18",
+     "near": [
+      "Odlingen (junction)"
+     ],
+     "km": 4,
+     "what": "Öppet, begränsad framkomlighet"
+    }
+   ]
+  },
+  {
+   "id": "ev931",
+   "event_id": 931,
+   "at": "2026-11-17T17:02:35",
+   "station": "P4 SR",
+   "text": "Då gäller det riksväg 61 mellan Kiel och Ilandakorset. Mellan Karlstad flygplats och Ilandakorset är det två stycken bilar som har krockat. Rättningstjänst är på väg till platsen. Riksväg 61, alltså mellan Karlstad flygplats och Ilandakorset. Två bilar som har krockat.",
+   "radiotext": [
+    "Kvällspasset i P4 med Christer Lundberg",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "rv61-flygplatsen-krock-1117",
+     "kind": "new",
+     "road": "Rv 61",
+     "near": [
+      "Karlstad flygplats",
+      "Ilandamotet"
+     ],
+     "km": 4,
+     "what": "Två bilar har krockat"
+    }
+   ]
+  },
+  {
+   "id": "ev932",
+   "event_id": 932,
+   "at": "2026-11-17T17:20:59",
+   "station": "P4 SR",
+   "text": "På riksväg 61 mellan Kyl och Karlstad. Där är vägen just nu avstängd i riktning mot Karlstad och det här är mellan flygplats motet vid Hynboholm och ilandarkorset och i andra riktningen mot Kyl. Där ska det gå att ta sig förbi men var trångt att passera. Räddningstjänst och ambulans arbetar på platsen här efter att två personbilar är krockat och man beräknar att det kommer att vara avstängt mot Karlstad i alla fall i närmaste halv timmen 61 från Kyl mot Karlstad och det är efter infarten till Karlstad flygplats som avstängningen är.",
+   "radiotext": [
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "rv61-flygplatsen-krock-1117",
+     "kind": "update",
+     "road": "Rv 61",
+     "near": [
+      "Karlstad flygplats",
+      "Ilandamotet"
+     ],
+     "km": 4,
+     "what": "Avstängt mot Karlstad"
+    }
+   ]
+  },
+  {
+   "id": "ev933",
+   "event_id": 933,
+   "at": "2026-11-17T17:31:03",
+   "station": "P4 SR",
+   "text": "Uppdatering gällande riksväg 61 mellan Kyl och Ilanda korset. Det var en avstängning mellan Karlstad flygplats och Ilanda korset i riktning mot Karlstad. Det var räddningsarbete efter att två personbilar krockat. Nu får vi till oss att vägen har öppnat upp igen. Men det är en hel del köer här efter att det tidigare stod stilla. Men det ska åter vara helt framkomligt här igen på 61 mellan Kyl och Ilanda korset.",
+   "radiotext": [
+    "Kvällspasset i P4 med Christer Lundberg",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "rv61-flygplatsen-krock-1117",
+     "kind": "cleared",
+     "road": "Rv 61",
+     "near": [
+      "Karlstad flygplats",
+      "Ilandamotet"
+     ],
+     "km": 4,
+     "what": "Öppet igen, köer"
+    }
+   ]
+  },
+  {
+   "id": "ev934",
+   "event_id": 934,
+   "at": "2026-11-17T17:54:40",
+   "station": "P4 SR",
+   "text": "Riksväg 26 när man kör från Kristinehamn mot Maria stad strax innan bron vid Gullsbång i en stillastående personbil står i sadegående riktning och syns inte jättebra. 26. här alltså innan bron vid Gullsbång.",
+   "radiotext": [
+    "Sagor i Barnradion : Jordgubbsbarnen - Aldrig mera bort",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "rv26-gullspang-stillastaende-1117",
+     "kind": "new",
+     "road": "Rv 26",
+     "near": [
+      "Gullspång"
+     ],
+     "km": 3,
+     "what": "Stillastående personbil före bron, söderut"
+    }
+   ]
+  },
+  {
+   "id": "ev935",
+   "event_id": 935,
+   "at": "2026-11-18T08:06:58",
+   "station": "P4 Värml",
+   "text": "E18, Kristinehamn, höjd med övre kvarnmotet och riktning mot Karlstad. Där har det skett en singolycka. Det är en personbil som kör in i mitträcket. Det ni känns på plats tar höger köfält, så det går långsamt förbi och kör i riktning mot Karlstad. E18, höjd med övre kvarnmotet och riktning mot Karlstad.",
+   "radiotext": [
+    "Sam Fender & Olivia Dean - Rein Me In",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-ovre-kvarnmotet-singel-1118",
+     "kind": "new",
+     "road": "E18",
+     "near": [
+      "Övre Kvarnmotet"
+     ],
+     "km": 2,
+     "what": "Personbil i mitträcket, mot Karlstad"
+    }
+   ]
+  },
+  {
+   "id": "ev936",
+   "event_id": 936,
+   "at": "2026-11-19T15:04:59",
+   "station": "P4 Värml",
+   "text": "Då gäller E18 i Karlstad, höjd med klara motet mot Kristinehamn. Där är just nu väldigt långa köer. Det beror på en olycka med en person eller en lastbil som kör ihop. Endast ett körfält är öppet och förbi olycksplatsen, så det går jättelångsamt. Plus har det skett en olycka i köerna och en kökrock med några bilar. Ungefär i höjd med Våxnäs motet, så även där är det trångt att komma förbi. Allt där är i riktning mot Kristinehamn, så det är värt att ta en annan väg om man kan. Tipsar är på 20 999 444. Alexander Weimar är där på trafikredaktion.",
+   "radiotext": [
+    "Eftermiddag i P4 Värmland",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-klaramotet-krock-1119",
+     "kind": "new",
+     "road": "E18",
+     "near": [
+      "Klaramotet"
+     ],
+     "km": 1.5,
+     "what": "Lastbil och personbil har krockat, mot Kristinehamn"
+    },
+    {
+     "incident": "e18-vaxnasmotet-kokrock-1119",
+     "kind": "new",
+     "road": "E18",
+     "near": [
+      "Våxnäsmotet"
+     ],
+     "km": 1.5,
+     "what": "Kökrock vid Våxnäsmotet"
+    }
+   ]
+  },
+  {
+   "id": "ev937",
+   "event_id": 937,
+   "at": "2026-11-19T15:19:27",
+   "station": "P4 Värml",
+   "text": "Fortsatta brutala kräver på E18 i Karlstad. Det är höjd med Klaramotet i riktning mot Kristinehamn. En personbilar och en lastbil har räddningstjänsten där. Sondags ett kör följt öppet förbi olycksplatsen. I Köerna har några andra bilar kört ihop. De har kört ihop ungefär i höjd med Voxnäsmotet. Även där är det jättetrångt att komma förbi. Det är en principstillastande kö genom Karlstad. Vidare till Riksväg 26 i Kristinehamn. Mellan Gärsberg och infarten till Björneborg. Det har skett en viltolycka. En personbilar och en elg har krockat. Tipsar gör man på 020 999 444.",
+   "radiotext": [
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-klaramotet-krock-1119",
+     "kind": "repeat",
+     "road": "E18",
+     "near": [
+      "Klaramotet"
+     ],
+     "km": 1.5,
+     "what": "Fortsatta köer"
+    },
+    {
+     "incident": "e18-vaxnasmotet-kokrock-1119",
+     "kind": "repeat",
+     "road": "E18",
+     "near": [
+      "Våxnäsmotet"
+     ],
+     "km": 1.5,
+     "what": "Kökrock vid Våxnäsmotet"
+    },
+    {
+     "incident": "rv26-jarsberg-vilt-1119",
+     "kind": "new",
+     "road": "Rv 26",
+     "near": [
+      "Järsberg"
+     ],
+     "km": 6,
+     "what": "Viltolycka med älg mellan Järsberg och infarten till Björneborg"
+    }
+   ]
+  },
+  {
+   "id": "ev938",
+   "event_id": 938,
+   "at": "2026-11-19T16:00:22",
+   "station": "P4 Värml",
+   "text": "Det har varit rådigt under eftermiddagen, eller hur? Ja, det fortsatte vara det på E18 i Karlstad. Det var höjd med klara motet i riktning mot Kristinehamn– –som en lastbil och en personbil krockade. Den här olyckan har man lyckats lösa och fått bort fordon. Men i och med den blev det rejäla köer. I köerna krockade det några andra bilar. Den kökrocken skedde vid Våxnäs motet. Där står de här bilarna kvar och inväntar bergarna. Det är värt att inte komma förbi och fortsätta långa köer– –på E18 i riktning mot Kristinehamn. Det är värt att ta en annan väg om man kan.",
+   "radiotext": [
+    "Eftermiddag i P4 Värmland",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-klaramotet-krock-1119",
+     "kind": "cleared",
+     "road": "E18",
+     "near": [
+      "Klaramotet"
+     ],
+     "km": 1.5,
+     "what": "Olyckan löst, fordonen bort"
+    },
+    {
+     "incident": "e18-vaxnasmotet-kokrock-1119",
+     "kind": "update",
+     "road": "E18",
+     "near": [
+      "Våxnäsmotet"
+     ],
+     "km": 1.5,
+     "what": "Bilarna väntar på bärgare"
+    }
+   ]
+  },
+  {
+   "id": "ev939",
+   "event_id": 939,
+   "at": "2026-11-19T17:11:24",
+   "station": "P4 SR",
+   "text": "Börja på E18 mellan Årgäng och Töksfors, strax innan Töksfors och så i riktning mot den norska gränsen. Där är det en viltolycka med en person bloken älg och det är väldigt trångt att komma förbi. Kvar på E18 men nu är vi i Karlstad med Voxnäs motet och i riktning mot Kristinehamn. Där är det fortsatta kör efter en tidigare olycka då, så det går väldigt långsamt i riktning mot Kristinehamn.",
+   "radiotext": [
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-tocksfors-vilt-1119",
+     "kind": "new",
+     "road": "E18",
+     "near": [
+      "Töcksfors (village)"
+     ],
+     "km": 4,
+     "what": "Viltolycka med älg strax före Töcksfors, mot norska gränsen"
+    },
+    {
+     "incident": "e18-vaxnasmotet-kokrock-1119",
+     "kind": "repeat",
+     "road": "E18",
+     "near": [
+      "Våxnäsmotet"
+     ],
+     "km": 1.5,
+     "what": "Fortsatta köer efter tidigare olycka"
+    }
+   ]
+  },
+  {
+   "id": "ev940",
+   "event_id": 940,
+   "at": "2026-11-20T04:55:40",
+   "station": "P4 SR",
+   "text": "Trafikmeddelanden som gäller E18 och Grums är vid Nygängsrondellen i Grums. Om man kommer från Karlstad ska det vara riktigt, riktigt halt i rondellen. Flera samtal har kommit in om att det är halt just där. Jag vet inte riktigt vad det beror på, mer än väder och så där. Men se upp för extra stor halka i Nygängsrondellen i Grums.",
+   "radiotext": [
+    "Swedish House Mafia & Lykke Li - Happiness Is So Sad",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-grums-rondell-halka-1120",
+     "kind": "new",
+     "road": "E18",
+     "lat": 59.35189,
+     "lon": 13.10568,
+     "km": 3,
+     "what": "Mycket halt i Nygångsrondellen i Grums"
+    }
+   ]
+  },
+  {
+   "id": "ev941",
+   "event_id": 941,
+   "at": "2026-11-20T05:37:18",
+   "station": "P4 Värml",
+   "text": "Du hörde det där. Och så trafik på det. Vi har redan fått in olika flera fordon. Nygängsrundellen, E18, Grums, flera bilar som har åkt av vägen. Vi har fått samtal om att det rejält halt verkar vara. Framför allt vid nygängsrundellen. Man kan ha med sig det generellt. Men framför allt nygängsrundellen, rejält halt. Räddningstjänsten är på plats och halkbekämpning är på väg dit. Alltså flera bilar inblandade i den här olyckan nygängsrundellen. Tips nummer 020 999 444. Därifrån går vi till en uppdatering från radiosporten.",
+   "radiotext": [
+    "Morgon i P4 Värmland",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-grums-rondell-halka-1120",
+     "kind": "update",
+     "road": "E18",
+     "lat": 59.35189,
+     "lon": 13.10568,
+     "km": 3,
+     "what": "Flera bilar har åkt av vägen vid rondellen"
+    }
+   ]
+  },
+  {
+   "id": "ev942",
+   "event_id": 942,
+   "at": "2026-11-20T08:27:43",
+   "station": "P4 Värml",
+   "text": "E18, WC Karlstad, Skatscher, om man är på väg mot Karlstad, där har det inträffat en olycka. Det är en personbil som har kört in i mitträcket där och snurrat runt så att den står med nosen mot trafiken. Räddningstjänsten är på väg. Det ska också ligga delar från bilen i körfälten runtomkring. Bil alltså, mitträcket, som har snurrat runt, står med nosen mot trafiken vid Skatscher på E18.",
+   "radiotext": [
+    "Céline Dion - That's The Way It Is (Radio Edit)",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-skattkarr-mitträcke-1120",
+     "kind": "new",
+     "road": "E18",
+     "near": [
+      "Skattkärr"
+     ],
+     "km": 3,
+     "what": "Personbil i mitträcket, mot Karlstad"
+    }
+   ]
+  },
+  {
+   "id": "ev943",
+   "event_id": 943,
+   "at": "2026-11-20T08:37:23",
+   "station": "P4 Värml",
+   "text": "Och så där låter det ju för att vi har en aktuell olycka. Skatscher mellan WC och Karlstad. En bil som har kört in i mitträcket. Och nu är räddningstjänsten också på plats. Långa köer just nu i riktning mot Karlstad. Delar också som ska ligga i körfälten efter den här olyckan. E18, alltså skatscher. Är du på väg mot Karlstad? Räkna med långa köer på grund av en olycka. 0-20-9-9-4-4-4. Tack så mycket för det. Nu över då till en uppdatering.",
+   "radiotext": [
+    "Niklas Strömstedt - Oslagbara!",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-skattkarr-mitträcke-1120",
+     "kind": "update",
+     "road": "E18",
+     "near": [
+      "Skattkärr"
+     ],
+     "km": 3,
+     "what": "Räddningstjänst på plats, långa köer"
+    }
+   ]
+  },
+  {
+   "id": "ev944",
+   "event_id": 944,
+   "at": "2026-11-20T08:40:00",
+   "station": "P4 Värml",
+   "text": "Då är det en uppdatering gällande olyckan på E18 och Skatscher. Nu har man stängt av vägen i båda riktningarna. Räddningstjänsten är på plats. En personbil har kört in i mitträcket. Vägen är alltså avstängd för trafiken i båda riktningarna. I nuläget är det ingen prognos om hur lång avstängningen blir. Men väl värt att känna till att avstängd båda riktningarna på E18– –mellan Väsa och Karlstad är höjd med Skatscher. Tack så mycket för det. Numret till Trafikredaktionen.",
+   "radiotext": [
+    "Radiosporten",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-skattkarr-mitträcke-1120",
+     "kind": "update",
+     "road": "E18",
+     "near": [
+      "Skattkärr"
+     ],
+     "km": 3,
+     "what": "Avstängt i båda riktningar"
+    }
+   ]
+  },
+  {
+   "id": "ev945",
+   "event_id": 945,
+   "at": "2026-11-20T09:28:25",
+   "station": "P4 Värml",
+   "text": "En uppdatering av en gående olyckan på E18 mellan Väse och Karlstad– –som inträffade strax efter klockan 9 i höjd med skattkärr. Det har varit avstängt en längre tid i riktning mot Karlstad. Man kunde för en stund sedan öppna upp vägen lite grann– –men nu har man inlett bärningsarbetet– –vilket innebär att det återigen är helt avstängt. Under bärningsinsatsen som man väntar ska vara klar om ungefär tio minuter en kvart. Det kommer att vara avstängt i tio minuter en kvart till vid skattkärr– –i riktning mot Karlstad, men man är i slutskedet av arbetet.",
+   "radiotext": [
+    "Förmiddag i P4 Värmland",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-skattkarr-mitträcke-1120",
+     "kind": "update",
+     "road": "E18",
+     "near": [
+      "Skattkärr"
+     ],
+     "km": 3,
+     "what": "Bärgning, avstängt mot Karlstad"
+    }
+   ]
+  },
+  {
+   "id": "ev946",
+   "event_id": 946,
+   "at": "2026-11-20T10:51:22",
+   "station": "P4 Värml",
+   "text": "Då gäller E18 i Karlstad. Det här är höjd med Bergvik, Smotet och Ikea, där det är i riktning mot Grums. Så är vägen helt parkerad av sig i riktning mot Grums. Det beror på en bil och en lastbil som har krockat. Det finns tyvärr ingen prognos hur lång det här kommer ta, så ta en annan väg om du kan. E18 är höjd med Bergvik, Smotet där vägen är blockerad i riktning mot Grums. Bil och lastbil som har krockat. Det finns tyvärr ingen prognos, så ta en annan väg om du kan.",
+   "radiotext": [
+    "Förmiddag i P4 Värmland",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-bergviksmotet-krock-1120",
+     "kind": "new",
+     "road": "E18",
+     "near": [
+      "Bergviksmotet"
+     ],
+     "km": 1.5,
+     "what": "Bil och lastbil har krockat, blockerat mot Grums"
+    }
+   ]
+  },
+  {
+   "id": "ev947",
+   "event_id": 947,
+   "at": "2026-11-20T11:10:02",
+   "station": "P4 Värml",
+   "text": "Då tillbaka till E18 i Karlstad. Strax efter Bergviksmotet så är vägen blockerad i riktning mot Grums. Det här beror på en lastbil och en personbil som krockat där. Det har vi på ett enferligt partid också. Finns tyvärr ingen prognos när man kan få bort de här bilarna och släppa på trafiken och så ta en annan väg om du kan. För det är jättelånga kör då, alltså i riktning mot Grums.",
+   "radiotext": [
+    "Förmiddag i P4 Värmland",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-bergviksmotet-krock-1120",
+     "kind": "repeat",
+     "road": "E18",
+     "near": [
+      "Bergviksmotet"
+     ],
+     "km": 1.5,
+     "what": "Fortfarande blockerat mot Grums"
+    }
+   ]
+  },
+  {
+   "id": "ev948",
+   "event_id": 948,
+   "at": "2026-11-20T12:05:40",
+   "station": "P4 SR",
+   "text": "E18 i Karlstad har höjt med Bergviksmotet och är i riktning mot Grums. Det är fortsatt långa kör. Det beror på en tidlig olycka med lastbil och personbil. Man har lyckats flytta smått till höger, så det går att ta sig förbi. Men det är jättetrångt, och det är ändå jättelånga kör. Det är värt att ta en annan väg om man kan, för det går snigelfart där. Det är värt att ta en annan väg även om det går att ta sig förbi för mindre fordon. E18 i höjd med Bergviksmotet och är i riktning mot Grums är långa kör– –efter en olycka med lastbil och personbil.",
+   "radiotext": [
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-bergviksmotet-krock-1120",
+     "kind": "update",
+     "road": "E18",
+     "near": [
+      "Bergviksmotet"
+     ],
+     "km": 1.5,
+     "what": "Går att passera, långa köer"
+    }
+   ]
+  },
+  {
+   "id": "ev949",
+   "event_id": 949,
+   "at": "2026-11-20T12:21:10",
+   "station": "P4 SR",
+   "text": "E18 i Karlstad är höjd med Bergviksmotet och i riktning mot Grums är det fortsatt långa köer. Man håller ner på Berge efter en tidig olycka med en lastbil och en personbil. Nu ska man då flytta en betongbarriär. När man gör det här så kommer också trafiken i riktning in mot Karlstad påverkas. Kortare stopp kommer förekomma åt båda riktningarna ett tag framöver. E18 alltså är höjd med Bergviksmotet där det är långa köer i riktning mot Grums. Kortare stopp kommer förekomma nu under den här tiden åt båda riktningarna.",
+   "radiotext": [
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-bergviksmotet-krock-1120",
+     "kind": "update",
+     "road": "E18",
+     "near": [
+      "Bergviksmotet"
+     ],
+     "km": 1.5,
+     "what": "Betongbarriär flyttas, stopp i båda riktningar"
+    }
+   ]
+  },
+  {
+   "id": "ev950",
+   "event_id": 950,
+   "at": "2026-11-20T12:46:35",
+   "station": "P4 SR",
+   "text": "Tillbaka till E18 i Karlstad. I höjd med Bergviksmotet är det fortsatta långa kör i riktning av båda hållen nu. Det har skett en olycka i riktning mot Grums. Det var med en lastbil och en personbil. Och nu när man håller på att berga de här fordonen så måste man flytta en betongbarriär då. Vilket gör att kortare stopp för att komma åt båda riktningarna så även trafiken mot Karlstad påverkas. Alltså E18, Karlstad, i höjd med Bergviksmotet så är det långa kör åt båda riktningarna just nu. Det beror på att man håller på att flytta en betongbarriär medan man håller på att berga fordonen efter en tidig olycka. Så kortare stopp förekommer.",
+   "radiotext": [
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-bergviksmotet-krock-1120",
+     "kind": "repeat",
+     "road": "E18",
+     "near": [
+      "Bergviksmotet"
+     ],
+     "km": 1.5,
+     "what": "Köer åt båda hållen under bärgningen"
+    }
+   ]
+  },
+  {
+   "id": "ev951",
+   "event_id": 951,
+   "at": "2026-11-20T13:15:41",
+   "station": "P4 SR",
+   "text": "Det pågår fortfarande en bärgning på E18 i Karlstad. Det är i höjd med Bergviksmotet i riktning mot Grums. Det har skett en olycka där lite tidigare. Vägen är just nu avstängd i båda riktningar. Olyckan inträffade i riktning mot Grums. När man kom igång med bärgningen– –behövde man flytta på en betongbarriär. I samband med det måste man stänga av trafiken– –i båda riktningar för säkerhetsskuld. Det är läget just nu. Ingen prognos för när man kan öppna upp. E18 Karlstad i höjd med Bergviksmotet. Vägen är avstängd i båda riktningar– –medan man flyttar betongbarriärer i samband med en bärgning. Därför måste båda riktningarna vara avstängda.",
+   "radiotext": [
+    "P4 Extra  med Titti Schultz",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-bergviksmotet-krock-1120",
+     "kind": "update",
+     "road": "E18",
+     "near": [
+      "Bergviksmotet"
+     ],
+     "km": 1.5,
+     "what": "Avstängt i båda riktningar"
+    }
+   ]
+  },
+  {
+   "id": "ev952",
+   "event_id": 952,
+   "at": "2026-11-20T13:42:00",
+   "station": "P4 SR",
+   "text": "Ja, då kan jag meddela att det är öppet igen på E18 i Karlstad i höjd med Bergviksmotet, där det tidigare har varit helt stopp i riktning mot Grums på grund av en olycka. Men sedan tio minuter tillbaka lite drygt är vägen fri och framkomlig igen och jag kan inte heller se att det är några restköer kvar i området.",
+   "radiotext": [
+    "P4 Extra  med Titti Schultz",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-bergviksmotet-krock-1120",
+     "kind": "cleared",
+     "road": "E18",
+     "near": [
+      "Bergviksmotet"
+     ],
+     "km": 1.5,
+     "what": "Öppet igen"
+    }
+   ]
+  },
+  {
+   "id": "ev953",
+   "event_id": 953,
+   "at": "2026-11-21T23:25:03",
+   "station": "P4 SR",
+   "text": "Då gäller det Riksväg 62 norr om Stöllet för det ska vara ett nedfallet träd som ligger över delar av körbanan och det här är mellan Värnäs och Ambjörby. Riksväg 62 alltså norr om Stöllet, ett träd delvis över vägen och klart hur stor del av vägen det täcker. Personal är på väg ut dit.",
+   "radiotext": [
+    "Vaken med Kalle Johansson och Frida Tranvik",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "rv62-stollet-trad-1121",
+     "kind": "new",
+     "road": "Rv 62",
+     "near": [
+      "Värnäs",
+      "Ambjörby"
+     ],
+     "km": 6,
+     "what": "Nedfallet träd över delar av körbanan norr om Stöllet"
+    }
+   ]
+  },
+  {
+   "id": "ev954",
+   "event_id": 954,
+   "at": "2026-11-23T13:27:23",
+   "station": "P4 Värml",
+   "text": "Ja, vi går in för att informera om köer på E18 i höjd med Kristinehamn i anslutning till Övre Kvarn motet. Vi fick ett samtal till redaktionen som tyder på att det var helt stopp i riktning mot Karlstad. Nu ser det ut som att köerna har lättat något framme vid det själva hindret. Men det är fortsatt köer och vi vet inte riktigt vad det är som stoppar upp trafiken där. Så var uppmärksam på köerna och att det kan innebära längre restider normalt i riktning mot Karlstad.",
+   "radiotext": [
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-ovre-kvarnmotet-tradfallning-1123",
+     "kind": "new",
+     "road": "E18",
+     "near": [
+      "Övre Kvarnmotet"
+     ],
+     "km": 2,
+     "what": "Köer mot Karlstad, okänd orsak"
+    }
+   ]
+  },
+  {
+   "id": "ev955",
+   "event_id": 955,
+   "at": "2026-11-23T14:07:21",
+   "station": "P4 Värml",
+   "text": "Ja, och då har vi information om att det eventuellt kan vara stopp i Vikentunneln i Karlstad– –ner från E18 med Klaramotet och in emot stan där. Enligt uppgifter som jag inte har fått bekräfta ännu– –så är det en lastbil som blockerar tunneln i båda riktningarna. Jag återkommer när jag har mer information gällande detta. E18 Kristinehamn vid Övre Kvalmotet i riktning mot Karlstad. Där håller man på med trädefällning och det är tidvis stopp under arbetet där. Det påverkar alltså trafiken på E18 vid Övre Kvalmotet och i riktning mot Karlstad. Men i övrigt ett bra läge på vägarna så vet jag inte om det finns större störningar i tågtrafiken. Tipsa, det gör ni som alltid på 020 999 44. En av de som svarar där... Vad är det som låter, Maria?",
+   "radiotext": [
+    "Eftermiddag i P4 Värmland",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "karlstad-vikentunneln-lastbil-1123",
+     "kind": "new",
+     "road": null,
+     "lat": 59.37532,
+     "lon": 13.49182,
+     "km": 1.5,
+     "what": "Lastbil blockerar Vikentunneln"
+    },
+    {
+     "incident": "e18-ovre-kvarnmotet-tradfallning-1123",
+     "kind": "update",
+     "road": "E18",
+     "near": [
+      "Övre Kvarnmotet"
+     ],
+     "km": 2,
+     "what": "Trädfällning, tidvis stopp mot Karlstad"
+    }
+   ]
+  },
+  {
+   "id": "ev956",
+   "event_id": 956,
+   "at": "2026-11-23T15:06:16",
+   "station": "P4 Värml",
+   "text": "Då börjar jag i Karlstad, vilken tunnel mellan Klaramotet och Karlstads busstation. Om jag har förstått saken rätt så är det en lastbil som har fått en taveri– –som står i tunneln, dock kan jag inte få nån information från Trafikverket– –för det här är en kommunalväg som inte de tar hand om. Men jag tror att det fortfarande är blockerat där. Välj en annan väg, ni som har möjlighet att höra det här, vilken tunnel i Karlstad. På E18 Kristinehamn vid Övre-Kvarnmotet mot Karlstad där pågår trädfällning– –och tidvis stopp under arbetet. I övrigt inga problem, men ibland kan det vara ett stopp– –på grund av det här trädfällningsarbetet. I övrigt ser det bra ut på vägarna och inga större störningar i togtrafiken. Tipsa oss, det gör ni som alltid, på 020 999 44. Och ser vi till nyhetsläget då, Marie Trygg, då har vi berättat...",
+   "radiotext": [
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "karlstad-vikentunneln-lastbil-1123",
+     "kind": "update",
+     "road": null,
+     "lat": 59.37532,
+     "lon": 13.49182,
+     "km": 1.5,
+     "what": "Lastbil med haveri i tunneln, fortfarande blockerat"
+    },
+    {
+     "incident": "e18-ovre-kvarnmotet-tradfallning-1123",
+     "kind": "repeat",
+     "road": "E18",
+     "near": [
+      "Övre Kvarnmotet"
+     ],
+     "km": 2,
+     "what": "Trädfällning, tidvis stopp"
+    }
+   ]
+  },
+  {
+   "id": "ev957",
+   "event_id": 957,
+   "at": "2026-11-23T20:41:24",
+   "station": "P4 SR",
+   "text": "På E45 mellan Torsby och Överbyn i höjd med Härnsjöns rastplats, där är det en älg nu på fel sida Viltstängslet. Så ta försiktigt om du kör på E45 mellan Torsby och Överbyn i höjd med Härnsjöns rastplats, en älg på fel sida Vägstängslet.",
+   "radiotext": [
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e45-harsjon-alg-1123",
+     "kind": "new",
+     "road": "E45",
+     "near": [
+      "Torsby (town)",
+      "Överbyn (isolated_dwelling)"
+     ],
+     "km": 10,
+     "what": "Älg på fel sida viltstängslet vid rastplatsen"
+    }
+   ]
+  },
+  {
+   "id": "ev958",
+   "event_id": 958,
+   "at": "2026-11-23T21:16:19",
+   "station": "P4 SR",
+   "text": "På E45 mellan Torsby och Överbyn med Hänsjöns rastplats är en älg på feldsida Vildstängslet, så kör försiktigt om du kör på E45 vid Hänsjöns rastplats.",
+   "radiotext": [
+    "Bruno Mars - Locked Out Of Heaven",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e45-harsjon-alg-1123",
+     "kind": "repeat",
+     "road": "E45",
+     "near": [
+      "Torsby (town)",
+      "Överbyn (isolated_dwelling)"
+     ],
+     "km": 10,
+     "what": "Älgen är kvar"
+    }
+   ]
+  },
+  {
+   "id": "ev959",
+   "event_id": 959,
+   "at": "2026-11-24T12:58:28",
+   "station": "P4 SR",
+   "text": "Då har ni intrafattat en olycka på E45 mellan Västra Ämtervik och Fagerås i höjdmedel mellan Bodet och Bäckebron. En singelolycka med personbil som har enligt uppgift kört av vägen där den känns på väg till platsen. E45 mellan Västra Ämtervik och Fagerås och mer exakt mellan Bodet och Bäckebron. En singelolycka med personbil där.",
+   "radiotext": [
+    "Taylor Swift - Patient Zero",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e45-bodetta-singel-1124",
+     "kind": "new",
+     "road": "E45",
+     "near": [
+      "Bodetta",
+      "Bäckebron"
+     ],
+     "km": 3,
+     "what": "Singelolycka, personbil har kört av vägen"
+    }
+   ]
+  },
+  {
+   "id": "ev960",
+   "event_id": 960,
+   "at": "2026-11-24T16:48:53",
+   "station": "P4 SR",
+   "text": "Jag har en uppdatering igen gällande E18 på Skoga Örebro. Det besvärliga räckesarbetet som har orsakat väldigt långa köer under eftermiddagen. Det har varit i höjd med Willingsberg. Det var ett trafikjusto som har reglerat trafiken och det har gett de här oerhört långa köerna. Men arbetet avslutades som jag förstår är 17.20 och nu håller köerna långsamt på att lösa upp sig där. Under morgondagen så arbetar man enbart mellan klockan 8 och 15.00. Förhoppningsvis så ska den här situationen inte bli lika besvärlig i morgon som den har varit idag. Åtminstone inte efter klockan 15 då man alltså ska avsluta jobbet i morgon.",
+   "radiotext": [
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-villingsberg-rackesarbete-1124",
+     "kind": "update",
+     "road": "E18",
+     "near": [
+      "Villingsberg"
+     ],
+     "km": 3,
+     "what": "Räckesarbete avslutat, köerna löses upp"
+    }
+   ]
+  },
+  {
+   "id": "ev961",
+   "event_id": 961,
+   "at": "2026-11-25T08:08:38",
+   "station": "P4 Värml",
+   "text": "Då ska vi till vägen som går mellan Deje och får chaga Länsväg 734, gamla 62an där. Där är det ett träd som har fallit ner och blockerar hela vägbanan så att det är just nu då stopp för trafiken i båda riktningarna, höjd med bergstorp där. Ett träd alltså som blockerar hela vägbanan, personal är på väg dit. 0-20-9-9-4-4-4 tipsa.",
+   "radiotext": [
+    "Morgon i P4 Värmland",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "lv734-bergstorp-trad-1125",
+     "kind": "new",
+     "road": "Lv 734",
+     "lat": 59.58446,
+     "lon": 13.52418,
+     "km": 3,
+     "what": "Träd blockerar hela vägen"
+    }
+   ]
+  },
+  {
+   "id": "ev962",
+   "event_id": 962,
+   "at": "2026-11-25T18:14:46",
+   "station": "P4 SR",
+   "text": "Då ska man se om man kan komma till... Trafikradationen smiter emellan. Då gäller det E18 Karlskoga mellan trafikplats Ingetorp och Circle K-macken ungefär här i höjd med Sandviken i riktning mot Kristinehamn. Här har det inträffat en trafik och lycka med lastbil och initialt så stänger man av vägen helt här under tiden som räddningsarbetet pågår och man stänger av vägen i riktning mot Kristinehamn. Det var alltså mellan trafikplats Ingetorp och Circle K-macken i höjd med Sandviken i riktning mot Kristinehamn. Här stänger man av vägen.",
+   "radiotext": [
+    "Sportextra",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-karlskoga-lastbil-1125",
+     "kind": "new",
+     "road": "E18",
+     "near": [
+      "Karlskoga (town)"
+     ],
+     "km": 6,
+     "what": "Trafikolycka med lastbil, avstängt mot Kristinehamn"
+    }
+   ]
+  },
+  {
+   "id": "ev963",
+   "event_id": 963,
+   "at": "2026-11-25T20:52:43",
+   "station": "P4 SR",
+   "text": "Då ska vi gå ut med varning på E18, i grums mellan Grumsrondellen till Jökhöjden. Där har vi fått information om en eld som rör sig nära vägen senast då i riktning mot Karlstad. Så om du alltså passerar på E18 i grums mellan Grumsrondellen till Jökhöjden, se upp för en eld som rör sig nära vägen, intill eller på vägen då i riktning mot Karlstad.",
+   "radiotext": [
+    "Mauro Scocco - Jag Kan Höra Musiken",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-gokhojden-alg-1125",
+     "kind": "new",
+     "road": "E18",
+     "near": [
+      "Gökhöjden (hamlet)"
+     ],
+     "km": 4,
+     "what": "Älg nära vägen, mot Karlstad"
+    }
+   ]
+  },
+  {
+   "id": "ev964",
+   "event_id": 964,
+   "at": "2026-11-25T21:27:21",
+   "station": "P4 SR",
+   "text": "På E16 E45 mellan Malung och Torsby, närmare bestämt mellan Värnes och Torsby i riktning mot Karlstad, där är det en viltolycka med en lastbil inblandad som står i höger körfält. Det är alltså trångt att passera just nu på E16 E45 mellan Värnes och Torsby. Sedan lite längre ner, E18 vid Grums, där är det en älg som rör sig nära vägen i riktning mot Karlstad ska det vara, så ta det försiktigt om du kör på E18 Grums mellan Grumsrandellen till Jökhöjden.",
+   "radiotext": [
+    "Pernilla Andersson - Koltrast Vid Haväng",
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e16-varnas-torsby-vilt-1125",
+     "kind": "new",
+     "road": "E16",
+     "near": [
+      "Värnäs",
+      "Torsby (town)"
+     ],
+     "km": 20,
+     "what": "Viltolycka med lastbil i höger körfält, mot Karlstad"
+    },
+    {
+     "incident": "e18-gokhojden-alg-1125",
+     "kind": "repeat",
+     "road": "E18",
+     "near": [
+      "Gökhöjden (hamlet)"
+     ],
+     "km": 4,
+     "what": "Älgen nära vägen"
+    }
+   ]
+  },
+  {
+   "id": "ev965",
+   "event_id": 965,
+   "at": "2026-11-26T07:37:28",
+   "station": "P4 Värml",
+   "text": "–med hjälp av Ola Allén. Hur ser det ut på vägarna? I det stora hela är det ett bra läge, men på E18– –mellan Kristineberg och Kallskoga vid Bodalsbackarna– –i riktning mot Kallskoga, där har vi en stillastående lastbil– –i höger körfält, trångt att ta sig förbi. Där är E18, alltså Bodalsbackarna, i riktning mot Kallskoga. Där har vi en lastbil som står på vägen illa till. Utöver det här, bra läge. Ring och tipsa 029 99 44. Mål direkt i första anfallet.",
+   "radiotext": [
+    "Trafikmeddelande"
+   ],
+   "expect": [
+    {
+     "incident": "e18-bodalsbackarna-lastbil-1126",
+     "kind": "new",
+     "road": "E18",
+     "near": [
+      "Kristinehamn (town)",
+      "Karlskoga (town)"
+     ],
+     "km": 12,
+     "what": "Stillastående lastbil i höger körfält, mot Karlskoga"
+    }
+   ]
   }
  ]
 }
