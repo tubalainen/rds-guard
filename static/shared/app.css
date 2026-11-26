@@ -234,7 +234,6 @@ a.cal-day.sel:hover { color: #fff; }
 .ev-title a { color: var(--text); text-decoration: none; }
 .ev-title a:hover { color: var(--accent); text-decoration: underline; }
 .ev-text { margin: 0; color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
-.ev-text.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .ev-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .ev-status { font-size: 13px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
 .spin {

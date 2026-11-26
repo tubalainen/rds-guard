@@ -432,7 +432,7 @@ const RDSUI = (() => {
             <div class="ev-body">
                 <div class="ev-meta">${meta.join('')}</div>
                 <h3 class="ev-title"><a href="#/event/${encodeURIComponent(id)}">${hl(title, words)}</a></h3>
-                ${text ? `<p class="ev-text clamp">${text}</p>` : ''}
+                ${text ? `<p class="ev-text">${text}</p>` : ''}
                 ${ev.audio_url ? Player.html(ev.audio_url, ev.duration_sec) : ''}
                 <div class="ev-foot">${tx.toggle}${transcriptionStatus(ev)}${pushPill(ev)}</div>
             </div>
@@ -639,13 +639,10 @@ const RDSUI = (() => {
         }));
 
         const out = root.querySelector('#results');
-        if (!state.q && !state.typ && !state.pi && !state.nod && !state.dagar) {
-            out.innerHTML = `<div class="empty">Sök i radiotext och transkriptioner för alla sparade meddelanden.<br>
-                <span class="small">Prova: ${['E4', 'olycka', 'halka', 'kö'].map((w) =>
-        `<a href="${hashWith('sok', { q: w })}">${esc(w)}</a>`).join(' · ')}</span></div>`;
-            form.q.focus();
-            return;
-        }
+        // With no filters at all, list every stored event (newest first).
+        const hint = state.q ? '' : `<p class="small muted" style="margin:0 0 8px">Sök i radiotext och transkriptioner. Prova: ${
+            ['E4', 'olycka', 'halka', 'kö'].map((w) => `<a href="${hashWith('sok', { q: w })}">${esc(w)}</a>`).join(' · ')}</p>`;
+        if (!state.q) form.q.focus();
         const words = state.q.split(/\s+/).filter(Boolean);
         let offset = 0;
         let shown = 0;
@@ -665,7 +662,7 @@ const RDSUI = (() => {
         const watch = state.q ? `<div class="watch">${ICON.bell}<span><strong>Vill du få push nästa gång?</strong>
             Gör sökningen till en regel som skickas via MQTT.</span>
             <a class="btn primary" href="${hashWith('aviseringar/ny', { ord: state.q })}">Bevaka ”${esc(state.q)}”</a></div>` : '';
-        out.innerHTML = `${watch}
+        out.innerHTML = `${watch}${hint}
             <div class="day-head" style="margin-top:4px"><h2 style="font-size:22px;text-transform:none">${first.total} träff${first.total === 1 ? '' : 'ar'}</h2>
                 <span class="muted">nyast först</span></div>
             <div class="ev-list" id="hits"></div>
