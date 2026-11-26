@@ -1,6 +1,6 @@
 # Plan: Trafikverkets händelser (Situation) i RDS Guard
 
-Status: steg 1 (grunden) byggt 2026-11-26: `trafikverket.py`, lagring, status, inställningar, API `/api/trafikverket` och `/api/v1/trafikverket`, tester. Ännu inte verifierat mot riktig data. Matchning, karta och push återstår.
+Status: steg 1 släppt i v0.6.0 (grunden) och steg 2–3 i v0.6.1 (matchning, exakt stift, sträcka, tidslinje, eget kartlager, push och MQTT för uppdateringar, båda sidor). Verifierat mot riktig data 2026-11-26: 231 aktiva händelser runt Karlstad vid första anropet. Kvar: utöka mätverktyget med Trafikverkets historik; transkriberingshjälp med namn ur aktiva händelser.
 
 ## Beslut (2026-11-26)
 

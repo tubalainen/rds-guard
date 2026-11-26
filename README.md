@@ -404,7 +404,7 @@ Each transcription is logged with the engine that served it, e.g. `Transcription
 | `CLAUDE_MODEL` | `claude-haiku-5-5` | Claude model for the map engine |
 | `CLAUDE_TIMEOUT` | `60` | HTTP timeout in seconds |
 | `TRANSCRIPTION_PLACE_NAMES` | `true` | Give the transcriber local place names to listen for: ElevenLabs keyterms (costs about 20 % more per clip) and the local Whisper prompt |
-| `TRAFIKVERKET_API_KEY` | | Optional, free key for [Trafikverket's open API](https://data.trafikverket.se/). Keeps a copy of Trafikverket's accidents, obstacles and restrictions near the receiver, with their updates (road works are left out). Needs `NODE_LOCATION`. Empty = off |
+| `TRAFIKVERKET_API_KEY` | | Optional, free key for [Trafikverket's open API](https://data.trafikverket.se/): exact places, a timeline and push updates for the incidents the radio speaks of, and a map layer for the rest (see [Trafikverket](#trafikverket)). Needs `NODE_LOCATION`. Empty = off |
 | `TRAFIKVERKET_RADIUS_KM` | `150` | Trafikverket's deviations within this distance of the receiver are kept |
 | `TRAFIKVERKET_POLL_SEC` | `60` | Seconds between calls to Trafikverket (each call only fetches what changed) |
 | `LOCAL_PROCESSING` | `true` | Satellite only: `false` = do not transcribe or map here, leave it to the aggregator (see [Who processes the recordings](#who-processes-the-recordings-your-choice)) |
@@ -506,8 +506,30 @@ The message:
 }
 ```
 
-`url` and `audio_url` are `null` without `WEB_UI_URL`. Home Assistant
-example:
+`url` and `audio_url` are `null` without `WEB_UI_URL`.
+
+With `TRAFIKVERKET_API_KEY`, Trafikverket's later updates of an incident
+whose message was pushed go to the same topic, with `event_type`
+`traffic_update` (see [Trafikverket](#trafikverket)):
+
+```json
+{
+  "title": "Trafik, uppdatering: E18 Bergviksmotet",
+  "message": "Bärgning pågår. Beräknas klart 14:30.",
+  "priority": "normal",
+  "event_type": "traffic_update",
+  "rule": {"id": 2, "name": "Trafik"},
+  "event_id": "1234",
+  "incident_id": 56,
+  "url": "https://rds.example.se/#/karta?i=56",
+  "trafikverket": {"id": "SE_STA_TRISSID_1_123", "type": "Olycka",
+                   "severity": "Stor påverkan", "ended": false, "web_link": null},
+  "test": false,
+  "timestamp": "2026-11-24T16:40:02Z"
+}
+```
+
+Home Assistant example:
 
 ```yaml
 automation:
@@ -561,6 +583,54 @@ that day. It uses the same engine as new messages: with Claude on
 (`GEO_ENGINE=claude` and a key) that is about 1–3 öre per stored message
 (a few kronor for a few hundred), otherwise the free rules engine. No push
 or MQTT alerts are sent for them.
+
+### Trafikverket
+
+With a free key for Trafikverket's open API (`TRAFIKVERKET_API_KEY`, from
+[data.trafikverket.se](https://data.trafikverket.se/)) the map also uses
+Trafikverket's own traffic information around the receiver: accidents,
+obstacles, restrictions, traffic messages and important traffic information
+(road works and ferries are left out). It is fetched every minute; only
+what changed since the last call.
+
+- **Exact place.** When Trafikverket reports the incident the radio spoke
+  of, the pin moves to Trafikverket's point (±300 m) and the affected
+  stretch of road is drawn. They are matched by road, distance (within the
+  circle, plus 1.5 km), time (Trafikverket published it at most 45 minutes
+  after the broadcast, and it had not ended 30 minutes before) and kind
+  (accident, obstacle, works). Planned road works are never matched to a
+  message about an accident. It works both ways: when Trafikverket
+  publishes after the radio, the incident is linked then.
+- **Updates the radio does not send.** The popup and the event page show a
+  **timeline** of the radio's mentions and Trafikverket's updates ("Bärgning
+  pågår", new expected end, impact, removed). The pin stays on the map
+  while Trafikverket says the incident goes on, and turns grey when
+  Trafikverket ends it.
+- **Push updates.** When an incident's radio message was pushed by a rule,
+  Trafikverket's later updates are pushed to the same rule ("Trafik,
+  uppdatering: E18 Bergviksmotet" – "Bärgning pågår. Beräknas klart
+  14:30."): a new text, impact, restriction or expected end, at most every
+  ten minutes per incident, and always when it ends.
+- **Their own layer.** Tick **Trafikverkets övriga händelser** to also see
+  Trafikverket's current accidents and obstacles the radio has not
+  mentioned (triangles, coloured by impact; with the stretch of road
+  dashed). Other deviations are only shown when their impact is large and
+  they are not road works.
+
+No AI is involved and there is no cost per message. Without the key
+everything works as before.
+
+**Why was a message linked, or not?** Each placed message records the
+reason in its incident (`trv_note` in `/api/incidents`) and in the log: the
+deviation it was linked to and why, or the three nearest deviations and
+what stopped each (another road, too far away, published too late, another
+kind of incident, …). Since Trafikverket keeps removed deviations for only
+24 hours, this is how a miss can be looked into afterwards:
+
+```bash
+docker compose logs rds-guard | grep "Trafikverket: incident"
+curl -s 'http://localhost:8022/api/incidents?hours=168' | python3 -c 'import json,sys; [print(i["label"], "|", i.get("trv_note")) for i in json.load(sys.stdin)["incidents"]]'
+```
 
 ### How it works, and what it costs
 
@@ -644,7 +714,7 @@ Refresh the place-name registry now and then with
 | `/api/calendar` | GET | Light rows for the whole retention period (calendar and figures) |
 | `/api/incidents` | GET | Incidents for the map. Params: `hours` (default 12), `history=1` (all stored, plus how far placing the older messages has come) |
 | `/api/incidents/backfill` | POST | Place the messages stored before the map existed (once, in the background; JSON body `{}`) |
-| `/api/trafikverket` | GET | Trafikverket's deviations near the receiver (with `TRAFIKVERKET_API_KEY`): current ones and those changed in the last `hours` (default 12), each with its versions |
+| `/api/trafikverket` | GET | Trafikverket's deviations near the receiver (with `TRAFIKVERKET_API_KEY`): current ones and those changed in the last `hours` (default 12), each with its versions. `layer=1`: only the map layer's (current accidents, obstacles and the like no radio incident is linked to) |
 | `/api/status` | GET | Decoder status (uptime, station info, decode rate) |
 | `/api/audio/{filename}` | GET | Stream recorded audio file (OGG/WAV) |
 | `/api/events` | DELETE | Clear all events |
@@ -677,6 +747,7 @@ rds/{pi}/eon/{other_pi}/ta         # Linked station TA via EON
 rds/{pi}/{type}/transcription      # Transcription text (retained)
 rds/alert                          # Traffic & emergency events (see below)
 rds/notify/{topic}                 # Push messages from your rules (see Push notifications)
+rds/trafikverket/update            # Trafikverket's update of an incident the radio spoke of
 rds/system/status                  # Bridge health (periodic)
 ```
 
@@ -694,6 +765,7 @@ Each alert message includes:
 | `transcription_status` | `done`, `error`, `timeout`, or `none` (no audio) |
 | `transcribed_text_corrected` | The text with misheard words corrected by Claude, or `null` |
 | `locations` | Where the message was placed: `label` (e.g. `E18 Bergviksmotet`), `road`, `lat`, `lon`, `radius_m`, `bearing` (direction of affected traffic, degrees), `both_directions`, `cleared`, `what` |
+| `trafikverket` | Trafikverket's deviations linked to the message (with `TRAFIKVERKET_API_KEY`): `id`, `message_type`, `message`, `location`, `severity_text`, `restriction`, `end_time`, `status`, `lat`, `lon`, `incident_id`, … |
 | `station` | Station context (PI code, PS name, etc.) |
 | `duration_sec` | Event duration in seconds |
 | `radiotext` | RadioText messages collected during the event |

@@ -806,6 +806,10 @@ def save_geolocation(event_id, result, status, at=None):
             ids = geolocate.merge_placements(
                 conn, result.placements, event_id, now,
                 _iso_hours_ago(geolocate.INCIDENT_HOURS, now), result.engine)
+            row = conn.execute("SELECT transcription FROM events WHERE id = ?",
+                               (event_id,)).fetchone()
+            text = result.corrected_text or (row[0] if row else "") or ""
+            trafikverket.link_incidents(conn, ids, now, text)
         conn.execute(
             "UPDATE events SET transcription_corrected = ?, geo_status = ?, "
             "geo_engine = ? WHERE id = ?",
@@ -863,6 +867,46 @@ def incidents_for_events(event_ids):
 
 # Trafikverket's deviations (trafikverket.py), in this database
 trv = trafikverket.TrvStore(lambda: _conn(), _lock)
+
+
+def trv_relink(dev_ids):
+    """Link new or changed deviations to the radio's incidents and update
+    the linked ones. Returns (new links, updated incident ids)."""
+    now = time.strftime(_ISO, time.gmtime())
+    with _lock:
+        conn = _conn()
+        out = trafikverket.relink_deviations(
+            conn, dev_ids, now, _iso_hours_ago(geolocate.INCIDENT_HOURS))
+        conn.commit()
+    return out
+
+
+def incident(inc_id):
+    row = _conn().execute("SELECT * FROM incidents WHERE id = ?",
+                          (inc_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def incidents_for_deviation(dev_id):
+    return [dict(r) for r in _conn().execute(
+        "SELECT * FROM incidents WHERE trv_id = ?", (dev_id,))]
+
+
+def incident_event_keys(inc_id):
+    return [r[0] for r in _conn().execute(
+        "SELECT event_key FROM incident_events WHERE incident_id = ? "
+        "ORDER BY seen_at", (inc_id,))]
+
+
+def rules_sent_for(event_ids):
+    """Ids of the rules a push went out for, for these events."""
+    ids = [int(e) for e in event_ids if str(e).isdigit()]
+    if not ids:
+        return []
+    return [r[0] for r in _conn().execute(
+        "SELECT DISTINCT rule_id FROM notify_log WHERE rule_id IS NOT NULL "
+        f"AND test = 0 AND status = ? AND event_id IN ({','.join('?' * len(ids))})",
+        [NOTIFY_SENT, *ids])]
 
 
 def recent_place_names(days=90, limit=60):

@@ -19,8 +19,10 @@ API: https://api.trafikinfo.trafikverket.se/v2/data.json, object type
 Situation, namespace Road.TrafficInfo, schema version 1.6.
 """
 
+import calendar
 import json
 import logging
+import math
 import re
 import threading
 import time
@@ -443,14 +445,14 @@ class TrvStore:
     def versions(self, dev_id):
         out = []
         for r in self._conn().execute(
-                "SELECT seen_at, version_time, changes FROM "
+                "SELECT id, seen_at, version_time, changes FROM "
                 "trv_deviation_versions WHERE deviation_id = ? ORDER BY id",
                 (dev_id,)):
             try:
                 changes = json.loads(r["changes"])
             except ValueError:
                 changes = {}
-            out.append({"seen_at": r["seen_at"],
+            out.append({"vid": r["id"], "seen_at": r["seen_at"],
                         "version_time": r["version_time"],
                         "changes": changes})
         return out
@@ -476,10 +478,534 @@ class TrvStore:
             out.append(d)
         return out
 
+    def layer(self, hours=12):
+        """Deviations for the map layer: current accidents, obstacles and
+        the like that no radio incident is linked to."""
+        now = self.now()
+        linked = {r[0] for r in self._conn().execute(
+            "SELECT DISTINCT trv_id FROM incidents WHERE trv_id IS NOT NULL")}
+        out = []
+        for d in self.list(hours, include_ended=False):
+            if d["id"] in linked or not layer_worthy(d, now):
+                continue
+            d["kinds"] = sorted(deviation_kinds(d))
+            out.append(d)
+        return out
+
+    def touch_linked(self, every_sec=3600):
+        """Keep radio incidents on the map while their deviation is still
+        current at Trafikverket: their last_seen moves up once an hour.
+        Returns the number of incidents moved."""
+        now = self.now()
+        with self._lock:
+            conn = self._conn()
+            cur = conn.execute(
+                "UPDATE incidents SET last_seen = ? WHERE status = 'active' "
+                "AND last_seen < ? AND trv_id IN (SELECT id FROM trv_deviations "
+                "WHERE status = ? AND (end_time IS NULL OR "
+                "until_further_notice = 1 OR end_time >= ?))",
+                (now, self.ago(every_sec), STATUS_ACTIVE, now))
+            conn.commit()
+        return cur.rowcount
+
+    def last_version_id(self):
+        """The newest version's number: versions after it are new."""
+        return self._conn().execute(
+            "SELECT COALESCE(MAX(id), 0) FROM trv_deviation_versions").fetchone()[0]
+
     def count_active(self):
         return self._conn().execute(
             "SELECT COUNT(*) FROM trv_deviations WHERE status = ?",
             (STATUS_ACTIVE,)).fetchone()[0]
+
+
+# ---------------------------------------------------------------------------
+# What kind of incident: words in the radio message and in Trafikverket's
+# ---------------------------------------------------------------------------
+
+KIND_ACCIDENT = "accident"
+KIND_OBSTACLE = "obstacle"
+KIND_WORK = "work"
+KIND_CONDITION = "condition"
+
+_KIND_WORDS = (
+    (KIND_ACCIDENT, re.compile(
+        r"olyck|krock|kollision|avåkning|påkörning|voltat|singelolycka|"
+        r"trafikolycka", re.I)),
+    (KIND_OBSTACLE, re.compile(
+        r"hinder|djur|älg|rådjur|vildsvin|\bren\b|renar|hjort|föremål|"
+        r"\bträd\b|nedfallet|ras\b|jordskred|stillastående|fordonshaveri|"
+        r"haveri|bärgning|fast i|brand|eld\b|tappad last|last på vägen", re.I)),
+    (KIND_WORK, re.compile(
+        r"arbete|vägarbete|beläggning|asfalt|underhåll|byggarbete|"
+        r"körfältsavstängning|avstängning för|röjning|slåtter|besiktning", re.I)),
+    (KIND_CONDITION, re.compile(
+        r"halk|halt\b|snö|is på|översvämning|vatten på|dimma|storm", re.I)),
+)
+
+
+def kinds_in(text):
+    """Kinds of incident a text speaks of: {'accident', 'obstacle', ...}."""
+    text = text or ""
+    return {k for k, rx in _KIND_WORDS if rx.search(text)}
+
+
+def deviation_kinds(dev):
+    kinds = kinds_in(" ".join(str(dev.get(k) or "") for k in (
+        "message_code", "header", "message", "restriction")))
+    mtype = dev.get("message_type")
+    if mtype == "Olycka":
+        kinds.add(KIND_ACCIDENT)
+    elif mtype == "Hinder":
+        kinds.add(KIND_OBSTACLE)
+    if KIND_ACCIDENT in kinds or KIND_OBSTACLE in kinds:
+        # "Olycka. Bärgningsarbete pågår" is an accident, not road works
+        kinds.discard(KIND_WORK)
+    return kinds
+
+
+_ROAD_RE = re.compile(
+    r"\b(?:(E)\s?(\d{1,2})|(?:väg|vag|rv|riksväg|lv|länsväg)\s*(\d{1,4}))\b",
+    re.I)
+
+
+def road_key(text):
+    """'E18', 'E 18', 'Rv 61', 'Väg 924 från …' -> 'E18', '61', '924'."""
+    m = _ROAD_RE.search(text or "")
+    if not m:
+        return None
+    return f"E{int(m.group(2))}" if m.group(1) else str(int(m.group(3)))
+
+
+def deviation_road(dev):
+    """The road a deviation is on: from RoadNumber, else its description
+    (RoadNumber is often empty: "Väg 924 från Valbo-Ryr till Rönningen")."""
+    key = road_key(dev.get("road_number"))
+    if key:
+        return key
+    num = dev.get("road_numeric")
+    if num:
+        return str(num)
+    return road_key(dev.get("location"))
+
+
+# ---------------------------------------------------------------------------
+# Matching radio incidents to Trafikverket's deviations
+# ---------------------------------------------------------------------------
+
+LINKED_RADIUS_M = 300       # a linked incident is this precise
+MATCH_SLACK_KM = 1.5        # a deviation this far outside the circle may match
+RADIO_BEFORE_MIN = 45       # Trafikverket may publish this long after the radio
+ENDED_BEFORE_MIN = 30       # a deviation that ended this long before: no match
+PLANNED_DAYS = 2            # works created this long before are planned works
+MIN_SCORE = 1.0
+
+LAYER_TYPES = ("Olycka", "Hinder", "Viktig trafikinformation")
+
+
+def _epoch(iso):
+    if not iso:
+        return None
+    try:
+        return calendar.timegm(time.strptime(str(iso)[:19], "%Y-%m-%dT%H:%M:%S"))
+    except ValueError:
+        return None
+
+
+def _km_to_segment(p, a, b):
+    """Distance in km from p to the segment a-b (lat, lon), flat earth."""
+    k = math.cos(math.radians(p[0]))
+    ax, ay = (a[1] - p[1]) * 111.32 * k, (a[0] - p[0]) * 110.57
+    bx, by = (b[1] - p[1]) * 111.32 * k, (b[0] - p[0]) * 110.57
+    dx, dy = bx - ax, by - ay
+    seg = dx * dx + dy * dy
+    t = 0.0 if seg == 0 else max(0.0, min(1.0, -(ax * dx + ay * dy) / seg))
+    return math.hypot(ax + t * dx, ay + t * dy)
+
+
+def distance_km(dev, lat, lon):
+    """How far (lat, lon) is from a deviation's point or stretch of road."""
+    p = (lat, lon)
+    best = None
+    if dev.get("lat") is not None:
+        best = _km_to_segment(p, (dev["lat"], dev["lon"]), (dev["lat"], dev["lon"]))
+    line = dev.get("line") or []
+    if isinstance(line, str):
+        try:
+            line = json.loads(line)
+        except ValueError:
+            line = []
+    for a, b in zip(line, line[1:]):
+        d = _km_to_segment(p, tuple(a), tuple(b))
+        best = d if best is None else min(best, d)
+    return best
+
+
+def deviation_ended(dev, now_iso):
+    if dev.get("status") == STATUS_DELETED:
+        return True
+    end = dev.get("end_time")
+    return bool(end and not dev.get("until_further_notice")
+                and _epoch(end) is not None and _epoch(now_iso) is not None
+                and _epoch(end) < _epoch(now_iso))
+
+
+def evaluate(inc, dev, heard_at, text=""):
+    """How well a radio incident fits a deviation, and why.
+
+    Returns (score, reason): score is None when they cannot be the same
+    (reason says what stopped it), else higher is better and at least
+    MIN_SCORE links them. inc: an incidents row (road, lat, lon, radius_m,
+    what); heard_at: when the radio spoke of it; text: the message, for the
+    kind of incident.
+    """
+    if dev.get("lat") is None or inc.get("lat") is None:
+        return None, "no position"
+    heard = _epoch(heard_at)
+    # When: published long after the broadcast, or over before it
+    published = _epoch(dev.get("created") or dev.get("start_time"))
+    if heard is not None and published is not None:
+        if published > heard + RADIO_BEFORE_MIN * 60:
+            return None, (f"published {round((published - heard) / 60)} min "
+                          f"after the broadcast (limit {RADIO_BEFORE_MIN})")
+    if heard is not None:
+        if dev.get("status") == STATUS_DELETED:
+            gone = _epoch(dev.get("changed_at"))
+            if gone is not None and gone < heard - ENDED_BEFORE_MIN * 60:
+                return None, (f"removed {round((heard - gone) / 60)} min "
+                              "before the broadcast")
+        end = _epoch(dev.get("end_time"))
+        if (end is not None and not dev.get("until_further_notice")
+                and end < heard - ENDED_BEFORE_MIN * 60):
+            return None, (f"ended {round((heard - end) / 60)} min "
+                          "before the broadcast")
+    # Where
+    dist = distance_km(dev, inc["lat"], inc["lon"])
+    limit = (inc.get("radius_m") or 0) / 1000 + MATCH_SLACK_KM
+    if dist is None or dist > limit:
+        return None, (f"{dist:.1f} km away (limit {limit:.1f} km)"
+                      if dist is not None else "no position")
+    # Which road
+    r1, r2 = road_key(inc.get("road")), deviation_road(dev)
+    if r1 and r2 and r1 != r2:
+        return None, f"other road (radio {r1}, Trafikverket {r2})"
+    same_road = bool(r1 and r2)
+    # What
+    radio_kinds = kinds_in(" ".join([text or "", inc.get("what") or ""]))
+    dev_kinds = deviation_kinds(dev)
+    same_kind = bool(radio_kinds & dev_kinds)
+    if KIND_WORK in dev_kinds and KIND_WORK not in radio_kinds:
+        if radio_kinds or (published is not None and heard is not None
+                           and published < heard - PLANNED_DAYS * 86400):
+            return None, "planned works, the radio speaks of something else"
+    if radio_kinds and dev_kinds and not same_kind:
+        return None, (f"other kind (radio {'/'.join(sorted(radio_kinds))}, "
+                      f"Trafikverket {'/'.join(sorted(dev_kinds))})")
+    if not same_road and not same_kind:
+        return None, ("neither the road nor the kind of incident is known "
+                      f"on both sides (road {r1 or '?'}/{r2 or '?'}, kind "
+                      f"{'/'.join(sorted(radio_kinds)) or '?'}/"
+                      f"{'/'.join(sorted(dev_kinds)) or '?'})")
+    score = 1.0 - 0.5 * dist / limit
+    score += 0.4 if same_road else 0.0
+    score += 0.4 if same_kind else 0.0
+    if heard is not None and published is not None \
+            and heard - 3 * 3600 <= published <= heard + RADIO_BEFORE_MIN * 60:
+        score += 0.2        # new around the time of the broadcast
+    why = (f"{dist:.1f} km, " + ("same road, " if same_road else "")
+           + ("same kind, " if same_kind else "") + f"score {score:.2f}")
+    if score < MIN_SCORE:
+        return score, why + f" (below {MIN_SCORE})"
+    return score, why
+
+
+def match_score(inc, dev, heard_at, text=""):
+    """The score of evaluate(), without the reason."""
+    return evaluate(inc, dev, heard_at, text)[0]
+
+
+def best_match(inc, devs, heard_at, text=""):
+    """(deviation, score) that best fits inc, or (None, None)."""
+    best, best_score = None, None
+    for dev in devs:
+        s = match_score(inc, dev, heard_at, text)
+        if s is not None and s >= MIN_SCORE and (best_score is None or s > best_score):
+            best, best_score = dev, s
+    return best, best_score
+
+
+def _candidates(conn, lat, lon, km=30):
+    """Deviations around (lat, lon), from the database."""
+    dlat = km / 110.0
+    dlon = km / (111.0 * max(0.2, math.cos(math.radians(lat))))
+    return [_row_dict(r) for r in conn.execute(
+        "SELECT * FROM trv_deviations WHERE lat BETWEEN ? AND ? "
+        "AND lon BETWEEN ? AND ?",
+        (lat - dlat, lat + dlat, lon - dlon, lon + dlon))]
+
+
+def _apply_link(conn, inc_id, dev, now_iso):
+    """Move the incident to the deviation's place and link them."""
+    sets = {"trv_id": dev["id"], "lat": dev["lat"], "lon": dev["lon"],
+            "radius_m": LINKED_RADIUS_M, "level": "trafikverket"}
+    if dev.get("direction") == "both":
+        sets["both_directions"] = 1
+    if deviation_ended(dev, now_iso):
+        sets["status"] = "cleared"
+    conn.execute("UPDATE incidents SET " + ", ".join(f"{k} = ?" for k in sets)
+                 + " WHERE id = ?", [*sets.values(), inc_id])
+
+
+def link_incidents(conn, incident_ids, heard_at, text=""):
+    """Link newly placed radio incidents to Trafikverket's deviations.
+
+    Called with the store's lock held, after merge_placements; the caller
+    commits. Returns {incident_id: deviation_id} for the new links.
+    """
+    out = {}
+    if not conn.execute("SELECT 1 FROM trv_deviations LIMIT 1").fetchone():
+        return out      # Trafikverket is not used here (no key)
+    for inc_id in incident_ids:
+        row = conn.execute("SELECT * FROM incidents WHERE id = ?",
+                           (inc_id,)).fetchone()
+        if row is None or row["trv_id"]:
+            continue
+        inc = dict(row)
+        candidates = _candidates(conn, inc["lat"], inc["lon"])
+        dev, _ = best_match(inc, candidates, heard_at, text)
+        if dev is not None:
+            _apply_link(conn, inc_id, dev, heard_at)
+            out[inc_id] = dev["id"]
+            why = evaluate(inc, dev, heard_at, text)[1]
+            note = f"linked to {dev['id']}: {why}"
+            log.info("Trafikverket: incident #%s (%s) linked to %s (%s), %s",
+                     inc_id, inc.get("label"), dev["id"],
+                     dev.get("location") or dev.get("message_type"), why)
+        else:
+            note = no_match_note(inc, candidates, heard_at, text)
+            log.info("Trafikverket: incident #%s (%s) not linked: %s",
+                     inc_id, inc.get("label"), note)
+        conn.execute("UPDATE incidents SET trv_note = ? WHERE id = ?",
+                     (note, inc_id))
+    return out
+
+
+def no_match_note(inc, candidates, heard_at, text=""):
+    """Why a radio incident was not linked: the nearest deviations and
+    what stopped each, for the log and the incident."""
+    near = []
+    for dev in candidates:
+        d = (distance_km(dev, inc["lat"], inc["lon"])
+             if dev.get("lat") is not None else None)
+        if d is not None:
+            near.append((d, dev))
+    if not near:
+        return "no Trafikverket deviation within 30 km"
+    near.sort(key=lambda dd: dd[0])
+    parts = []
+    for _, dev in near[:3]:
+        _, why = evaluate(inc, dev, heard_at, text)
+        what = dev.get("message_type") or "?"
+        where = dev.get("location") or dev.get("road_number") or ""
+        parts.append(f"{dev['id']} ({what}, {where[:60]}): {why}")
+    return "nearest: " + "; ".join(parts)
+
+
+def relink_deviations(conn, dev_ids, now_iso, since_iso):
+    """After new or changed deviations: link them to recent radio
+    incidents that have none, and bring linked incidents up to date (an
+    incident goes grey when Trafikverket ends it, and stays on the map
+    while Trafikverket says it goes on).
+
+    Called with the store's lock held; the caller commits. Returns
+    (new_links {incident_id: deviation_id}, updated [incident_id, ...]).
+    """
+    new_links, updated = {}, []
+    for dev_id in dev_ids:
+        row = conn.execute("SELECT * FROM trv_deviations WHERE id = ?",
+                           (dev_id,)).fetchone()
+        if row is None:
+            continue
+        dev = _row_dict(row)
+        ended = deviation_ended(dev, now_iso)
+        for inc in conn.execute("SELECT * FROM incidents WHERE trv_id = ?",
+                                (dev_id,)).fetchall():
+            if ended and inc["status"] != "cleared":
+                conn.execute("UPDATE incidents SET status = 'cleared', "
+                             "last_seen = ? WHERE id = ?", (now_iso, inc["id"]))
+                updated.append(inc["id"])
+            elif not ended:
+                conn.execute(
+                    "UPDATE incidents SET last_seen = MAX(last_seen, ?), "
+                    "lat = ?, lon = ? WHERE id = ?",
+                    (now_iso, dev["lat"], dev["lon"], inc["id"]))
+                updated.append(inc["id"])
+        if ended or dev.get("lat") is None:
+            continue
+        # Radio incidents heard before Trafikverket published this one
+        for inc in conn.execute(
+                "SELECT * FROM incidents WHERE trv_id IS NULL AND last_seen >= ?",
+                (since_iso,)).fetchall():
+            inc = dict(inc)
+            if inc["id"] in new_links:
+                continue
+            s = match_score(inc, dev, inc["first_seen"])
+            if s is not None and s >= MIN_SCORE:
+                _apply_link(conn, inc["id"], dev, now_iso)
+                new_links[inc["id"]] = dev_id
+                why = evaluate(inc, dev, inc["first_seen"])[1]
+                conn.execute("UPDATE incidents SET trv_note = ? WHERE id = ?",
+                             (f"linked to {dev_id} later: {why}", inc["id"]))
+                log.info("Trafikverket: incident #%s (%s) linked to %s (%s), "
+                         "published after the radio, %s", inc["id"],
+                         inc.get("label"), dev_id, dev.get("location"), why)
+    return new_links, updated
+
+
+def summary(dev, versions=None):
+    """What the web UI and push messages need of a linked deviation."""
+    out = {k: dev.get(k) for k in (
+        "id", "message_type", "message_code", "header", "message", "location",
+        "severity_code", "severity_text", "restriction", "lanes",
+        "temporary_limit", "direction", "lat", "lon", "line", "start_time",
+        "end_time", "until_further_notice", "status", "web_link", "created",
+        "changed_at")}
+    if versions is not None:
+        out["versions"] = versions
+    return out
+
+
+def attach(store, incidents, versions=True):
+    """Add 'trafikverket' (the linked deviation, or None) to incident dicts."""
+    now = store.now()
+    cache = {}
+    for inc in incidents:
+        dev_id = inc.get("trv_id")
+        if not dev_id:
+            inc["trafikverket"] = None
+            continue
+        if dev_id not in cache:
+            dev = store.get(dev_id, versions=False)
+            if dev is not None:
+                dev = summary(dev, store.versions(dev_id) if versions else None)
+                dev["ended"] = deviation_ended(dev, now)
+            cache[dev_id] = dev
+        inc["trafikverket"] = cache[dev_id]
+    return incidents
+
+
+def layer_worthy(dev, now_iso):
+    """Whether a deviation the radio has not mentioned goes on the map
+    layer: accidents and obstacles, and anything else of great impact that
+    is not road works."""
+    if dev.get("lat") is None or dev.get("status") != STATUS_ACTIVE:
+        return False
+    if deviation_ended(dev, now_iso):
+        return False
+    kinds = deviation_kinds(dev)
+    if dev.get("message_type") in LAYER_TYPES:
+        return KIND_WORK not in kinds or KIND_ACCIDENT in kinds
+    if kinds & {KIND_ACCIDENT, KIND_OBSTACLE}:
+        return True
+    return (dev.get("severity_code") or 0) >= 4 and KIND_WORK not in kinds
+
+
+# ---------------------------------------------------------------------------
+# Push messages for updates
+# ---------------------------------------------------------------------------
+
+PUSH_FIELDS = ("message", "severity_code", "restriction", "end_time", "status")
+PUSH_MIN_INTERVAL_SEC = 600     # per deviation, unless it ends
+
+
+def _local_time(iso, zone):
+    t = _epoch(iso)
+    if t is None:
+        return None
+    dt = datetime.fromtimestamp(t, timezone.utc)
+    if zone is not None:
+        dt = dt.astimezone(zone)
+    return dt.strftime("%H:%M")
+
+
+def update_text(dev, changes, zone=None, now_iso=None):
+    """A short Swedish sentence about what changed, for a push message."""
+    if dev.get("status") == STATUS_DELETED or (
+            now_iso and deviation_ended(dev, now_iso)):
+        return "Avslutad enligt Trafikverket."
+    parts = []
+    if "message" in changes and dev.get("message"):
+        parts.append(dev["message"].strip())
+    if "severity_code" in changes and dev.get("severity_text"):
+        parts.append(f"{dev['severity_text']}.")
+    if "restriction" in changes and dev.get("restriction"):
+        parts.append(f"{dev['restriction']}.")
+    if "end_time" in changes and dev.get("end_time"):
+        hhmm = _local_time(dev["end_time"], zone)
+        if hhmm:
+            parts.append(f"Beräknas klart {hhmm}.")
+    if changes.get("status") == STATUS_SUSPENDED:
+        parts.append("Tillfälligt inaktiv.")
+    return " ".join(p if p.endswith((".", "!", "?")) else p + "." for p in parts)
+
+
+class UpdateGate:
+    """Which deviation changes are worth a push: the fields people care
+    about, not more often than every ten minutes (the end always)."""
+
+    def __init__(self, interval=PUSH_MIN_INTERVAL_SEC):
+        self.interval = interval
+        self._last = {}
+        self._lock = threading.Lock()
+
+    def worth(self, dev_id, changes, ended, now=None):
+        if not ended and not any(k in changes for k in PUSH_FIELDS):
+            return False
+        now = time.time() if now is None else now
+        with self._lock:
+            last = self._last.get(dev_id)
+            if not ended and last is not None and now - last < self.interval:
+                return False
+            self._last[dev_id] = now
+            if len(self._last) > 5000:
+                cutoff = now - 86400
+                self._last = {k: v for k, v in self._last.items() if v >= cutoff}
+        return True
+
+
+def latest_changes(store, dev_id, after_vid):
+    """The fields changed in the versions numbered above after_vid."""
+    changes = {}
+    for v in store.versions(dev_id):
+        if v["vid"] > after_vid:
+            changes.update(v["changes"])
+    return changes
+
+
+def update_payload(dev, changes, incident, rule, event_ref, public_url="",
+                   zone=None, now_iso=None):
+    """The push message for an update of an incident a rule was sent for."""
+    from datetime import datetime as _dt
+    text = update_text(dev, changes, zone, now_iso)
+    label = incident.get("label") or dev.get("location") or "Trafikhändelse"
+    base = (public_url or "").rstrip("/")
+    ended = dev.get("status") == STATUS_DELETED or bool(
+        now_iso and deviation_ended(dev, now_iso))
+    return {
+        "title": f"Trafik, uppdatering: {label}",
+        "message": text or (dev.get("message") or "").strip(),
+        "priority": rule.get("priority", "normal"),
+        "event_type": "traffic_update",
+        "rule": {"id": rule.get("id"), "name": rule.get("name")},
+        "event_id": event_ref,
+        "incident_id": incident.get("id"),
+        "url": f"{base}/#/karta?i={incident.get('id')}" if base else None,
+        "trafikverket": {"id": dev.get("id"), "type": dev.get("message_type"),
+                         "severity": dev.get("severity_text"),
+                         "ended": ended, "web_link": dev.get("web_link")},
+        "test": False,
+        "timestamp": _dt.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -491,7 +1017,8 @@ class TrafikverketFeed:
 
     centers_fn returns the (lat, lon) points to watch around (the node, or
     an aggregator's nodes); nothing is fetched while it returns none.
-    on_change(ids) is called after new or changed deviations were stored.
+    on_change(ids, after_vid) is called after new or changed deviations were
+    stored; their versions from this poll are those numbered above after_vid.
     """
 
     def __init__(self, api_key, store, centers_fn, radius_km=DEFAULT_RADIUS_KM,
@@ -569,7 +1096,9 @@ class TrafikverketFeed:
             changeid = 0
         body = build_request(self._key, centers, self.radius_km, changeid)
         situations, last = parse_response(self._fetch(body))
+        before = self._store.last_version_id()
         changed = self._store.apply(situations, full=full)
+        self._store.touch_linked()
         if full:
             self._last_full = time.time()
             self._store.set_state("signature", sig)
@@ -583,7 +1112,7 @@ class TrafikverketFeed:
             log.info("Trafikverket: %d new or changed deviations", len(changed))
             if self._on_change:
                 try:
-                    self._on_change(changed)
+                    self._on_change(changed, before)
                 except Exception:
                     log.exception("Trafikverket: change handler failed")
         return True

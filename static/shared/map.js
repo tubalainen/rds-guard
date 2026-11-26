@@ -12,6 +12,12 @@
  * ones in violet. The first time, the messages stored before the map
  * existed are placed (POST /incidents/backfill), with Claude if it is on.
  *
+ * With Trafikverket (TRAFIKVERKET_API_KEY) an incident Trafikverket also
+ * reports is moved to Trafikverket's place, its stretch of road is drawn and
+ * its popup has a timeline of the radio's mentions and Trafikverket's
+ * updates. A layer that can be turned off shows Trafikverket's accidents and
+ * obstacles the radio has not mentioned.
+ *
  * Also supplies the RDSUI hooks: a place label on every event card
  * (cardMeta) and a small map on the event page (eventExtras).
  * Leaflet is loaded on first use. Map data © OpenStreetMap contributors.
@@ -24,6 +30,9 @@ const RDSMap = (() => {
     const ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
     const SWEDEN = [[55.3, 10.9], [69.1, 24.2]];
     const HISTORY_KEY = 'rdsguard.map.history';
+    const TRV_KEY = 'rdsguard.map.trafikverket';
+    // Trafikverket's impact (SeverityCode 1, 2, 4, 5)
+    const SEVERITY = { 1: '#667085', 2: '#DC6803', 4: '#D92D20', 5: '#912018' };
     const COLOR = { active: '#D92D20', cleared: '#667085', hist: '#7F56D9' };
     const esc = (s) => RDSUI.esc(s);
 
@@ -32,6 +41,12 @@ const RDSMap = (() => {
     }
     function saveHistory(on) {
         try { localStorage.setItem(HISTORY_KEY, on ? '1' : '0'); } catch (e) { /* private mode */ }
+    }
+    function savedTrv() {
+        try { return localStorage.getItem(TRV_KEY) !== '0'; } catch (e) { return true; }
+    }
+    function saveTrv(on) {
+        try { localStorage.setItem(TRV_KEY, on ? '1' : '0'); } catch (e) { /* private mode */ }
     }
 
     const PIN_ICON = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>';
@@ -118,7 +133,105 @@ const RDSMap = (() => {
         'mellan två platser': 'mellan två namngivna platser',
         'på en sträcka': 'någonstans på en sträcka',
         'i eller nära en ort': 'i eller nära en ort',
+        trafikverket: 'enligt Trafikverket',
     };
+
+    // ------------------------------------------------------------- Trafikverket
+
+    const tsTime = (iso) => {
+        const d = RDSUI.parseTs(iso);
+        return d ? RDSUI.fmtTime(d) : '';
+    };
+    const tsShort = (iso) => {
+        const d = RDSUI.parseTs(iso);
+        return d ? fmtShort(d) : '';
+    };
+
+    /** What one of Trafikverket's versions changed, in words. */
+    function versionText(changes, first) {
+        if (changes.status === 'deleted') return 'Avslutad enligt Trafikverket';
+        const parts = [];
+        if (first) {
+            parts.push([changes.message_type, changes.severity_text].filter(Boolean).join(', '));
+            if (changes.message) parts.push(changes.message);
+            if (changes.restriction) parts.push(changes.restriction);
+        } else {
+            if (changes.message) parts.push(changes.message);
+            if (changes.severity_text) parts.push(changes.severity_text);
+            if (changes.restriction) parts.push(changes.restriction);
+            if (changes.status === 'suspended') parts.push('Tillfälligt inaktiv');
+            if (changes.status === 'active') parts.push('Aktiv igen');
+        }
+        if (changes.end_time) parts.push(`Beräknas klart ${tsShort(changes.end_time)}`);
+        const text = parts.filter(Boolean).join(' · ');
+        return text || 'Uppdaterad';
+    }
+
+    /** The radio's mentions and Trafikverket's updates, oldest first. */
+    function timeline(mentions, dev) {
+        const items = (mentions || []).map((at) => ({ at, src: 'radio', text: 'Nämnd i trafikmeddelandet' }));
+        (dev && dev.versions ? dev.versions : []).forEach((v, n) => items.push({
+            // Trafikverket's own time for the version; when it was seen for removals
+            at: v.version_time || v.seen_at, src: 'trv', text: versionText(v.changes || {}, n === 0),
+        }));
+        if (!items.length) return '';
+        items.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+        return `<ol class="trv-timeline">${items.map((i) => `<li class="${i.src}">
+            <time>${esc(tsShort(i.at))}</time><span><b>${i.src === 'radio' ? 'Radio' : 'Trafikverket'}</b> ${esc(i.text)}</span></li>`).join('')}</ol>`;
+    }
+
+    /** Trafikverket's part of a popup or the event page. */
+    function trvBox(dev, mentions) {
+        if (!dev) return '';
+        const ended = dev.ended || dev.status === 'deleted';
+        const sev = dev.severity_text ? ` · ${esc(dev.severity_text)}` : '';
+        return `<div class="trv-box">
+            <div class="trv-head"><span class="pill info">Trafikverket</span>
+                <span>${esc(dev.message_type || '')}${sev}${ended ? ' · avslutad' : ''}</span></div>
+            ${dev.message ? `<p>${esc(dev.message)}</p>` : ''}
+            ${dev.location ? `<div class="kv"><span>Sträcka</span><span>${esc(dev.location)}</span></div>` : ''}
+            ${dev.restriction ? `<div class="kv"><span>Begränsning</span><span>${esc(dev.restriction)}</span></div>` : ''}
+            ${dev.end_time && !dev.until_further_notice && !ended
+                ? `<div class="kv"><span>Beräknas klart</span><span>${esc(tsShort(dev.end_time))}</span></div>` : ''}
+            ${timeline(mentions, dev)}
+            ${/^https?:\/\//i.test(dev.web_link || '') ? `<a href="${esc(dev.web_link)}" target="_blank" rel="noopener">Mer hos Trafikverket</a>` : ''}
+        </div>`;
+    }
+
+    function addLine(layer, dev, color, dashed) {
+        if (!dev || !dev.line || dev.line.length < 2) return null;
+        return L.polyline(dev.line, {
+            color, weight: 5, opacity: 0.75, dashArray: dashed ? '6 6' : null, interactive: false,
+        }).addTo(layer);
+    }
+
+    function trvIcon(dev) {
+        const color = SEVERITY[dev.severity_code] || SEVERITY[2];
+        return L.divIcon({
+            className: 'trv-icon', iconSize: [24, 22], iconAnchor: [12, 14], popupAnchor: [0, -12],
+            html: `<svg width="24" height="22" viewBox="0 0 24 22" aria-hidden="true">
+                <path d="M12 1.5 23 20.5H1z" fill="${color}" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"/>
+                <path d="M12 8v6M12 16.6v.4" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/></svg>`,
+        });
+    }
+
+    function trvPopup(dev) {
+        return `<div class="inc-pop">
+            <strong>${esc(dev.header || dev.message_code || dev.message_type || 'Trafikverket')}</strong>
+            <div class="inc-pop-meta"><span class="pill info">Ej i radion</span><span>sedan ${esc(tsShort(dev.start_time || dev.created))}</span></div>
+            ${trvBox(dev, [])}
+        </div>`;
+    }
+
+    function addDeviation(layer, dev) {
+        const color = SEVERITY[dev.severity_code] || SEVERITY[2];
+        const line = addLine(layer, dev, color, true);
+        const marker = L.marker([dev.lat, dev.lon], {
+            icon: trvIcon(dev), title: dev.location || dev.message_type, zIndexOffset: -500,
+        }).addTo(layer);
+        marker.bindPopup(() => trvPopup(dev), { maxWidth: 320, minWidth: 220 });
+        return { marker, line, circle: null };
+    }
 
     // ------------------------------------------------------------- markers
 
@@ -159,8 +272,9 @@ const RDSMap = (() => {
             // Current incidents above the history
             zIndexOffset: hist ? -1000 : Math.round(f * 1000),
         }).addTo(layer);
-        marker.bindPopup(() => popupHtml(inc), { maxWidth: 320, minWidth: 220 });
-        return { marker, circle };
+        marker.bindPopup(() => popupHtml(inc), { maxWidth: 340, minWidth: 240 });
+        const line = addLine(layer, inc.trafikverket, color, false);
+        return { marker, circle, line };
     }
 
     function popupHtml(inc) {
@@ -179,6 +293,7 @@ const RDSMap = (() => {
             ${inc.nodes && inc.nodes.length ? `<div class="kv"><span>Hörd av</span><span>${esc(inc.nodes.join(', '))}</span></div>` : ''}
             ${short ? `<p class="inc-pop-text">”${esc(short)}”</p>` : ''}
             ${latest ? `<a href="#/event/${encodeURIComponent(latest.id)}">Öppna senaste meddelandet</a>` : ''}
+            ${trvBox(inc.trafikverket, inc.mentions)}
         </div>`;
     }
 
@@ -238,7 +353,10 @@ const RDSMap = (() => {
             <div class="page-head"><div class="grow"><h1>Karta</h1>
                 <p><span id="map-intro">Händelser som trafikmeddelandena nämnt de senaste ${HOURS} timmarna.</span>
                 Ju större cirkel, desto osäkrare är platsen. Pilen visar vilken riktning som påverkas.</p></div>
-                <label class="map-check"><input type="checkbox" id="map-history"> Visa historiska händelser</label></div>
+                <div class="map-checks">
+                    <label class="map-check"><input type="checkbox" id="map-history"> Visa historiska händelser</label>
+                    <label class="map-check trv" id="map-trv-label" hidden><input type="checkbox" id="map-trv"> Trafikverkets övriga händelser</label>
+                </div></div>
             <div id="map-note" class="map-note-slot"></div>
             <div id="map-backfill" class="map-note-slot"></div>
             <div class="map-layout">
@@ -246,7 +364,8 @@ const RDSMap = (() => {
                     <div class="map-legend" aria-hidden="true">
                         <span><i class="lg-dot"></i>Pågår</span><span><i class="lg-dot grey"></i>Avklarad</span>
                         <span><i class="lg-ring"></i>Osäkerhet</span><span>Blekare = äldre</span>
-                        <span id="lg-hist" hidden><i class="lg-dot hist"></i>Historisk (äldre än ${HOURS} h)</span></div></div>
+                        <span id="lg-hist" hidden><i class="lg-dot hist"></i>Historisk (äldre än ${HOURS} h)</span>
+                        <span id="lg-trv" hidden><i class="lg-tri"></i>Trafikverket, ej i radion</span></div></div>
                 <aside class="map-list card" aria-label="Händelser på kartan">
                     <div class="card-head"><h2 id="map-list-title">Senaste ${HOURS} timmarna</h2></div>
                     <div id="map-items"><p class="muted small">Laddar…</p></div>
@@ -264,7 +383,16 @@ const RDSMap = (() => {
         map.fitBounds(SWEDEN);
         const layer = L.layerGroup().addTo(map);
         const nodeLayer = L.layerGroup().addTo(map);
+        const trvLayer = L.layerGroup().addTo(map);
         const markers = new Map();
+        const trvBoxEl = root.querySelector('#map-trv');
+        let trvOn = savedTrv();
+        trvBoxEl.checked = trvOn;
+        trvBoxEl.addEventListener('change', () => {
+            trvOn = trvBoxEl.checked;
+            saveTrv(trvOn);
+            refresh();
+        });
         let first = true;
         const focus = route.params.get('i');
         const box = root.querySelector('#map-history');
@@ -306,6 +434,16 @@ const RDSMap = (() => {
                 root.querySelector('#map-items').innerHTML = `<p class="muted">Kunde inte hämta händelserna: ${esc(e.message)}</p>`;
                 return;
             }
+            let deviations = [];
+            try {
+                const trv = await RDSUI.api('GET', `/trafikverket?layer=1&hours=${HOURS}`);
+                const on = !!(trv.trafikverket && trv.trafikverket.enabled);
+                root.querySelector('#map-trv-label').hidden = !on;
+                root.querySelector('#lg-trv').hidden = !(on && trvOn);
+                if (on && trvOn) deviations = trv.deviations || [];
+            } catch (e) {
+                root.querySelector('#map-trv-label').hidden = true;   // older server
+            }
             if (!ctx.alive() || asked !== history) return;
             const incidents = (data.incidents || []).filter((i) => history || ageHours(i) <= HOURS);
             if (first && !history && focus && !incidents.some((i) => String(i.id) === focus)) {
@@ -333,6 +471,8 @@ const RDSMap = (() => {
             layer.clearLayers();
             markers.clear();
             incidents.slice().reverse().forEach((inc) => markers.set(String(inc.id), addIncident(layer, inc)));
+            trvLayer.clearLayers();
+            deviations.forEach((dev) => markers.set(`trv:${dev.id}`, addDeviation(trvLayer, dev)));
 
             nodeLayer.clearLayers();
             const receivers = data.nodes || (data.geo && data.geo.located ? [{ name: 'Mottagaren', ...data.geo.located }] : []);
@@ -347,9 +487,15 @@ const RDSMap = (() => {
                     <span class="map-item-dot" style="opacity:${freshness(inc).toFixed(2)}"></span>
                     <span class="map-item-body"><b>${esc(inc.label)}</b>
                         ${inc.what ? `<span class="small muted map-item-what">${esc(inc.what)}</span>` : ''}
-                        <span class="small muted">${esc(ago(inc))} · ${esc(precision(inc.radius_m))}${k === 'cleared' ? ' · avklarad' : ''}</span>
+                        <span class="small muted">${esc(ago(inc))} · ${esc(precision(inc.radius_m))}${k === 'cleared' ? ' · avklarad' : ''}${inc.trafikverket ? ' · Trafikverket' : ''}</span>
                     </span></button>`;
             };
+            const trvItem = (dev) => `<button type="button" class="map-item trv" data-id="trv:${esc(dev.id)}">
+                <span class="map-item-tri" style="border-bottom-color:${SEVERITY[dev.severity_code] || SEVERITY[2]}"></span>
+                <span class="map-item-body"><b>${esc(dev.header || dev.message_code || dev.message_type)}</b>
+                    <span class="small muted map-item-what">${esc(dev.location || '')}</span>
+                    <span class="small muted">${esc(dev.severity_text || '')}${dev.start_time ? ` · sedan ${esc(tsShort(dev.start_time))}` : ''}</span>
+                </span></button>`;
             let html = '';
             if (history) {
                 // Grouped: the last 12 hours, then one heading per day
@@ -366,6 +512,10 @@ const RDSMap = (() => {
             } else {
                 html = incidents.map(item).join('');
             }
+            if (deviations.length) {
+                html += `<h3 class="map-group">Trafikverket, ej i radion (${deviations.length})</h3>`
+                    + deviations.map(trvItem).join('');
+            }
             list.innerHTML = html || (history
                 ? '<p class="muted small" style="margin:0">Inga händelser finns sparade ännu.</p>'
                 : '<p class="muted small" style="margin:0">Inga händelser har nämnts de senaste timmarna.</p>');
@@ -375,8 +525,10 @@ const RDSMap = (() => {
                 first = false;
                 if (focus && markers.has(focus)) {
                     show(focus);
-                } else if (incidents.length) {
-                    const bounds = L.featureGroup([...markers.values()].map((m) => m.circle)).getBounds();
+                } else if (incidents.length || deviations.length) {
+                    const bounds = L.latLngBounds([]);
+                    markers.forEach((m) => (m.circle ? bounds.extend(m.circle.getBounds())
+                        : bounds.extend(m.marker.getLatLng())));
                     map.fitBounds(bounds.pad(0.2), { maxZoom: 12 });
                 } else if (receivers.length) {
                     map.fitBounds(L.featureGroup(nodeLayer.getLayers()).getBounds().pad(0.5), { maxZoom: 8 });
@@ -387,7 +539,8 @@ const RDSMap = (() => {
         function show(id) {
             const m = markers.get(String(id));
             if (!m) return;
-            map.fitBounds(m.circle.getBounds().pad(0.4), { maxZoom: 13 });
+            if (m.circle) map.fitBounds(m.circle.getBounds().pad(0.4), { maxZoom: 13 });
+            else map.setView(m.marker.getLatLng(), 13);
             m.marker.openPopup();
             if (window.matchMedia('(max-width: 760px)').matches) {
                 root.querySelector('#map').scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -438,7 +591,8 @@ const RDSMap = (() => {
             <div class="card-head"><h2>Plats</h2><a class="small" href="#/karta?i=${encodeURIComponent(inc[0].id)}">Visa på kartan</a></div>
             <div class="map mini" id="event-map"></div>
             ${inc.map((i) => `<div class="kv"><span>${esc(i.label)}</span>
-                <span>${esc(precision(i.radius_m))} · ${esc(direction(i))}${i.status === 'cleared' ? ' · avklarad' : ''}</span></div>`).join('')}
+                <span>${esc(precision(i.radius_m))} · ${esc(direction(i))}${i.status === 'cleared' ? ' · avklarad' : ''}</span></div>
+                ${trvBox(i.trafikverket, [ev.started_at || ev.created_at].filter(Boolean))}`).join('')}
         </section>`;
         await loadLeaflet();
         if (!ctx.alive()) return;
@@ -446,7 +600,7 @@ const RDSMap = (() => {
         // A circle's extent can only be measured on a map that has a view
         map.setView([inc[0].lat, inc[0].lon], 11);
         const layer = L.featureGroup().addTo(map);
-        inc.forEach((i) => addIncident(layer, { ...i, events: [], what: '', level: '' }));
+        inc.forEach((i) => addIncident(layer, { ...i, events: [], mentions: [], what: '', level: '' }));
         map.fitBounds(L.featureGroup(layer.getLayers().filter((x) => x instanceof L.Circle)).getBounds().pad(0.3), { maxZoom: 13 });
     }
 

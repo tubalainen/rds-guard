@@ -55,7 +55,7 @@ def _start_trafikverket(pipeline):
     return trafikverket.create_feed(
         config.TRAFIKVERKET_API_KEY, store.trv, centers,
         radius_km=config.TRAFIKVERKET_RADIUS_KM,
-        poll_sec=config.TRAFIKVERKET_POLL_SEC)
+        poll_sec=config.TRAFIKVERKET_POLL_SEC, on_change=pipeline.trv_changed)
 
 
 async def main():

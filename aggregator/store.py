@@ -755,6 +755,10 @@ def save_geolocation(event_uid, result, status, at=None):
             ids = geolocate.merge_placements(
                 conn, result.placements, event_uid, now,
                 _iso_before(now, geolocate.INCIDENT_HOURS * 3600), result.engine)
+            row = conn.execute("SELECT transcription FROM events WHERE "
+                               "event_uid = ?", (event_uid,)).fetchone()
+            text = result.corrected_text or (row[0] if row else "") or ""
+            trafikverket.link_incidents(conn, ids, now, text)
         conn.execute(
             "UPDATE events SET transcription_corrected = ?, geo_status = ?, "
             "geo_engine = ? WHERE event_uid = ?",
@@ -853,3 +857,43 @@ def recent_place_names(center=None, days=90, limit=60):
 # ---------------------------------------------------------------------------
 
 trv = trafikverket.TrvStore(lambda: _conn(), _lock, fmt="%Y-%m-%dT%H:%M:%SZ")
+
+
+def trv_relink(dev_ids):
+    """Link new or changed deviations to the radio's incidents and update
+    the linked ones. Returns (new links, updated incident ids)."""
+    now = now_iso()
+    with _lock:
+        conn = _conn()
+        out = trafikverket.relink_deviations(
+            conn, dev_ids, now, iso_ago(geolocate.INCIDENT_HOURS * 3600))
+        conn.commit()
+    return out
+
+
+def incident(inc_id):
+    row = _conn().execute("SELECT * FROM incidents WHERE id = ?",
+                          (inc_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def incidents_for_deviation(dev_id):
+    return [dict(r) for r in _conn().execute(
+        "SELECT * FROM incidents WHERE trv_id = ?", (dev_id,))]
+
+
+def incident_event_keys(inc_id):
+    return [r[0] for r in _conn().execute(
+        "SELECT event_key FROM incident_events WHERE incident_id = ? "
+        "ORDER BY seen_at", (inc_id,))]
+
+
+def rules_sent_for(event_uids):
+    """Ids of the rules a push went out for, for these events."""
+    uids = [str(u) for u in event_uids]
+    if not uids:
+        return []
+    return [r[0] for r in _conn().execute(
+        "SELECT DISTINCT rule_id FROM notify_log WHERE rule_id IS NOT NULL "
+        f"AND test = 0 AND status = ? AND event_uid IN ({','.join('?' * len(uids))})",
+        [NOTIFY_SENT, *uids])]

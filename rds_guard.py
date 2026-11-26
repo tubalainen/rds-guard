@@ -728,6 +728,8 @@ def _fire_deferred_alert(event_id, transcribed_text, error=False, geo=None):
         if geo is not None:
             payload["transcribed_text_corrected"] = geo.corrected_text
             payload["locations"] = [_location_payload(p) for p in geo.placements]
+            payload["trafikverket"] = _trv_for_incidents(
+                getattr(geo, "incident_ids", None) or [])
         _mqtt_pub(mqtt_client, "alert", payload)
         if payload.get("event_type") == "traffic_announcement":
             _notify(event_id)
@@ -861,7 +863,24 @@ def _trv_centers():
     return [_node_place.point] if _node_place else []
 
 
-def _trv_changed(ids):
+def _trv_changed(ids, after_vid):
+    """New or changed deviations: link them to the radio's incidents, push
+    updates of linked ones, tell the web UI."""
+    try:
+        new_links, updated = event_store.trv_relink(ids)
+        if new_links:
+            log.info("Trafikverket: %d radio incidents linked", len(new_links))
+        for dev_id in {d for d in ids}:
+            incs = event_store.incidents_for_deviation(dev_id)
+            if incs and _notify_publish("trafikverket/update", {
+                    "deviation": event_store.trv.get(dev_id, versions=False),
+                    "incidents": [i["id"] for i in incs],
+                    "timestamp": now_iso()}) is False:
+                log.debug("Trafikverket: MQTT update for %s not sent", dev_id)
+        notifier.trv_updates(ids, after_vid, _notify_publish,
+                             skip_incidents=set(new_links))
+    except Exception:
+        log.exception("Trafikverket: could not process the changes")
     broadcast_ws({"topic": "trafikverket", "deviations": ids,
                   "timestamp": now_iso()})
 
@@ -876,6 +895,22 @@ def _start_trafikverket():
         config.TRAFIKVERKET_API_KEY, event_store.trv, _trv_centers,
         radius_km=config.TRAFIKVERKET_RADIUS_KM,
         poll_sec=config.TRAFIKVERKET_POLL_SEC, on_change=_trv_changed)
+
+
+def _trv_for_incidents(incident_ids):
+    """Trafikverket's deviations linked to these incidents, for the alert."""
+    import trafikverket
+    out = []
+    for inc_id in incident_ids:
+        inc = event_store.incident(inc_id)
+        dev = (event_store.trv.get(inc["trv_id"], versions=False)
+               if inc and inc.get("trv_id") else None)
+        if dev:
+            s = trafikverket.summary(dev)
+            s.pop("line", None)
+            s["incident_id"] = inc_id
+            out.append(s)
+    return out
 
 
 def trv_snapshot():
@@ -943,6 +978,7 @@ def _geolocate(event_id, text):
             return None
         status = "done" if result.placements else "none"
         ids = event_store.save_geolocation(event_id, result, status)
+        result.incident_ids = ids
         log.info("Event %d placed with %s: %s", event_id, result.engine,
                  "; ".join(f"{p.label} (±{p.radius_m} m)" for p in result.placements)
                  or "no place found")
