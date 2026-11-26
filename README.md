@@ -113,20 +113,18 @@ sudo modprobe -r dvb_usb_rtl28xxu
 
 ## Quick start
 
-1. Clone the repository and enter the directory:
+1. Get the two files you need. There is no need to clone the repository:
+   `docker-compose.yml` uses the ready-made image
+   `ghcr.io/tubalainen/rds-guard:latest` (amd64 + arm64), which Docker pulls
+   for you.
 
 ```bash
-git clone https://github.com/tubalainen/rds-guard.git
-cd rds-guard
+mkdir rds-guard && cd rds-guard
+curl -fsSLo docker-compose.yml https://raw.githubusercontent.com/tubalainen/rds-guard/master/docker-compose.yml
+curl -fsSLo .env https://raw.githubusercontent.com/tubalainen/rds-guard/master/.env.example
 ```
 
-2. Copy the example config and set your FM frequency:
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and at minimum set your local P4 frequency:
+2. Edit `.env` and at minimum set your local P4 frequency:
 
 ```bash
 FM_FREQUENCY=103.3M        # Your local P4 frequency
@@ -148,13 +146,15 @@ MQTT_HOST=192.168.1.100        # Your MQTT broker IP
 MQTT_PORT=1883
 ```
 
-3. Pull and start:
+3. Pull the image and start it:
 
 ```bash
+docker compose pull
 docker compose up -d
 ```
 
-This pulls the pre-built image from `ghcr.io/tubalainen/rds-guard:latest` (amd64 + arm64).
+To update later, run `docker compose pull && docker compose up -d` in the
+same folder. Your `.env` and `rds-data` are kept.
 
 4. Open the web UI at **http://your-host:8022**
 
@@ -164,7 +164,7 @@ This pulls the pre-built image from `ghcr.io/tubalainen/rds-guard:latest` (amd64
 docker compose logs -f rds-guard
 ```
 
-> **Building locally:** To build from source instead of pulling the pre-built image, edit `docker-compose.yml` — comment out the `image:` line and uncomment `build: .`, then run `docker compose up -d --build`.
+> **Building locally:** Only if you want to build the image yourself instead of pulling it, you need the whole repository: `git clone https://github.com/tubalainen/rds-guard.git`, then in `rds-guard` copy `.env.example` to `.env`, edit `docker-compose.yml` (comment out the `image:` line and uncomment `build: .`) and run `docker compose up -d --build`.
 
 6. **Optional:** connect the installation to an aggregator. See
    [Run as a satellite](#run-as-a-satellite).
@@ -689,7 +689,8 @@ container writes its files as root, so this needs `sudo`:
 docker compose down && sudo rm -rf ./rds-data && docker compose pull && docker compose up -d && docker compose logs -f
 ```
 
-If building locally (with `build: .` in docker-compose.yml):
+If building locally (a clone of the repository, with `build: .` in
+docker-compose.yml), run `git pull` first, then:
 
 ```bash
 docker compose down && docker compose build --no-cache && docker compose up -d && docker compose logs -f
