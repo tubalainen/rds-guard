@@ -16,9 +16,11 @@ Either way, coordinates only ever come from the local place-name registry
 (gazetteer.py): Claude picks names, it never invents positions.
 """
 
+import calendar
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 
 import gazetteer as gz
@@ -27,6 +29,9 @@ log = logging.getLogger("rds-guard")
 
 MAX_RADIUS_M = 25000          # less certain than this: not placed
 INCIDENT_HOURS = 12           # an incident stays on the map this long
+# Besides NULL (stored before v0.5.0), messages with these geo_status values
+# were never placed: the receiver's location was not known then
+PENDING_STATUSES = ("no_location",)
 DEFAULT_AREA_KM = 200         # names further than this from the node are ignored
 
 # ---------------------------------------------------------------------------
@@ -670,10 +675,16 @@ def _incident_dict(row):
     return d
 
 
-def open_incidents(conn, since_iso):
-    rows = conn.execute(
-        "SELECT * FROM incidents WHERE last_seen >= ? AND status = 'active' "
-        "ORDER BY last_seen DESC LIMIT 20", (since_iso,)).fetchall()
+def open_incidents(conn, since_iso, until_iso=None):
+    """Active incidents mentioned since since_iso. until_iso leaves out the
+    ones first heard after it (placing an older message afterwards)."""
+    sql, args = ("SELECT * FROM incidents WHERE last_seen >= ? "
+                 "AND status = 'active'", [since_iso])
+    if until_iso:
+        sql += " AND first_seen <= ?"
+        args.append(until_iso)
+    rows = conn.execute(sql + " ORDER BY last_seen DESC LIMIT 20",
+                        args).fetchall()
     return [_incident_dict(r) for r in rows]
 
 
@@ -701,13 +712,25 @@ def _match(inc, pl):
     return dist if dist <= limit else None
 
 
+def _shift_iso(iso, hours):
+    """An ISO timestamp (with or without a trailing Z) moved by hours."""
+    t = calendar.timegm(time.strptime(iso[:19], "%Y-%m-%dT%H:%M:%S"))
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t + hours * 3600)) + iso[19:]
+
+
 def merge_placements(conn, placements, event_key, now_iso, since_iso, engine):
     """Store placements: update the incident they belong to or add a new one.
 
     The caller holds its write lock and commits. Returns the incident ids.
+
+    now_iso is when the message was broadcast. It is in the past when older
+    messages are placed afterwards: then incidents heard of up to 12 hours
+    later can match too, and a message older than an incident's latest one
+    does not change its status or description, only when it was first heard.
     """
     recent = [_incident_dict(r) for r in conn.execute(
-        "SELECT * FROM incidents WHERE last_seen >= ?", (since_iso,))]
+        "SELECT * FROM incidents WHERE last_seen >= ? AND first_seen <= ?",
+        (since_iso, _shift_iso(now_iso, INCIDENT_HOURS)))]
     ids = []
     for pl in placements:
         target = None
@@ -730,15 +753,24 @@ def merge_placements(conn, placements, event_key, now_iso, since_iso, engine):
                  now_iso, now_iso))
             inc_id = cur.lastrowid
             recent.append({"id": inc_id, "road": pl.road, "lat": pl.lat,
-                           "lon": pl.lon, "radius_m": pl.radius_m})
+                           "lon": pl.lon, "radius_m": pl.radius_m,
+                           "first_seen": now_iso, "last_seen": now_iso})
         else:
             inc_id = target["id"]
-            sets = {"last_seen": now_iso, "status": status, "engine": engine}
-            if pl.what:
-                sets["what"] = pl.what
-            if pl.bearing is not None or pl.both_directions:
-                sets["bearing"] = pl.bearing
-                sets["both_directions"] = int(pl.both_directions)
+            if now_iso >= (target.get("last_seen") or ""):
+                sets = {"last_seen": now_iso, "status": status, "engine": engine}
+                if pl.what:
+                    sets["what"] = pl.what
+                if pl.bearing is not None or pl.both_directions:
+                    sets["bearing"] = pl.bearing
+                    sets["both_directions"] = int(pl.both_directions)
+                target["last_seen"] = now_iso
+            else:
+                # An older message about it: the later ones say more
+                sets = {}
+            if now_iso < (target.get("first_seen") or now_iso):
+                sets["first_seen"] = now_iso
+                target["first_seen"] = now_iso
             dist_m = gz.km((target["lat"], target["lon"]), (pl.lat, pl.lon)) * 1000
             if (pl.radius_m < target["radius_m"]
                     and dist_m <= target["radius_m"] + pl.radius_m):
@@ -747,9 +779,10 @@ def merge_placements(conn, placements, event_key, now_iso, since_iso, engine):
                             label=pl.label, level=pl.level,
                             names=json.dumps(pl.names, ensure_ascii=False))
                 target.update(lat=pl.lat, lon=pl.lon, radius_m=pl.radius_m)
-            conn.execute(
-                "UPDATE incidents SET " + ", ".join(f"{k} = ?" for k in sets)
-                + " WHERE id = ?", [*sets.values(), inc_id])
+            if sets:
+                conn.execute(
+                    "UPDATE incidents SET " + ", ".join(f"{k} = ?" for k in sets)
+                    + " WHERE id = ?", [*sets.values(), inc_id])
         conn.execute(
             "INSERT OR REPLACE INTO incident_events (incident_id, event_key, "
             "seen_at) VALUES (?, ?, ?)", (inc_id, str(event_key), now_iso))
@@ -757,11 +790,12 @@ def merge_placements(conn, placements, event_key, now_iso, since_iso, engine):
     return ids
 
 
-def list_incidents(conn, since_iso):
-    """Incidents mentioned since since_iso, newest first, with their events."""
+def list_incidents(conn, since_iso=None):
+    """Incidents mentioned since since_iso (None: all), newest first, with
+    their events."""
     rows = [_incident_dict(r) for r in conn.execute(
         "SELECT * FROM incidents WHERE last_seen >= ? ORDER BY last_seen DESC",
-        (since_iso,))]
+        (since_iso or "",))]
     for inc in rows:
         inc["events"] = [r[0] for r in conn.execute(
             "SELECT event_key FROM incident_events WHERE incident_id = ? "

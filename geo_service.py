@@ -112,3 +112,90 @@ def create_service(engine, api_key="", model="claude-haiku-5-5", timeout=60,
                                       timeout=timeout, area_km=area_km)
     return GeoService(geo, keyterms_auto=place_names, prompt_auto=place_names,
                       area_km=area_km)
+
+
+# ---------------------------------------------------------------------------
+# Placing older messages: the first time the history map is shown
+# ---------------------------------------------------------------------------
+
+class Backfill:
+    """Places the messages stored before the map existed, oldest first, in
+    a background thread. Each one is placed as at the time it was broadcast,
+    so it joins the incidents of that day, not today's.
+
+    pending(): the messages waiting, oldest first.
+    place(item): places one; returns True if it was put on the map, False
+        if no place was found, None if it cannot be placed now (left as
+        pending, e.g. its node has no location).
+    count(): how many pending messages can be placed now.
+    """
+
+    PAUSE_SEC = 0.1        # between messages, not to crowd out live ones
+
+    def __init__(self, pending, place, count):
+        self._pending = pending
+        self._place = place
+        self._count = count
+        self._lock = threading.Lock()
+        self._thread = None
+        self._state = {"running": False, "total": 0, "done": 0, "placed": 0,
+                       "skipped": 0, "finished": False}
+
+    def status(self, available=True, reason=None):
+        with self._lock:
+            st = dict(self._state)
+        try:
+            st["pending"] = self._count()
+        except Exception:  # noqa: BLE001 - status must not fail the map
+            log.exception("Could not count unplaced messages")
+            st["pending"] = 0
+        st["available"] = bool(available)
+        if reason:
+            st["reason"] = reason
+        # count() only counts messages that can be placed now
+        st["runnable"] = (st["available"] and not st["running"]
+                          and st["pending"] > 0)
+        return st
+
+    def start(self):
+        """Start a run unless one is running. Returns True if started."""
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return False
+            self._state.update(running=True, total=0, done=0, placed=0,
+                               skipped=0, finished=False)
+            self._thread = threading.Thread(target=self._run, daemon=True,
+                                            name="geo-backfill")
+            self._thread.start()
+        return True
+
+    def _run(self):
+        import time
+        try:
+            items = list(self._pending())
+            with self._lock:
+                self._state["total"] = len(items)
+            log.info("Placing %d older messages on the map", len(items))
+            for item in items:
+                try:
+                    res = self._place(item)
+                except Exception:  # noqa: BLE001 - one bad message, go on
+                    log.exception("Could not place an older message")
+                    res = False
+                with self._lock:
+                    self._state["done"] += 1
+                    if res:
+                        self._state["placed"] += 1
+                    elif res is None:
+                        self._state["skipped"] += 1
+                time.sleep(self.PAUSE_SEC)
+            with self._lock:
+                st = dict(self._state)
+            log.info("Older messages placed: %d of %d on the map, %d left "
+                     "(no receiver location)", st["placed"], st["total"],
+                     st["skipped"])
+        except Exception:
+            log.exception("Placing older messages failed")
+        finally:
+            with self._lock:
+                self._state.update(running=False, finished=True)
