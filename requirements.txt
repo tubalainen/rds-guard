@@ -7,4 +7,4 @@ av>=11,<19
 requests>=2.34.2
 numpy>=2.4.6
 # Time zone data for push rule times (zoneinfo), in case the image has none
-tzdata>=2025.2
+tzdata>=2026.6
