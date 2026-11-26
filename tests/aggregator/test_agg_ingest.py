@@ -91,6 +91,15 @@ async def test_ingest_port_serves_nothing_but_ingest(client, node, method, path)
     assert r.status == 426
 
 
+async def test_reachability_check_from_readme(client):
+    """aggregator/README.md, "Check that it works": a plain curl gets a 426
+    that is recognisably from the aggregator."""
+    r = await client.get("/api/v1/ingest/heartbeat")
+    assert r.status == 426
+    assert r.headers[H] == "1"
+    assert (await r.json())["error"] == "unsupported_protocol"
+
+
 async def test_auth_required(client):
     resp = await client.put(_url(uuid.uuid4()), json=_event(), headers={H: "1"})
     assert resp.status == 401

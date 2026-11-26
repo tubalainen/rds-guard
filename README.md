@@ -266,7 +266,11 @@ The installation is standalone again; local data is not affected.
 ### Run the aggregator yourself
 
 To collect events from friends' satellites, run the separate aggregator
-container: see [aggregator/README.md](aggregator/README.md).
+container: see [aggregator/README.md](aggregator/README.md). It is a single
+container that you put behind your own HTTPS reverse proxy (for example
+Nginx Proxy Manager with Cloudflare) or a Cloudflare Tunnel; its README has
+the settings for both and a way to
+[check that it works](aggregator/README.md#check-that-it-works).
 
 ## Configuration
 

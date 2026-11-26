@@ -43,8 +43,14 @@ cd rds-guard/aggregator
 cp .env.example .env
 ```
 
-2. Edit `.env`: set `PUBLIC_URL` to the address satellites will use, for
-   example `https://rds.example.com`.
+2. Edit `.env`. These are the settings to look at; the rest have working
+   defaults (see [Configuration](#configuration)):
+
+   | Setting | Value |
+   |---|---|
+   | `PUBLIC_URL` | The address satellites will use, e.g. `https://rds.example.com`. It must start with `https://`: satellites do not follow redirects |
+   | `ELEVENLABS_API_KEY` | Your ElevenLabs key. Empty = all audio is transcribed locally |
+   | `MQTT_ENABLED`, `MQTT_HOST` … | Only if you want alerts on MQTT (Home Assistant etc.) |
 
 3. Start it. This is a single container:
 
@@ -53,7 +59,8 @@ docker compose up -d
 ```
 
 4. Put the ingest API, port **8081**, on the internet (see
-   [Publishing the ingest API](#publishing-the-ingest-api)).
+   [Publishing the ingest API](#publishing-the-ingest-api)) and
+   [check that it works](#check-that-it-works).
 
 5. Open the web UI at **http://your-host:8080**, go to **Nodes**, add a node
    per friend, and send them the three lines that are shown (see
@@ -81,21 +88,38 @@ filter is needed in front: the web UI and the admin API do not exist on port
 ### Option A: a reverse proxy you already run
 
 Any proxy that terminates HTTPS and forwards to `http://<docker-host>:8081`
-works. With **Nginx Proxy Manager** and the domain on Cloudflare:
+works. The steps below are for **Nginx Proxy Manager** with the domain on
+Cloudflare; `rds.example.com` stands for your own hostname.
 
-1. In Nginx Proxy Manager, add a **Proxy Host**:
-   - Domain name: e.g. `rds.example.com`
-   - Scheme `http`, forward hostname/IP: the address of the Docker host,
-     forward port `8081`
-   - SSL: a certificate for the hostname (Let's Encrypt or a Cloudflare
-     origin certificate), *Force SSL* on
-   - Websockets and *Block Common Exploits* are not needed
-2. In Cloudflare, point the DNS record for the hostname at your proxy. With
-   the record set to *Proxied*, use SSL mode **Full (strict)**.
+**1. Nginx Proxy Manager:** add a **Proxy Host**.
+
+| Tab | Field | Value |
+|---|---|---|
+| Details | Domain Names | `rds.example.com` |
+| Details | Scheme | `http` |
+| Details | Forward Hostname / IP | The LAN address of the Docker host, e.g. `192.168.1.50` |
+| Details | Forward Port | `8081` (never `8080`: that is the web UI, which has no login) |
+| Details | Cache Assets, Block Common Exploits, Websockets Support | Off; none of them is needed |
+| SSL | SSL Certificate | A certificate for `rds.example.com`, issued the same way as for your other proxy hosts (Let's Encrypt, or a Cloudflare origin certificate) |
+| SSL | Force SSL | On |
+| SSL | HTTP/2 Support | Optional |
+
+No custom locations and no advanced configuration are needed.
 
 If Nginx Proxy Manager runs in Docker on the same host, the forward address
 is the host's LAN address, not `127.0.0.1`. Or put both containers on one
 Docker network and forward to `rds-guard-aggregator:8081`.
+
+**2. Cloudflare:**
+
+| Where | Setting |
+|---|---|
+| DNS | An `A` or `CNAME` record for `rds` that points to the same address as your other Nginx Proxy Manager hosts, set to **Proxied** |
+| SSL/TLS | Encryption mode **Full (strict)** |
+| Bots | If satellites get an HTTP 403 from Cloudflare, see [Bot protection](#bot-protection) |
+| Rate limiting | Optional, see [Rate limiting](#rate-limiting) |
+
+Nothing else is needed: no page rules, no cache settings and no tunnel.
 
 On a server with a public address, port 8081 would also be reachable
 directly, without HTTPS. Close it in the firewall, or set `INGEST_API_BIND`
@@ -123,6 +147,31 @@ No open ports on your router, and no public IP address needed.
     environment:
       - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
 ```
+
+### Check that it works
+
+From any computer on the internet:
+
+```bash
+curl -i https://rds.example.com/api/v1/ingest/heartbeat
+```
+
+The right answer is **HTTP 426** with the header `X-RDS-Guard-Protocol: 1`
+and the body `{"error": "unsupported_protocol", …}`. It means the request
+went all the way to the ingest port, which refused it because `curl` is not
+a satellite.
+
+| Answer | Meaning |
+|---|---|
+| 426 with `X-RDS-Guard-Protocol: 1` | Everything is connected |
+| 404 without that header, and `https://rds.example.com/` shows the web UI | The proxy forwards to port 8080. Change it to `8081` right away: the web UI has no login |
+| 502 or 504 | The proxy cannot reach the aggregator: check the forward address and port, and that the container runs (`docker compose ps`) |
+| 403 from Cloudflare | See [Bot protection](#bot-protection) |
+| 521, 525 or 526 from Cloudflare | Cloudflare cannot reach the proxy over HTTPS: check the DNS record, that port 443 reaches the proxy, and its certificate |
+
+Then add a node under **Nodes** in the web UI (see
+[Adding a satellite](#adding-a-satellite)). When its owner has started the
+satellite, the node turns green within a minute.
 
 ### Rate limiting
 
