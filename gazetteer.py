@@ -22,6 +22,8 @@ import logging
 import math
 import os
 import re
+from array import array
+from collections import Counter
 from dataclasses import dataclass, field
 
 log = logging.getLogger("rds-guard")
@@ -171,6 +173,10 @@ def _shared_suffix(a, b):
     return None
 
 
+def _pairs(key):
+    return {key[i:i + 2] for i in range(len(key) - 1)}
+
+
 def _norm(text):
     return re.sub(r"\s+", " ", _PREFIX.sub("", text.lower().strip()))
 
@@ -216,9 +222,15 @@ class Gazetteer:
     def __post_init__(self):
         self._by_name = {}
         self._keys = []
-        for p in self.places:
+        # Letter pairs of each sound key -> entries, so a fuzzy search only
+        # compares names that share enough pairs with what was heard
+        self._pairs = {}
+        for i, p in enumerate(self.places):
             self._by_name.setdefault(_norm(p.name), []).append(p)
-            self._keys.append(sound_key(p.name))
+            key = sound_key(p.name)
+            self._keys.append(key)
+            for pair in _pairs(key):
+                self._pairs.setdefault(pair, array("I")).append(i)
 
     def __len__(self):
         return len(self.places)
@@ -277,7 +289,16 @@ class Gazetteer:
         if len(key) >= 3:
             sm = difflib.SequenceMatcher(autojunk=False)
             sm.set_seq2(key)
-            for p, k in zip(self.places, self._keys):
+            wanted = _pairs(key)
+            hits = Counter()
+            for pair in wanted:
+                hits.update(self._pairs.get(pair, ()))
+            # Names this alike share most letter pairs; a third is a safe floor
+            need = max(1, len(wanted) // 3)
+            for i, n in hits.items():
+                if n < need:
+                    continue
+                p, k = self.places[i], self._keys[i]
                 if p in found or abs(len(k) - len(key)) > 3:
                     continue
                 sm.set_seq1(k)
