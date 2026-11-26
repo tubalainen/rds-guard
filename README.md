@@ -193,7 +193,7 @@ sent to the aggregator.
    the *Debug* page of the web UI (link in the footer) shows your station and a decode rate above 5 grp/s.
 2. Ask the aggregator's owner for three values: the aggregator address, a
    node token, and the name to use for your node. They create the token in the
-   aggregator's web UI (*Noder → Lägg till nod*) and get the lines to send you.
+   aggregator's web UI (*Admin → Noder → Lägg till nod*) and get the lines to send you.
 
 No ports need to be opened on your router: the satellite only makes outbound
 HTTPS requests.

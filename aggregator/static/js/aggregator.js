@@ -44,9 +44,17 @@ const Aggregator = (() => {
         return data.stations.map((s) => ({ pi: s.pi, ps: s.station_ps }));
     }
 
+    /** Node names. The node list is admin-only, so without a login the
+     *  names come from the stations (nodes that have sent events). */
     async function loadNodes() {
-        const data = await api('GET', '/nodes');
-        return data.nodes.map((n) => n.name);
+        try {
+            const data = await api('GET', '/nodes');
+            return data.nodes.map((n) => n.name);
+        } catch (e) {
+            if (e.status !== 401 && e.status !== 403) throw e;
+            const data = await api('GET', '/stations');
+            return [...new Set(data.stations.flatMap((s) => s.nodes || []))].sort();
+        }
     }
 
     // -------------------------------------------------------------- nodes
@@ -172,8 +180,7 @@ const Aggregator = (() => {
             idOf: (ev) => ev.event_uid,
             loadStations,
             loadNodes,
-            views: { noder: nodesView },
-            extraNav: [['noder', 'Noder', RDSUI.ICON.nodes]],
+            adminSections: [['noder', 'Noder', nodesView]],
         });
         poll();
         setInterval(() => { if (!document.hidden) poll(); }, 15000);

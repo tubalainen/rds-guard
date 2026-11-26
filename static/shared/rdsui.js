@@ -7,12 +7,13 @@
  *   #/event/<id>           one event (push messages link here)
  *   #/admin[/aviseringar[/<id>|/ny]]  password-protected admin (ADMIN_PASSWORD);
  *                          first section: push rules sent over MQTT
- * plus views the host page registers (debug, noder).
+ * plus views the host page registers (debug) and admin sections (noder).
  *
  * The host page calls RDSUI.start({...}) with what differs between the two
  * apps: API prefix, how an event is identified, stations and nodes, plus
  * optional extras:
  *   views: {name: async (root, route, ctx) => {}}, extraNav: [[name, label, svg]]
+ *   adminSections: [[name, label, view]]  extra tabs under #/admin
  *   cardMeta: (ev) => html       extra label in every event card's meta row
  *   eventExtras: async (ev, el, ctx) => {}   fills an empty element on #/event
  */
@@ -203,6 +204,11 @@ const RDSUI = (() => {
 
     async function route() {
         const r = parseHash();
+        if (!views[r.name] && adminSections.some(([n]) => n === r.name)) {
+            // old address of a section that has moved into admin
+            location.replace(`#/admin/${location.hash.replace(/^#\/?/, '')}`);
+            return;
+        }
         const view = views[r.name] || views.arkiv;
         const seq = ++routeSeq;
         if (current && current.cleanup) current.cleanup();
@@ -1206,18 +1212,12 @@ const RDSUI = (() => {
         }
     };
 
-    // Old address of the push rules, from before they moved into admin
-    views.aviseringar = async (root, r) => {
-        const rest = r.args.map(encodeURIComponent).join('/');
-        const qs = r.params.toString();
-        location.replace(`#/admin/aviseringar${rest ? `/${rest}` : ''}${qs ? `?${qs}` : ''}`);
-    };
-
     // ------------------------------------------------------------------ start
 
     function start(options) {
         Object.assign(cfg, options);
         Object.assign(views, options.views || {});
+        adminSections.push(...(options.adminSections || []));
         const nav = [
             ['arkiv', 'Arkiv', ICON.calendar],
             ['sok', 'Sök', ICON.searchNav],

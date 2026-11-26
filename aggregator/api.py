@@ -1,6 +1,6 @@
 """Web UI, read API and node admin — served on the LAN port only.
 
-Only the admin pages (push rules) have a login, see admin_auth and
+Only the admin pages (push rules, nodes) have a login, see admin_auth and
 ADMIN_PASSWORD. The rest has none: keep this port off the internet (a reverse proxy or
 tunnel must only ever forward to the ingest port, never to this one). Write
 requests must be JSON and same-origin, so a web page on another site
@@ -25,7 +25,7 @@ STATIC_DIR = pathlib.Path(__file__).parent / "static"
 SHARED_DIR = pathlib.Path(__file__).resolve().parent.parent / "static" / "shared"
 
 ADMIN = admin_auth.AdminAuth(lambda: config.ADMIN_PASSWORD,
-                             protected=("/api/v1/notify",),
+                             protected=("/api/v1/notify", "/api/v1/nodes"),
                              cookie_name="rdsguard_agg_admin")
 
 PIPELINE = web.AppKey("pipeline", object)
