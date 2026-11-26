@@ -700,9 +700,27 @@ that the traffic desk means, are added by hand in
 name there replaces OpenStreetMap entries of the same name within 5 km and
 wins over the others.
 
+### Roads
+
+A **road registry** is bundled too (`geodata/roads-se.tsv.gz`): where
+Sweden's numbered roads run (E-roads, riksvägar and länsvägar, simplified
+to within 20 m), from OpenStreetMap. When a message names a road ("riksväg
+61 vid Kärr") it is used to:
+
+- pick the place next to that road when several have the name
+- put the pin on the road, not beside it (it moves at most as far as the
+  circle reaches)
+- point the direction arrow along the road, the way that leads toward the
+  place the announcer names ("i riktning mot Grums")
+
+It is all local and free. A road number the registry does not know near
+the receiver (a misheard one) changes nothing.
+
 The map tiles come from `tile.openstreetmap.org`, loaded by your browser.
-Refresh the place-name registry now and then with
-`python3 tools/build_gazetteer.py` (needs the Overpass API).
+Refresh the registries now and then with `python3 tools/build_gazetteer.py`
+and `python3 tools/build_roads.py` (both need the Overpass API, set
+`OVERPASS_URL` for another server; the roads take a while, about an hour,
+and continue where they stopped if interrupted).
 
 ## REST API
 
@@ -892,12 +910,15 @@ rds-guard/
 ├── audio_recorder.py     # Recording lifecycle, ffmpeg conversion
 ├── transcriber.py        # Speech-to-text: ElevenLabs Scribe, local faster-whisper or remote ASR
 ├── gazetteer.py          # Place-name registry: lookup, sound-alike correction (shared)
+├── roads.py              # Road registry: where the numbered roads run (shared)
 ├── geolocate.py          # Map engines (rules, Claude), placement, incidents (shared)
 ├── geo_service.py        # Registry per node area + engine (shared with the aggregator)
 ├── trafikverket.py       # Trafikverket's deviations: feed and storage (shared with the aggregator)
 ├── geodata/gazetteer-se.tsv.gz # Swedish place names from OpenStreetMap (ODbL)
+├── geodata/roads-se.tsv.gz     # Swedish numbered roads from OpenStreetMap (ODbL)
 ├── tools/convert_kb_whisper.py # Build step: converts KB-Whisper strict for faster-whisper
-├── tools/build_gazetteer.py    # Rebuilds geodata/ from OpenStreetMap
+├── tools/build_gazetteer.py    # Rebuilds the place names in geodata/ from OpenStreetMap
+├── tools/build_roads.py        # Rebuilds the roads in geodata/ from OpenStreetMap
 ├── tools/measure_geolocation.py # Measures the map engines on your own messages
 ├── status.py             # Status snapshot (/api/status + uplink heartbeat)
 ├── uplink.py             # Satellite → aggregator sender (outbox + heartbeat)

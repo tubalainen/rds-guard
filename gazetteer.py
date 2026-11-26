@@ -233,6 +233,7 @@ def county_code(region):
 @dataclass
 class Gazetteer:
     places: list = field(default_factory=list)
+    roads: object = None            # roads.Roads, where the numbered roads run
 
     def __post_init__(self):
         self._by_name = {}
@@ -251,14 +252,17 @@ class Gazetteer:
         return len(self.places)
 
     @classmethod
-    def load(cls, path=None, centers=None, radius_km=250, local_path=None):
+    def load(cls, path=None, centers=None, radius_km=250, local_path=None,
+             roads_path=None):
         """Read the registry, keeping names within radius_km of any center.
 
         centers=None keeps the whole country. The hand-made places
         (places-local.tsv) are added when the bundled registry is read, or
         from local_path; an OSM name next to a local one with the same name
-        is dropped.
+        is dropped. The road registry (roads.py) comes along the same way:
+        the bundled one with the bundled registry, or from roads_path.
         """
+        bundled = not (path or os.environ.get("GAZETTEER_PATH"))
         if local_path is None and not (path or os.environ.get("GAZETTEER_PATH")):
             local_path = os.environ.get("GAZETTEER_LOCAL_PATH") or LOCAL_PATH
         path = path or os.environ.get("GAZETTEER_PATH") or DEFAULT_PATH
@@ -291,7 +295,12 @@ class Gazetteer:
         places += local
         log.info("Gazetteer: %d place names loaded from %s (%d added by hand)",
                  len(places), path, len(local))
-        return cls(places)
+        road_reg = None
+        if roads_path or bundled:
+            import roads as roads_mod
+            road_reg = roads_mod.Roads.load(roads_path, centers=centers,
+                                            radius_km=radius_km)
+        return cls(places, roads=road_reg or None)
 
     # -- lookups ------------------------------------------------------------
 

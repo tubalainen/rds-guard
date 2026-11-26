@@ -34,6 +34,7 @@ import time
 from dataclasses import dataclass, field
 
 import gazetteer as gz
+from roads import along as roads_along
 
 log = logging.getLogger("rds-guard")
 
@@ -46,6 +47,10 @@ EVIDENCE_MAX = 400
 # were never placed: the receiver's location was not known then
 PENDING_STATUSES = ("no_location",)
 DEFAULT_AREA_KM = 200         # names further than this from the node are ignored
+ROAD_NEAR_KM = 1.5            # a place this close to the named road is on it
+ROAD_FAR_KM = 8               # further than this: not the place on that road
+ROAD_BONUS = 0.03             # how much being on (or off) the road counts
+ROAD_SNAP_KM = 8              # the pin moves at most this far onto the road
 
 # ---------------------------------------------------------------------------
 # Result types
@@ -332,6 +337,21 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
         return gaz.search(name, near=center, max_km=area_km, limit=8,
                           min_score=FUZZY_MIN if fuzzy else 1.01, kinds=kinds)
 
+    # Where the road the message names runs (roads.py), when it is known
+    # near us: a place next to that road is the one meant
+    roads = getattr(gaz, "roads", None)
+    if not (roads and mention.road and roads.nearest(
+            mention.road, center, max_km=area_km or DEFAULT_AREA_KM)):
+        roads = None
+
+    def by_road(p):
+        if roads is None:
+            return 0.0
+        d = roads.distance_km(mention.road, p.point, max_km=ROAD_FAR_KM)
+        if d is None:
+            return -ROAD_BONUS
+        return ROAD_BONUS if d <= ROAD_NEAR_KM else 0.0
+
     # 1. The stretch "mellan A och B" (the shortest one that resolves)
     seg = None
     for a_name, b_name in (mention.between_all or
@@ -340,7 +360,8 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
         pairs = [(a, b) for a in ca for b in cb
                  if 1 <= gz.km(a.place.point, b.place.point) <= 50]
         best = _best(pairs, lambda ab: (
-            ab[0].score + ab[1].score + 0.03 * (ab[0].place.weight + ab[1].place.weight),
+            ab[0].score + ab[1].score + 0.03 * (ab[0].place.weight + ab[1].place.weight)
+            + by_road(ab[0].place) + by_road(ab[1].place),
             -gz.km(ab[0].place.point, ab[1].place.point)))
         if best and (seg is None or gz.km(best[0].place.point, best[1].place.point)
                      < gz.km(seg[0].place.point, seg[1].place.point)):
@@ -366,7 +387,8 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
         if seg:
             ms = [m for m in ms if gz.segment_km(m.place.point, seg[0].place.point,
                                                  seg[1].place.point) <= 15]
-        town = _best(ms, lambda m: (m.score + 0.03 * m.place.weight,
+        town = _best(ms, lambda m: (m.score + 0.03 * m.place.weight
+                                    + by_road(m.place),
                                     -gz.km(center, m.place.point)))
         if town is None:
             # "E18 vid Bergviksmotet": the word after the road is a place
@@ -397,7 +419,8 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
                 ms = [m for m in look(name, pins=False) if m.exact
                       and near_anchor(m.place, tw) and m.place not in taken]
             m = _best(ms, lambda m: (m.score + 0.02 * m.place.weight
-                                     - 0.002 * gz.km(anchor(tw), m.place.point)))
+                                     - 0.002 * gz.km(anchor(tw), m.place.point)
+                                     + by_road(m.place)))
             if m:
                 found.append(m)
                 taken.add(m.place)
@@ -473,6 +496,15 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
     if radius > MAX_RADIUS_M:
         return None
 
+    # On the road: the incident is on the road the message names, so the
+    # pin goes to the nearest point of it inside the circle
+    on_road = None
+    if roads is not None:
+        on_road = roads.nearest(mention.road, point,
+                                max_km=min(radius / 1000, ROAD_SNAP_KM))
+        if on_road:
+            point = on_road[:2]
+
     pl = Placement(lat=round(point[0], 5), lon=round(point[1], 5),
                    radius_m=int(round(radius, -1)), road=mention.road,
                    what=mention.what, both_directions=mention.both_directions,
@@ -496,7 +528,10 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
             if m:
                 b = (gz.bearing(m.place.point, point) if reverse
                      else gz.bearing(point, m.place.point))
-                pl.bearing = int(round(b))
+                if on_road:
+                    # Along the road, the way that leads toward the place
+                    b = roads_along(on_road[3], b)
+                pl.bearing = int(round(b)) % 360
                 break
     return pl
 
