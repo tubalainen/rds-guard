@@ -33,7 +33,27 @@ def _conn():
         _local.conn.row_factory = sqlite3.Row
         _local.conn.execute("PRAGMA journal_mode=WAL")
         _local.conn.execute("PRAGMA busy_timeout=5000")
+        _local.conn.create_function("rg_contains", 4, _contains,
+                                    deterministic=True)
     return _local.conn
+
+
+def _contains(radiotext, transcription, station_ps, word):
+    """SQL helper for search: does any text field contain word?
+
+    Done in Python rather than with LIKE because RadioText is stored as
+    JSON (å, ä, ö escaped) and LIKE only ignores case for ASCII letters.
+    """
+    needle = (word or "").casefold()
+    if not needle:
+        return 1
+    parts = [transcription or "", station_ps or ""]
+    try:
+        rt = json.loads(radiotext) if radiotext else []
+        parts.extend(str(r) for r in (rt if isinstance(rt, list) else [rt]))
+    except (TypeError, ValueError):
+        parts.append(radiotext or "")
+    return 1 if any(needle in p.casefold() for p in parts) else 0
 
 
 def init_db(db_path=None):
@@ -84,6 +104,8 @@ def init_db(db_path=None):
         );
     """)
     conn.commit()
+
+    _init_notify_tables(conn)
 
     log.info("Event store initialized at %s", _DB_PATH)
 
@@ -162,8 +184,14 @@ def end_event(event_id, ended_at, duration_sec, radiotext_list=None,
     _wake()
 
 
-def query_events(event_type=None, since=None, limit=50, offset=0):
-    """Query events with optional filters. Returns (rows, total_count)."""
+def query_events(event_type=None, since=None, limit=50, offset=0,
+                 q=None, start=None, end=None, pi=None):
+    """Query events with optional filters. Returns (rows, total_count).
+
+    q: free text, every word must appear in the RadioText, transcription or
+    station name. start/end: UTC bounds ('YYYY-MM-DDTHH:MM:SS') on when the
+    broadcast started.
+    """
     conn = _conn()
     where = []
     params = []
@@ -178,6 +206,19 @@ def query_events(event_type=None, since=None, limit=50, offset=0):
         where.append("created_at > ?")
         params.append(since)
 
+    if start:
+        where.append("COALESCE(started_at, created_at) >= ?")
+        params.append(start)
+    if end:
+        where.append("COALESCE(started_at, created_at) < ?")
+        params.append(end)
+    if pi:
+        where.append("pi = ?")
+        params.append(pi)
+    for word in (q or "").split()[:8]:
+        where.append("rg_contains(radiotext, transcription, station_ps, ?)")
+        params.append(word)
+
     where_clause = " WHERE " + " AND ".join(where) if where else ""
 
     # Total count
@@ -188,7 +229,8 @@ def query_events(event_type=None, since=None, limit=50, offset=0):
 
     # Paginated results
     rows = conn.execute(
-        f"SELECT * FROM events{where_clause} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        f"SELECT * FROM events{where_clause} "
+        "ORDER BY COALESCE(started_at, created_at) DESC, id DESC LIMIT ? OFFSET ?",
         params + [min(limit, 200), offset]
     ).fetchall()
 
@@ -502,3 +544,211 @@ def outbox_purge(max_age_hours):
             log.warning("Uplink: dropped %d queued items older than %dh",
                         cur.rowcount, max_age_hours)
         return cur.rowcount
+
+
+# ---------------------------------------------------------------------------
+# Push notification rules and their log
+# ---------------------------------------------------------------------------
+#
+# A rule is stored as JSON (validated by notify_rules.validate before it gets
+# here). The log keeps one row per message sent, or a single 'no_match' row
+# when an event matched no rule, so the archive can show "push skickad" or
+# "ingen push" on every event.
+
+NOTIFY_SENT = "sent"
+NOTIFY_FAILED = "failed"
+NOTIFY_MQTT_OFF = "mqtt_off"
+NOTIFY_NO_MATCH = "no_match"
+
+
+def _init_notify_tables(conn):
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key         TEXT PRIMARY KEY,
+            value       TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS notify_rules (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            data        TEXT NOT NULL,
+            created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now')),
+            updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS notify_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id    INTEGER,
+            rule_id     INTEGER,
+            rule_name   TEXT,
+            topic       TEXT,
+            title       TEXT,
+            status      TEXT NOT NULL,
+            test        INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_notify_log_event ON notify_log(event_id);
+        CREATE INDEX IF NOT EXISTS idx_notify_log_created ON notify_log(created_at);
+    """)
+    conn.commit()
+
+
+def seed_rules_once(defaults):
+    """Insert the default rules the first time the store is used."""
+    with _lock:
+        conn = _conn()
+        done = conn.execute(
+            "SELECT value FROM settings WHERE key = 'notify_seeded'").fetchone()
+        if done:
+            return False
+        for rule in defaults:
+            conn.execute("INSERT INTO notify_rules (data) VALUES (?)",
+                         (json.dumps(rule),))
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('notify_seeded', '1')")
+        conn.commit()
+    return True
+
+
+def _rule_dict(row):
+    rule = json.loads(row["data"])
+    rule["id"] = row["id"]
+    rule["created_at"] = row["created_at"]
+    rule["updated_at"] = row["updated_at"]
+    return rule
+
+
+def list_rules():
+    conn = _conn()
+    rows = conn.execute("SELECT * FROM notify_rules ORDER BY id").fetchall()
+    return [_rule_dict(r) for r in rows]
+
+
+def get_rule(rule_id):
+    conn = _conn()
+    row = conn.execute("SELECT * FROM notify_rules WHERE id = ?",
+                       (rule_id,)).fetchone()
+    return _rule_dict(row) if row else None
+
+
+def create_rule(rule):
+    with _lock:
+        conn = _conn()
+        cur = conn.execute("INSERT INTO notify_rules (data) VALUES (?)",
+                           (json.dumps(rule),))
+        conn.commit()
+        rule_id = cur.lastrowid
+    return get_rule(rule_id)
+
+
+def update_rule(rule_id, rule):
+    with _lock:
+        conn = _conn()
+        cur = conn.execute(
+            "UPDATE notify_rules SET data = ?, "
+            "updated_at = strftime('%Y-%m-%dT%H:%M:%S','now') WHERE id = ?",
+            (json.dumps(rule), rule_id))
+        conn.commit()
+        if cur.rowcount == 0:
+            return None
+    return get_rule(rule_id)
+
+
+def delete_rule(rule_id):
+    with _lock:
+        conn = _conn()
+        cur = conn.execute("DELETE FROM notify_rules WHERE id = ?", (rule_id,))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def log_notification(event_id, status, rule=None, topic=None, title=None,
+                     test=False):
+    with _lock:
+        conn = _conn()
+        conn.execute(
+            "INSERT INTO notify_log (event_id, rule_id, rule_name, topic, "
+            "title, status, test) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (event_id, rule.get("id") if rule else None,
+             rule.get("name") if rule else None, topic, title, status,
+             1 if test else 0))
+        conn.commit()
+
+
+def notify_log_recent(limit=30):
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT l.*, e.station_ps, e.started_at, e.radiotext "
+        "FROM notify_log l LEFT JOIN events e ON e.id = l.event_id "
+        "WHERE l.status != ? ORDER BY l.id DESC LIMIT ?",
+        (NOTIFY_NO_MATCH, limit)).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["test"] = bool(d["test"])
+        try:
+            d["radiotext"] = json.loads(d["radiotext"]) if d["radiotext"] else []
+        except (TypeError, ValueError):
+            d["radiotext"] = []
+        out.append(d)
+    return out
+
+
+def notify_for_events(event_ids):
+    """event id -> list of log rows (oldest first) for those events."""
+    ids = [int(i) for i in event_ids]
+    if not ids:
+        return {}
+    conn = _conn()
+    out = {}
+    for chunk in range(0, len(ids), 500):
+        part = ids[chunk:chunk + 500]
+        rows = conn.execute(
+            "SELECT event_id, rule_id, rule_name, topic, status, created_at "
+            f"FROM notify_log WHERE test = 0 AND event_id IN "
+            f"({','.join('?' * len(part))}) ORDER BY id", part).fetchall()
+        for r in rows:
+            out.setdefault(r["event_id"], []).append(
+                {k: r[k] for k in ("rule_id", "rule_name", "topic",
+                                   "status", "created_at")})
+    return out
+
+
+def purge_notify_log(days):
+    cutoff = time.strftime("%Y-%m-%dT%H:%M:%S",
+                           time.gmtime(time.time() - days * 86400))
+    with _lock:
+        conn = _conn()
+        conn.execute("DELETE FROM notify_log WHERE created_at < ?", (cutoff,))
+        conn.commit()
+
+
+def calendar_events(since):
+    """Light rows for the archive calendar and statistics (newest first)."""
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT id, type, pi, station_ps, started_at, created_at, duration_sec "
+        "FROM events WHERE created_at >= ? "
+        "ORDER BY COALESCE(started_at, created_at) DESC, id DESC",
+        (since,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def events_for_preview(since):
+    """Rows with the text fields a rule looks at, newest first."""
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT id, type, pi, station_ps, frequency, radiotext, transcription, "
+        "started_at, created_at, duration_sec FROM events "
+        "WHERE created_at >= ? AND state NOT IN ('start', 'update', 'active') "
+        "ORDER BY COALESCE(started_at, created_at) DESC, id DESC",
+        (since,)).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["radiotext"] = json.loads(d["radiotext"]) if d["radiotext"] else []
+        except (TypeError, ValueError):
+            d["radiotext"] = []
+        out.append(d)
+    return out

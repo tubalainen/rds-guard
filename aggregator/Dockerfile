@@ -30,10 +30,11 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 # Bundled Swedish Whisper model (see the model stage above)
 COPY --from=model /opt/models/ /opt/models/
 
-# Shared with the satellite: Whisper transcription (local or remote) and
-# the web UI's base theme
+# Shared with the satellite: Whisper transcription (local or remote), the
+# push notification rules and the web UI
 COPY transcriber.py /app/transcriber.py
-COPY static/css/style.css /app/static/css/style.css
+COPY notify_rules.py /app/notify_rules.py
+COPY static/shared/ /app/static/shared/
 # Code and UI only — never .env, compose files or local data
 COPY aggregator/*.py /app/aggregator/
 COPY aggregator/static/ /app/aggregator/static/

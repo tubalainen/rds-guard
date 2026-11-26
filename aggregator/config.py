@@ -23,6 +23,11 @@ INGEST_PORT = _int(os.environ.get("INGEST_PORT"), 8081)
 WEB_PORT = _int(os.environ.get("WEB_PORT"), 8080)
 # Public address satellites use (shown in the setup snippet for new nodes)
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "").strip().rstrip("/")
+# Address of this web UI on your network, e.g. http://192.168.1.5:8080.
+# Optional: when set, push messages carry a link to the event and its audio.
+WEB_UI_URL = os.environ.get("WEB_UI_URL", "").strip().rstrip("/")
+# Push notification rules check days and times in this time zone
+NOTIFY_TIMEZONE = os.environ.get("NOTIFY_TIMEZONE", "Europe/Stockholm")
 
 # --- Storage ---
 DATA_DIR = os.environ.get("DATA_DIR", "/data")

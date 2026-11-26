@@ -19,6 +19,7 @@ import time
 
 import config
 import event_store
+import notifier
 
 logging.basicConfig(
     level=logging.INFO,
@@ -394,6 +395,7 @@ class RulesEngine:
                 else:
                     # No audio → send alert immediately
                     _mqtt_pub(mqtt_client, "alert", payload)
+                    _notify(event_id)
                 broadcast_ws({"topic": "alert", "payload": payload, "timestamp": ts})
 
     def on_radiotext(self, mqtt_client, pi, rt, data):
@@ -461,6 +463,8 @@ class RulesEngine:
                 event_id, "recording")
 
         log.warning("EVENT emergency PTY alarm on %s: %s", pi, pty)
+        # VMA push goes out at once, not after the broadcast
+        _notify(event_id)
         # Alert is deferred until event ends + transcription completes
         broadcast_ws({"topic": "alert", "payload": payload, "timestamp": ts})
 
@@ -698,6 +702,8 @@ def _fire_deferred_alert_timeout(event_id):
         log.warning("Alert timeout for event #%d — sending without "
                     "transcription", event_id)
         _mqtt_pub(mqtt_client, "alert", payload)
+        if payload.get("event_type") == "traffic_announcement":
+            _notify(event_id)
 
 
 def _fire_deferred_alert(event_id, transcribed_text, error=False):
@@ -718,6 +724,8 @@ def _fire_deferred_alert(event_id, transcribed_text, error=False):
             payload["transcribed_text"] = transcribed_text
             payload["transcription_status"] = "done"
         _mqtt_pub(mqtt_client, "alert", payload)
+        if payload.get("event_type") == "traffic_announcement":
+            _notify(event_id)
         return True
     return False
 
@@ -832,14 +840,28 @@ def _mqtt_pub(client, topic, payload):
     """
     c = client  # snapshot the reference
     if not _mqtt_available or c is None:
-        return
+        return None
     try:
         full_topic = f"{config.MQTT_TOPIC_PREFIX}/{topic}"
         msg = json.dumps(payload)
-        c.publish(full_topic, msg, qos=1, retain=False)
+        info = c.publish(full_topic, msg, qos=1, retain=False)
         log.debug("PUB %s %s", full_topic, msg[:120])
+        return getattr(info, "rc", 0) == 0
     except Exception:
-        pass  # client may have disconnected during shutdown
+        return False  # client may have disconnected during shutdown
+
+
+def _notify_publish(topic, payload):
+    """Publisher for push messages: None when MQTT is not configured."""
+    if not config.MQTT_ENABLED or not config.MQTT_HOST:
+        return None
+    return bool(_mqtt_pub(mqtt_client, topic, payload))
+
+
+def _notify(event_id):
+    """Check the push rules for a finished event (own thread)."""
+    if event_id:
+        notifier.dispatch_async(event_id, _notify_publish)
 
 
 def pub(client, topic, payload, qos=None, retain=False):
@@ -1251,6 +1273,7 @@ def retention_purge(stop_event):
             break
         try:
             event_store.purge_old_events(days)
+            event_store.purge_notify_log(days)
         except Exception:
             log.exception("Error during retention purge")
 
@@ -1400,6 +1423,7 @@ def main():
     # --- 1. Initialize event store (fast, ~10ms) ---
     log.info("Initializing event store...")
     event_store.init_db()
+    notifier.init()
 
     # Satellite mode: queue event changes for the aggregator.  Enabled before
     # stale events are closed so that their end is forwarded too.

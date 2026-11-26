@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import config, store
+from . import config, notifier, store
 from .ingest import Hooks
 from .mqtt_out import topic_slug
 
@@ -115,6 +115,10 @@ class Pipeline(Hooks):
     # -- hooks (event loop thread; must be quick) ---------------------------
 
     def on_event(self, row, prev_state):
+        if (row["type"] == "emergency" and row["state"] in store.ACTIVE_STATES
+                and prev_state not in store.ACTIVE_STATES):
+            # VMA push goes out at once, not after the broadcast
+            notifier.dispatch_async(row, self.notify_publish)
         if row["type"] == "traffic":
             was_active = prev_state in store.ACTIVE_STATES
             is_active = row["state"] in store.ACTIVE_STATES
@@ -182,6 +186,22 @@ class Pipeline(Hooks):
             return False
         return self._mqtt.publish(topic, payload, qos=1, retain=retain)
 
+    def notify_publish(self, topic, payload):
+        """Publisher for push messages: None when MQTT is not configured."""
+        if self._mqtt is None:
+            return None
+        return self._mqtt.publish(topic, payload, qos=1)
+
+    def _notify_after_alert(self, row):
+        # Emergencies were pushed when they started; only one that arrived
+        # already ended (node was offline) is pushed here.
+        if row["type"] == "emergency" and store.has_notification(row["event_uid"]):
+            return
+        try:
+            notifier.dispatch(row, self.notify_publish)
+        except Exception:
+            log.exception("Push dispatch failed for %s", row["event_uid"])
+
     def _publish_ta(self, row, active):
         self._publish(f"{row['pi']}/traffic/ta", {
             "active": active,
@@ -221,6 +241,7 @@ class Pipeline(Hooks):
         if now - self._last_purge >= 3600:
             self._last_purge = now
             remove_audio_files(store.purge_old_events(config.EVENT_RETENTION_DAYS))
+            store.purge_notify_log(config.EVENT_RETENTION_DAYS)
 
     def _sweep_alerts(self, now):
         engine_on = self._transcriber is not None
@@ -233,9 +254,11 @@ class Pipeline(Hooks):
                 continue
             if self._mqtt is None:
                 store.mark_alert(row["event_uid"], "mqtt_disabled")
+                self._notify_after_alert(row)
                 continue
             if self._publish("alert", alert_payload(row, tstatus)):
                 store.mark_alert(row["event_uid"], "published")
+                self._notify_after_alert(row)
                 log.info("Alert published for %s from %s (%s)",
                          row.get("station_ps") or row["pi"],
                          row.get("node_name"), tstatus)
