@@ -806,6 +806,8 @@ def save_geolocation(event_id, result, status, at=None):
             ids = geolocate.merge_placements(
                 conn, result.placements, event_id, now,
                 _iso_hours_ago(geolocate.INCIDENT_HOURS, now), result.engine)
+        if result is not None:
+            geolocate.save_areas(conn, result.areas, event_id, now, result.engine)
             row = conn.execute("SELECT transcription FROM events WHERE id = ?",
                                (event_id,)).fetchone()
             text = result.corrected_text or (row[0] if row else "") or ""
@@ -825,10 +827,35 @@ def open_incidents(hours=geolocate.LINK_HOURS, at=None):
         _conn(), _iso_hours_ago(hours, at), _norm_ts(at) if at else None)
 
 
+def list_areas(hours=geolocate.INCIDENT_HOURS):
+    """Area warnings of the last hours; hours=None: all that are stored."""
+    return geolocate.list_areas(
+        _conn(), _iso_hours_ago(hours) if hours else None)
+
+
 def list_incidents(hours=geolocate.INCIDENT_HOURS):
     """Incidents of the last hours; hours=None: all that are stored."""
     return geolocate.list_incidents(
         _conn(), _iso_hours_ago(hours) if hours else None)
+
+
+def get_incident(incident_id):
+    """One incident with its broadcasts, or None."""
+    return geolocate.get_incident(_conn(), incident_id)
+
+
+def event_briefs(event_ids):
+    """{id: {id, started_at, station_ps, audio_path}} for the given events,
+    in one query per 500 ids (for incident timelines)."""
+    ids = sorted({int(i) for i in event_ids if str(i).isdigit()})
+    out = {}
+    for n in range(0, len(ids), 500):
+        part = ids[n:n + 500]
+        for r in _conn().execute(
+                "SELECT id, started_at, station_ps, audio_path FROM events "
+                f"WHERE id IN ({','.join('?' * len(part))})", part):
+            out[r["id"]] = dict(r)
+    return out
 
 
 _GEO_PENDING_WHERE = (
@@ -854,6 +881,31 @@ def geo_pending():
             d["radiotext"] = []
         out.append(d)
     return out
+
+
+_GEO_PLACEABLE_WHERE = (
+    "transcription IS NOT NULL AND TRIM(transcription) != '' "
+    "AND transcription_status = 'done'")
+
+
+def geo_placeable_count():
+    """Transcribed messages a rebuild would place again."""
+    return _conn().execute(
+        "SELECT COUNT(*) FROM events WHERE " + _GEO_PLACEABLE_WHERE).fetchone()[0]
+
+
+def reset_geolocation():
+    """Delete the incidents and mark every transcribed message as never
+    placed, so the backfill places them all again, oldest first.
+    Returns (incidents deleted, messages to place)."""
+    with _lock:
+        conn = _conn()
+        gone = geolocate.reset_incidents(conn)
+        cur = conn.execute(
+            "UPDATE events SET geo_status = NULL, geo_engine = NULL WHERE "
+            + _GEO_PLACEABLE_WHERE)
+        conn.commit()
+    return gone, cur.rowcount
 
 
 def geo_pending_count():

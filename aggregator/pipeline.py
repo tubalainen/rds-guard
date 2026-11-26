@@ -207,7 +207,7 @@ class Pipeline(Hooks):
             result = self._geo.locate(text, place.point, location,
                                       row.get("radiotext"),
                                       store.open_incidents(place.point))
-            status = "done" if result and result.placements else "none"
+            status = "done" if result and (result.placements or result.areas) else "none"
             store.save_geolocation(uid, result, status)
             if result:
                 log.info("Event %s from %s placed with %s: %s", uid,
@@ -234,7 +234,7 @@ class Pipeline(Hooks):
         result = self._geo.locate(row["transcription"], place.point, location,
                                   row.get("radiotext"),
                                   store.open_incidents(place.point, at=row["at"]))
-        status = "done" if result and result.placements else "none"
+        status = "done" if result and (result.placements or result.areas) else "none"
         store.save_geolocation(row["event_uid"], result, status, at=row["at"])
         return bool(result and result.placements)
 
@@ -261,6 +261,28 @@ class Pipeline(Hooks):
     def start_backfill(self):
         if self._geo is None or self._geo.engine == "none":
             return False
+        return self.backfill.start()
+
+    def rebuild_status(self):
+        """What a rebuild of the map would do: messages, engine, cost, and
+        how far placing has come."""
+        import geo_service
+        bf = self.backfill_status()
+        out = geo_service.rebuild_estimate(bf["engine"], store.geo_placeable_count())
+        out.update(available=bf["available"], running=bf["running"], backfill=bf)
+        if bf.get("reason"):
+            out["reason"] = bf["reason"]
+        return out
+
+    def start_rebuild(self):
+        """Delete every incident and place all stored messages again, oldest
+        first, with the current engine. False if it cannot run now."""
+        bf = self.backfill_status()
+        if not bf["available"] or bf["running"]:
+            return False
+        gone, todo = store.reset_geolocation()
+        log.info("Rebuilding the map: %d incidents deleted, %d messages to "
+                 "place with %s", gone, todo, bf["engine"])
         return self.backfill.start()
 
     def requeue_pending(self):

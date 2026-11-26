@@ -976,7 +976,7 @@ def _geolocate(event_id, text):
         if result is None:
             event_store.save_geolocation(event_id, None, "none")
             return None
-        status = "done" if result.placements else "none"
+        status = "done" if result.placements or result.areas else "none"
         ids = event_store.save_geolocation(event_id, result, status)
         result.incident_ids = ids
         log.info("Event %d placed with %s: %s", event_id, result.engine,
@@ -1008,7 +1008,7 @@ def _place_older(item):
     if result is None:
         event_store.save_geolocation(item["id"], None, "none", at=item["at"])
         return False
-    status = "done" if result.placements else "none"
+    status = "done" if result.placements or result.areas else "none"
     event_store.save_geolocation(item["id"], result, status, at=item["at"])
     return bool(result.placements)
 
@@ -1045,6 +1045,32 @@ def backfill_status():
 def start_backfill():
     if not backfill_status()["available"]:
         return False
+    return _get_backfill().start()
+
+
+def rebuild_status():
+    """What a rebuild of the map would do: messages, engine, cost, and how
+    far placing has come."""
+    import geo_service as geo_service_mod
+    bf = backfill_status()
+    out = geo_service_mod.rebuild_estimate(bf["engine"],
+                                           event_store.geo_placeable_count())
+    out.update(available=bf["available"], running=bf["running"],
+               backfill=bf)
+    if bf.get("reason"):
+        out["reason"] = bf["reason"]
+    return out
+
+
+def start_rebuild():
+    """Delete every incident and place all stored messages again, oldest
+    first, with the current engine. False if it cannot run now."""
+    bf = backfill_status()
+    if not bf["available"] or bf["running"]:
+        return False
+    gone, todo = event_store.reset_geolocation()
+    log.info("Rebuilding the map: %d incidents deleted, %d messages to place "
+             "with %s", gone, todo, bf["engine"])
     return _get_backfill().start()
 
 # ---------------------------------------------------------------------------

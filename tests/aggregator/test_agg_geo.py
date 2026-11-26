@@ -138,3 +138,34 @@ def test_messages_of_a_node_without_location_wait(agg_store, event, geo, monkeyp
     assert pipe.start_backfill()
     _wait(pipe)
     assert agg_store.get_event(UID)["geo_status"] == "done"
+
+
+async def test_area_warnings_reach_the_map(aiohttp_client, agg_store, event, geo):
+    place = geo.locate_node("Karlstad, Värmlands län")
+    result = geo.locate("Det är mycket halt på många vägar i länet.", place.point)
+    agg_store.save_geolocation(UID, result, "done")
+    web = await aiohttp_client(api.create_web_app(Pipeline(transcriber=None, mqtt=None, geo=geo)))
+    [area] = (await (await web.get("/api/v1/incidents")).json())["areas"]
+    assert area["events"] == [UID] and "halt" in area["evidence"]
+
+
+async def test_rebuild_places_everything_again(aiohttp_client, agg_store, event,
+                                              geo, monkeypatch):
+    monkeypatch.setattr(geo_service.Backfill, "PAUSE_SEC", 0)
+    monkeypatch.setattr(config, "ADMIN_PASSWORD", "hemligt")
+    pipe = Pipeline(transcriber=None, mqtt=None, geo=geo)
+    pipe._on_transcribed(agg_store.get_event(UID)["id"], TEXT, None, 2.0)
+    [before] = agg_store.incidents_for_events([UID])[UID]
+
+    web = await aiohttp_client(api.create_web_app(pipe))
+    assert (await web.get("/api/v1/incidents/rebuild")).status == 401
+    assert (await web.post("/api/v1/admin/login",
+                           json={"password": "hemligt"})).status == 200
+    info = await (await web.get("/api/v1/incidents/rebuild")).json()
+    assert (info["messages"], info["engine"], info["cost_ore"]) == (1, "rules", 0)
+    resp = await web.post("/api/v1/incidents/rebuild", json={})
+    assert resp.status == 202
+    _wait(pipe)
+    [after] = agg_store.incidents_for_events([UID])[UID]
+    assert after["id"] != before["id"] and after["label"] == "E18 Bergviksmotet"
+    assert agg_store.get_event(UID)["geo_status"] == "done"

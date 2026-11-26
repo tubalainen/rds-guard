@@ -1,6 +1,8 @@
 # Plan: bättre tolkning och placering av trafikmeddelanden (v2)
 
-Status 2026-11-26: steg 1 och 2 klara. Facit (`tools/geo_corpus.json`)
+Status 2026-11-26: steg 1–5 klara (steg 1–2 i v0.7.0/v0.7.1, steg 3–5 i v0.8.0). Steg 4: citat per händelse och en tidslinje per händelse med typ, utdrag och ljud, "Spela alla". Steg 5: Admin → Karta → "Bygg om kartan". Steg 3:
+områdesvarningar lagras per meddelande (`area_warnings`) och listas ovanför
+kartan; samma varning sagd igen blir en rad. Facit (`tools/geo_corpus.json`)
 har 61 riktiga meddelanden från P4 Värmland (12–26 nov), uppmärkta: 77
 händelseposter, 4 områdesvarningar, kedjor som E45 Värmlandsbro (11
 sändningar) och E18 Bergviksmotet (7). Handinlagda platser finns i
@@ -14,6 +16,12 @@ från 36 h med det som sades sist; en upprepning räknas som omnämnande men
 Områdesvarningar placeras inte längre som punkter (lagras i steg 3).
 Regelmotorn ger samma format. Vägnummer som "E45an" känns igen, och en
 grov placering på samma väg kopplas till en precis händelse på sträckan.
+
+Steg 5 byggt: Admin → Karta → "Bygg om kartan" raderar alla händelser och
+placerar om alla sparade meddelanden äldst först med motorn som är på
+(`GET`/`POST /api/incidents/rebuild`, aggregatorn `/api/v1/incidents/rebuild`,
+kräver inloggning); bekräftelsen visar antal, motor och kostnad (Claude ca
+1,5 öre per meddelande), och Trafikverket-kopplingarna görs om.
 
 Baslinje (`tools/eval_geolocation.py`):
 

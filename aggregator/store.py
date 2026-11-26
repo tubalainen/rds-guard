@@ -755,6 +755,8 @@ def save_geolocation(event_uid, result, status, at=None):
             ids = geolocate.merge_placements(
                 conn, result.placements, event_uid, now,
                 _iso_before(now, geolocate.INCIDENT_HOURS * 3600), result.engine)
+        if result is not None:
+            geolocate.save_areas(conn, result.areas, event_uid, now, result.engine)
             row = conn.execute("SELECT transcription FROM events WHERE "
                                "event_uid = ?", (event_uid,)).fetchone()
             text = result.corrected_text or (row[0] if row else "") or ""
@@ -787,19 +789,51 @@ def open_incidents(center=None, km=geolocate.DEFAULT_AREA_KM, at=None):
     return _near(rows, center, km)
 
 
+def list_areas(hours=geolocate.INCIDENT_HOURS):
+    """Area warnings of the last hours; hours=None: all that are stored."""
+    return geolocate.list_areas(_conn(), iso_ago(hours * 3600) if hours else None)
+
+
 def list_incidents(hours=geolocate.INCIDENT_HOURS):
     """Incidents for the map, with the nodes whose messages mentioned them.
     hours=None: all that are stored."""
     conn = _conn()
     rows = geolocate.list_incidents(conn, iso_ago(hours * 3600) if hours else None)
     for inc in rows:
-        nodes = conn.execute(
-            "SELECT DISTINCT n.name FROM incident_events ie "
-            "JOIN events e ON e.event_uid = ie.event_key "
-            "JOIN nodes n ON n.id = e.node_id WHERE ie.incident_id = ?",
-            (inc["id"],)).fetchall()
-        inc["nodes"] = sorted(r[0] for r in nodes)
+        _incident_nodes(conn, inc)
     return rows
+
+
+def _incident_nodes(conn, inc):
+    nodes = conn.execute(
+        "SELECT DISTINCT n.name FROM incident_events ie "
+        "JOIN events e ON e.event_uid = ie.event_key "
+        "JOIN nodes n ON n.id = e.node_id WHERE ie.incident_id = ?",
+        (inc["id"],)).fetchall()
+    inc["nodes"] = sorted(r[0] for r in nodes)
+    return inc
+
+
+def get_incident(incident_id):
+    """One incident with its broadcasts and nodes, or None."""
+    conn = _conn()
+    inc = geolocate.get_incident(conn, incident_id)
+    return _incident_nodes(conn, inc) if inc else None
+
+
+def event_briefs(event_uids):
+    """{event_uid: {event_uid, started_at, station_ps, node_name,
+    audio_path}} for the given events (for incident timelines)."""
+    uids = sorted({str(u) for u in event_uids})
+    out = {}
+    for n in range(0, len(uids), 500):
+        part = uids[n:n + 500]
+        for r in _conn().execute(
+                "SELECT e.event_uid, e.started_at, e.station_ps, e.audio_path, "
+                "n.name AS node_name FROM events e JOIN nodes n ON n.id = e.node_id "
+                f"WHERE e.event_uid IN ({','.join('?' * len(part))})", part):
+            out[r["event_uid"]] = dict(r)
+    return out
 
 
 def incidents_for_events(event_uids):
@@ -824,6 +858,30 @@ def geo_pending():
         d["at"] = d.get("started_at") or d.get("received_at")
         out.append(d)
     return out
+
+
+_GEO_PLACEABLE_WHERE = (
+    " WHERE transcription IS NOT NULL AND TRIM(transcription) != '' "
+    "AND transcription_status = 'done'")
+
+
+def geo_placeable_count():
+    """Transcribed messages a rebuild would place again."""
+    return _conn().execute(
+        "SELECT COUNT(*) FROM events" + _GEO_PLACEABLE_WHERE).fetchone()[0]
+
+
+def reset_geolocation():
+    """Delete the incidents and mark every transcribed message as never
+    placed, so the backfill places them all again, oldest first.
+    Returns (incidents deleted, messages to place)."""
+    with _lock:
+        conn = _conn()
+        gone = geolocate.reset_incidents(conn)
+        cur = conn.execute("UPDATE events SET geo_status = NULL, geo_engine = NULL"
+                           + _GEO_PLACEABLE_WHERE)
+        conn.commit()
+    return gone, cur.rowcount
 
 
 def geo_pending_by_node():
