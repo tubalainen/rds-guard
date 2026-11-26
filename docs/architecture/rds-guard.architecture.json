@@ -9,7 +9,7 @@
     "repository": {
       "url": "https://github.com/tubalainen/rds-guard",
       "provider": "github",
-      "revision": "5257d568afed99f78363351751048cc13410c796"
+      "revision": "0513b4b973de61a8e8671e3d2a06850f0cd0c8a4"
     }
   },
   "layout": {
@@ -141,30 +141,15 @@
       "col": 3
     },
     {
-      "id": "cloudflare",
-      "type": "cloud",
-      "label": "Cloudflare",
-      "sublabel": "Tunnel or proxy",
+      "id": "proxy",
+      "type": "security",
+      "label": "HTTPS proxy",
+      "sublabel": "reverse proxy or tunnel",
       "sources": [
         {
           "path": "aggregator/docker-compose.yml",
-          "line": 39,
-          "end_line": 47
-        }
-      ],
-      "row": 2,
-      "col": 0
-    },
-    {
-      "id": "nginx",
-      "type": "security",
-      "label": "nginx",
-      "sublabel": "/api/v1/ingest/* only",
-      "sources": [
-        {
-          "path": "aggregator/nginx/ingest.conf",
-          "line": 27,
-          "end_line": 49
+          "line": 26,
+          "end_line": 27
         }
       ],
       "row": 2,
@@ -288,18 +273,18 @@
       "sources": [
         {
           "path": "transcriber.py",
-          "line": 272,
-          "end_line": 306
+          "line": 360,
+          "end_line": 394
         },
         {
           "path": "transcriber.py",
-          "line": 224,
-          "end_line": 238
+          "line": 244,
+          "end_line": 264
         },
         {
           "path": "aggregator/config.py",
-          "line": 63,
-          "end_line": 63
+          "line": 68,
+          "end_line": 68
         }
       ],
       "row": 4,
@@ -322,7 +307,6 @@
       "kind": "region",
       "label": "Aggregator host",
       "wraps": [
-        "nginx",
         "ingest",
         "agg_pipeline",
         "agg_store",
@@ -356,25 +340,19 @@
       "label": "outbox"
     },
     {
-      "id": "uplink-cloudflare",
+      "id": "uplink-proxy",
       "from": "uplink",
-      "to": "cloudflare",
+      "to": "proxy",
       "label": "HTTPS + token",
       "variant": "emphasis",
       "fromSide": "bottom",
       "toSide": "top"
     },
     {
-      "id": "cloudflare-nginx",
-      "from": "cloudflare",
-      "to": "nginx",
-      "label": "tunnel"
-    },
-    {
-      "id": "nginx-ingest",
-      "from": "nginx",
+      "id": "proxy-ingest",
+      "from": "proxy",
       "to": "ingest",
-      "label": "proxy"
+      "label": "HTTP :8081"
     },
     {
       "id": "ingest-store",
@@ -428,7 +406,7 @@
       "dot": "cyan",
       "title": "Aggregator",
       "items": [
-        "Only /api/v1/ingest/* is public; nginx answers 404 to everything else",
+        "Only the ingest port (8081) is public, behind your HTTPS reverse proxy or a Cloudflare Tunnel; it serves /api/v1/ingest/* and nothing else",
         "Transcribes uploaded audio centrally with ElevenLabs Scribe; local KB-Whisper (strict) takes over on API errors or without a key; one MQTT alert per event",
         "Web UI, read API and node admin stay on the LAN (no login)"
       ]
