@@ -415,7 +415,7 @@ const RDSUI = (() => {
             <div class="ev-body">
                 <div class="ev-meta">${meta.join('')}</div>
                 <h3 class="ev-title"><a href="#/event/${encodeURIComponent(id)}">${hl(title, words)}</a></h3>
-                ${text ? `<p class="ev-text clamp">${hl(text, words)}</p>` : ''}
+                ${text ? `<p class="ev-text">${hl(text, words)}</p>` : ''}
                 ${ev.audio_url ? Player.html(ev.audio_url, ev.duration_sec) : ''}
                 <div class="ev-foot">${transcriptionStatus(ev)}${pushPill(ev)}</div>
             </div>
