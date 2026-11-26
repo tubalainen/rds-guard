@@ -28,7 +28,8 @@ STATIC_DIR = pathlib.Path(__file__).parent / "static"
 SHARED_DIR = pathlib.Path(__file__).resolve().parent.parent / "static" / "shared"
 
 ADMIN = admin_auth.AdminAuth(lambda: config.ADMIN_PASSWORD,
-                             protected=("/api/v1/notify", "/api/v1/nodes"),
+                             protected=("/api/v1/notify", "/api/v1/nodes",
+                                        "/api/v1/incidents/rebuild"),
                              cookie_name="rdsguard_agg_admin")
 
 PIPELINE = web.AppKey("pipeline", object)
@@ -407,6 +408,27 @@ async def handle_incidents_backfill(request):
                              status=202 if started else 200)
 
 
+async def handle_incidents_rebuild_info(request):
+    """GET /api/v1/incidents/rebuild (admin) — what rebuilding the map would
+    do: how many messages, which engine, the cost, how far a run has come."""
+    pipeline = request.app[PIPELINE]
+    if not hasattr(pipeline, "rebuild_status"):
+        return _error(503, "unavailable", "no processing pipeline")
+    return web.json_response(await _run(pipeline.rebuild_status))
+
+
+async def handle_incidents_rebuild(request):
+    """POST /api/v1/incidents/rebuild (admin) — delete every incident and
+    place all stored messages again, oldest first, with the current engine."""
+    pipeline = request.app[PIPELINE]
+    if not hasattr(pipeline, "start_rebuild"):
+        return _error(503, "unavailable", "no processing pipeline")
+    started = await _run(pipeline.start_rebuild)
+    st = await _run(pipeline.rebuild_status)
+    return web.json_response({"started": started, "rebuild": st},
+                             status=202 if started else 409)
+
+
 async def handle_stations(request):
     return web.json_response({"stations": await _run(store.list_stations)})
 
@@ -539,6 +561,8 @@ def create_web_app(pipeline=None, mqtt=None):
     r.add_get("/api/v1/stations", handle_stations)
     r.add_get("/api/v1/incidents", handle_incidents)
     r.add_post("/api/v1/incidents/backfill", handle_incidents_backfill)
+    r.add_get("/api/v1/incidents/rebuild", handle_incidents_rebuild_info)
+    r.add_post("/api/v1/incidents/rebuild", handle_incidents_rebuild)
     r.add_get("/api/v1/trafikverket", handle_trafikverket)
     r.add_get("/api/v1/nodes", handle_nodes)
     r.add_post("/api/v1/nodes", handle_create_node)

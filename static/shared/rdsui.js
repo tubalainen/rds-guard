@@ -1156,12 +1156,116 @@ const RDSUI = (() => {
         runPreview();
     };
 
+    // ------------------------------------------------------------------ admin: map
+
+    // Rebuild the map: delete every incident and place all stored traffic
+    // messages again, oldest first, with the engine in use (and its cost).
+    const ENGINE_SV = { claude: 'Claude', rules: 'den lokala regelmotorn', none: 'ingen motor' };
+    const REBUILD_REASON = {
+        off: 'Kartan är avstängd på den här noden.',
+        none: 'Kartan är avstängd (GEO_ENGINE=none).',
+        starting: 'Kartan startar fortfarande. Försök igen om en stund.',
+        no_location: 'Mottagarens plats är okänd. Sätt NODE_LOCATION i .env.',
+    };
+
+    function costText(ore) {
+        if (!ore) return 'gratis';
+        if (ore < 100) return `cirka ${Math.max(1, Math.round(ore))} öre`;
+        return `cirka ${(ore / 100).toLocaleString('sv-SE', { maximumFractionDigits: ore < 1000 ? 1 : 0 })} kr`;
+    }
+
+    const mapSection = async (root, r, ctx) => {
+        let info = await api('GET', '/incidents/rebuild');
+        if (!ctx.alive()) return;
+        let timer = null;
+        const stop = () => { if (timer) { clearTimeout(timer); timer = null; } };
+        ctx.cleanup = stop;
+
+        function progress() {
+            const bf = info.backfill || {};
+            if (!info.running) {
+                if (bf.finished && bf.total) {
+                    return `<p class="small muted rebuild-done">Senaste körningen: ${bf.placed} av ${bf.total} meddelanden fick en plats på kartan.</p>`;
+                }
+                return '';
+            }
+            if (!bf.total) return '<p class="small rebuild-progress">Startar …</p>';
+            return `<div class="rebuild-progress">
+                <progress max="${bf.total}" value="${bf.done}" aria-label="Placerar om"></progress>
+                <p class="small">Placerar om: ${bf.done} av ${bf.total} meddelanden.</p></div>`;
+        }
+
+        function render() {
+            const on = info.engine && info.engine !== 'none';
+            const engine = on ? (ENGINE_SV[info.engine] || info.engine) : 'den motor som är påslagen';
+            const can = info.available && !info.running && info.messages > 0;
+            const why = !info.available ? (REBUILD_REASON[info.reason] || 'Kartan kan inte byggas om just nu.')
+                : info.running ? 'En körning pågår.'
+                : info.messages === 0 ? 'Det finns inga transkriberade trafikmeddelanden att placera.' : '';
+            root.innerHTML = `
+                <section class="card rebuild-card">
+                    <div class="card-head"><h2>Bygg om kartan</h2></div>
+                    <p>Alla händelser på kartan raderas och byggs upp igen från de sparade
+                    trafikmeddelandena, äldst först, med ${esc(engine)}. Använd det efter en
+                    uppdatering som tolkar meddelandena bättre. Kartan fylls på medan det pågår.</p>
+                    ${on ? `<p class="rebuild-summary"><strong>${info.messages} meddelanden</strong> placeras om
+                    med ${esc(engine)} · ${esc(costText(info.cost_ore))}</p>`
+        : `<p class="rebuild-summary"><strong>${info.messages} sparade meddelanden</strong></p>`}
+                    ${progress()}
+                    <div class="row-actions">
+                        <button class="btn danger" type="button" id="rebuild-go"${can ? '' : ' disabled'}>Bygg om kartan</button>
+                        ${why ? `<span class="small muted">${esc(why)}</span>` : ''}
+                    </div>
+                </section>`;
+            root.querySelector('#rebuild-go').addEventListener('click', go);
+        }
+
+        async function refresh() {
+            try { info = await api('GET', '/incidents/rebuild'); } catch (e) { /* keep the last */ }
+            if (!ctx.alive()) return;
+            render();
+            schedule();
+        }
+
+        function schedule() {
+            stop();
+            if (info.running && ctx.alive()) timer = setTimeout(refresh, 3000);
+        }
+
+        async function go() {
+            const engine = ENGINE_SV[info.engine] || info.engine;
+            const ok = window.confirm(
+                `Bygga om kartan?\n\nAlla händelser som finns på kartan nu raderas och ersätts.\n`
+                + `${info.messages} meddelanden placeras om med ${engine}, ${costText(info.cost_ore)}.`);
+            if (!ok) return;
+            const btn = root.querySelector('#rebuild-go');
+            btn.disabled = true;
+            try {
+                const res = await api('POST', '/incidents/rebuild', {});
+                info = res.rebuild || info;
+                toast('Kartan byggs om');
+            } catch (e) {
+                toast(e.status === 409 ? 'Kartan kan inte byggas om just nu' : e.message);
+                await refresh();
+                return;
+            }
+            if (!ctx.alive()) return;
+            info.running = true;
+            render();
+            schedule();
+        }
+
+        render();
+        schedule();
+    };
+
     // ------------------------------------------------------------------ admin
 
     // Sections of #/admin, in tab order: [route, label, view]. Each view gets
     // the route with the section name taken off its args.
     const adminSections = [
         ['aviseringar', 'Aviseringar', notifySection],
+        ['karta', 'Karta', mapSection],
     ];
 
     function adminLogin(root, session) {

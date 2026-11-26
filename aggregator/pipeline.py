@@ -263,6 +263,28 @@ class Pipeline(Hooks):
             return False
         return self.backfill.start()
 
+    def rebuild_status(self):
+        """What a rebuild of the map would do: messages, engine, cost, and
+        how far placing has come."""
+        import geo_service
+        bf = self.backfill_status()
+        out = geo_service.rebuild_estimate(bf["engine"], store.geo_placeable_count())
+        out.update(available=bf["available"], running=bf["running"], backfill=bf)
+        if bf.get("reason"):
+            out["reason"] = bf["reason"]
+        return out
+
+    def start_rebuild(self):
+        """Delete every incident and place all stored messages again, oldest
+        first, with the current engine. False if it cannot run now."""
+        bf = self.backfill_status()
+        if not bf["available"] or bf["running"]:
+            return False
+        gone, todo = store.reset_geolocation()
+        log.info("Rebuilding the map: %d incidents deleted, %d messages to "
+                 "place with %s", gone, todo, bf["engine"])
+        return self.backfill.start()
+
     def requeue_pending(self):
         """After a restart, queue audio whose transcription never finished."""
         rows = store.pending_transcriptions()

@@ -17,6 +17,12 @@ Områdesvarningar placeras inte längre som punkter (lagras i steg 3).
 Regelmotorn ger samma format. Vägnummer som "E45an" känns igen, och en
 grov placering på samma väg kopplas till en precis händelse på sträckan.
 
+Steg 5 byggt: Admin → Karta → "Bygg om kartan" raderar alla händelser och
+placerar om alla sparade meddelanden äldst först med motorn som är på
+(`GET`/`POST /api/incidents/rebuild`, aggregatorn `/api/v1/incidents/rebuild`,
+kräver inloggning); bekräftelsen visar antal, motor och kostnad (Claude ca
+1,5 öre per meddelande), och Trafikverket-kopplingarna görs om.
+
 Baslinje (`tools/eval_geolocation.py`):
 
 | | Regler före | Regler efter steg 2 | Claude i drift före (`--stored`) |

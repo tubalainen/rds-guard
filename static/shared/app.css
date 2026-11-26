@@ -670,3 +670,10 @@ details.help[open] summary { margin-bottom: 10px; }
 .trv-timeline li.trv::before { background: var(--accent, #1D4ED8); }
 .trv-timeline time { flex: none; min-width: 84px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .map-item-tri { flex: none; width: 0; height: 0; margin-top: 5px; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 10px solid #DC6803; }
+
+/* Admin: rebuild the map */
+.rebuild-card p { margin: 0 0 12px; max-width: 62ch; }
+.rebuild-summary { font-size: 15px; }
+.rebuild-progress { margin: 0 0 12px; }
+.rebuild-progress progress { width: 100%; max-width: 420px; height: 8px; accent-color: var(--accent-fill); }
+.rebuild-progress p { margin: 4px 0 0; }
