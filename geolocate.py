@@ -288,6 +288,14 @@ def m_lower(items):
 # Resolver: mention + registry -> placement (shared by both engines)
 # ---------------------------------------------------------------------------
 
+def _prefer_towns(matches):
+    """For the ends of a stretch ("mellan Kristinehamn och Karlskoga") the
+    announcer means the town, not a farm of the same name nearer to us."""
+    big = {m.place.name.lower() for m in matches if m.place.kind in ("city", "town")}
+    return [m for m in matches if m.place.name.lower() not in big
+            or m.place.kind in ("city", "town")]
+
+
 def _best(matches, key):
     return max(matches, key=key) if matches else None
 
@@ -307,12 +315,12 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
         return None
     used = []
 
-    def look(name, kinds=None):
+    def look(name, kinds=None, pins=True):
         # Names written in lower case are common words as often as names:
         # those must be spelt right; capitalised ones may be misheard
         if not name:
             return []
-        pin = mention.pinned.get(name.strip().lower())
+        pin = mention.pinned.get(name.strip().lower()) if pins else None
         if pin is not None:
             # Picked by id from the list of real places
             if kinds and pin.kind not in kinds:
@@ -328,7 +336,7 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
     seg = None
     for a_name, b_name in (mention.between_all or
                            ([mention.between] if mention.between else [])):
-        ca, cb = look(a_name), look(b_name)
+        ca, cb = _prefer_towns(look(a_name)), _prefer_towns(look(b_name))
         pairs = [(a, b) for a in ca for b in cb
                  if 1 <= gz.km(a.place.point, b.place.point) <= 50]
         best = _best(pairs, lambda ab: (
@@ -383,6 +391,11 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
                 continue
             ms = [m for m in look(name) if near_anchor(m.place, tw)
                   and m.place not in taken]
+            if not ms and name.strip().lower() in mention.pinned:
+                # The reader picked a place of that name that is not near
+                # the stretch or town: another of the same name may be
+                ms = [m for m in look(name, pins=False) if m.exact
+                      and near_anchor(m.place, tw) and m.place not in taken]
             m = _best(ms, lambda m: (m.score + 0.02 * m.place.weight
                                      - 0.002 * gz.km(anchor(tw), m.place.point)))
             if m:
@@ -410,8 +423,7 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
 
     # The town the announcer names counts like any other place: a hamlet
     # or farm ("i höjd med Brunsberg") pins it down better than a stretch
-    spots = landmarks + ([town] if town and town not in landmarks
-                         and town not in (seg or ()) else [])
+    spots = landmarks + ([town] if town and town not in landmarks else [])
     fine = sorted((m for m in spots if m.place.radius_m <= 2500),
                   key=lambda m: m.place.radius_m)
     coarse = [m for m in spots if m.place.radius_m > 2500]
