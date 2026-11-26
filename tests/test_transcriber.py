@@ -133,3 +133,72 @@ def test_factory_with_key_uses_elevenlabs(no_bundle):
                                        elevenlabs_api_key="key")
     assert t.engine == "elevenlabs"
     assert t.fallback == "local"
+
+
+
+
+def check(monkeypatch, caplog, response=None, exc=None):
+    def fake_get(url, headers, timeout):
+        assert url == transcriber.ELEVENLABS_ACCOUNT_URL
+        assert headers == {"xi-api-key": "key"}
+        if exc:
+            raise exc
+        return response
+
+    monkeypatch.setattr("requests.get", fake_get)
+    caplog.set_level("INFO", logger="rds-guard")
+    t = make_el()
+    return t, t.check_elevenlabs()
+
+
+def test_check_ok_logs_plan_and_credits(monkeypatch, caplog):
+    sub = {"tier": "starter", "character_count": 20264,
+           "character_limit": 90000}
+    t, status = check(monkeypatch, caplog, FakeResponse(200, sub))
+    assert status == "ok" == t.elevenlabs_status
+    assert "connected and authenticated (plan starter, 20 264 of 90 000 " \
+        "credits used)" in caplog.text
+    assert "scribe_v3" in caplog.text
+
+
+def test_check_warns_when_credits_almost_used(monkeypatch, caplog):
+    sub = {"tier": "free", "character_count": 9500, "character_limit": 10000}
+    _, status = check(monkeypatch, caplog, FakeResponse(200, sub))
+    assert status == "ok"
+    assert "95% of this period's credits" in caplog.text
+
+
+def test_check_invalid_key(monkeypatch, caplog):
+    resp = FakeResponse(401, {"detail": {"status": "invalid_api_key",
+                                         "message": "Invalid API key"}})
+    _, status = check(monkeypatch, caplog, resp)
+    assert status == "auth_failed"
+    assert "authentication failed (HTTP 401: invalid_api_key)" in caplog.text
+    assert "transcribed locally" in caplog.text
+
+
+def test_check_restricted_key_is_accepted(monkeypatch, caplog):
+    resp = FakeResponse(401, {"detail": {"status": "missing_permissions"}})
+    _, status = check(monkeypatch, caplog, resp)
+    assert status == "ok"
+    assert "API key accepted" in caplog.text
+
+
+def test_check_unreachable(monkeypatch, caplog):
+    _, status = check(monkeypatch, caplog, exc=OSError("no route"))
+    assert status == "unreachable"
+    assert "could not reach api.elevenlabs.io" in caplog.text
+
+
+def test_completion_names_engine(clip, monkeypatch):
+    monkeypatch.setattr("requests.post",
+                        lambda *a, **k: FakeResponse(payload={"text": "ok"}))
+    t = make_el()
+    t.transcribe(clip)
+    assert t._last_engine == "ElevenLabs scribe_v3"
+    monkeypatch.setattr("requests.post",
+                        lambda *a, **k: FakeResponse(500, text="down"))
+    t._model = object()
+    monkeypatch.setattr(t, "_transcribe_local", lambda path: "lokal")
+    t.transcribe(clip)
+    assert t._last_engine.endswith("(fallback)")
