@@ -74,9 +74,15 @@ def http(url, data, timeout=900):
         return json.load(resp)
 
 
-def fetch_tile(url, tile, cache, n, total):
-    bbox = "%d,%d,%d,%d" % tile
-    path = os.path.join(cache, "tile_%d_%d.json" % tile[:2])
+def _tile_name(tile):
+    return "_".join(("%g" % v).replace(".", "p") for v in tile[:2]) \
+        + ("" if tile[2] - tile[0] == 1 else "_%g" % (tile[2] - tile[0])).replace(".", "p")
+
+
+def fetch_tile(url, tile, cache, n, total, attempts=4):
+    """Ways of one tile. A tile Overpass keeps timing out on is split in four."""
+    bbox = "%g,%g,%g,%g" % tile
+    path = os.path.join(cache, "tile_%s.json" % _tile_name(tile))
     if os.path.exists(path):
         with open(path, encoding="utf-8") as f:
             elements = json.load(f)
@@ -84,7 +90,8 @@ def fetch_tile(url, tile, cache, n, total):
         return elements
     data = urllib.parse.urlencode(
         {"data": QUERY.format(highways=HIGHWAYS, bbox=bbox)}).encode()
-    for attempt in range(8):
+    small = tile[2] - tile[0] <= 0.25
+    for attempt in range(8 if small else attempts):
         t0 = time.time()
         log(f"{n}/{total} tile {bbox}: fetching …")
         try:
@@ -95,7 +102,18 @@ def fetch_tile(url, tile, cache, n, total):
             log(f"{n}/{total} tile {bbox}: {e}; retrying in {wait}s")
             time.sleep(wait)
     else:
-        raise SystemExit(f"Overpass failed for tile {bbox}; run again to resume")
+        if small:
+            raise SystemExit(f"Overpass failed for tile {bbox}; run again to resume")
+        s, w, nn, e = tile
+        mlat, mlon = (s + nn) / 2, (w + e) / 2
+        log(f"{n}/{total} tile {bbox}: splitting in four")
+        elements = []
+        for q in ((s, w, mlat, mlon), (s, mlon, mlat, e),
+                  (mlat, w, nn, mlon), (mlat, mlon, nn, e)):
+            elements += fetch_tile(url, q, cache, n, total, attempts)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(elements, f)
+        return elements
     elements = [{"ref": e["tags"].get("ref"), "geometry":
                  [(round(g["lat"], 5), round(g["lon"], 5)) for g in e["geometry"]]}
                 for e in elements if e.get("geometry") and e.get("tags")]
