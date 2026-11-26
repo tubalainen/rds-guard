@@ -10,9 +10,14 @@ import web_server
 
 
 @pytest.fixture
-async def web(aiohttp_client, store):
+async def web(aiohttp_client, store, monkeypatch):
+    """A client logged in as admin (the push rules need it)."""
+    monkeypatch.setattr(config, "ADMIN_PASSWORD", "hemligt")
     notifier.init()
-    return await aiohttp_client(web_server.create_app())
+    client = await aiohttp_client(web_server.create_app())
+    resp = await client.post("/api/admin/login", json={"password": "hemligt"})
+    assert resp.status == 200
+    return client
 
 
 def add_event(store, rt, started, typ="traffic", transcription=None, pi="E203"):

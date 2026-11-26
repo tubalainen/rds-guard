@@ -34,6 +34,7 @@ COPY --from=model /opt/models/ /opt/models/
 # push notification rules and the web UI
 COPY transcriber.py /app/transcriber.py
 COPY notify_rules.py /app/notify_rules.py
+COPY admin_auth.py /app/admin_auth.py
 COPY static/shared/ /app/static/shared/
 # Code and UI only — never .env, compose files or local data
 COPY aggregator/*.py /app/aggregator/

@@ -23,7 +23,7 @@ local events, transcriptions, web UI and MQTT. The protocol is in
 - Transcribes all audio centrally with ElevenLabs Scribe, falling back to the bundled Swedish KB-Whisper model (or a remote Whisper server)
 - Web UI on your LAN, the same as on the satellites (in Swedish): an
   archive calendar over all stations, search in transcriptions filtered by
-  station and node, push rules, and a **Noder** view (online/offline,
+  station and node, push rules under a password-protected **Admin** page, and a **Noder** view (online/offline,
   station, decode rate, version, queue, clock offset)
 - Publishes one MQTT alert per event, with the transcription, for all
   stations to one broker (Home Assistant etc.)
@@ -249,6 +249,7 @@ All settings are in `.env`; see [.env.example](.env.example).
 | `PUBLIC_URL` | | Address satellites use; shown in their setup lines |
 | `WEB_UI_URL` | | Address of the web UI on your network. When set, push messages link to the event |
 | `NOTIFY_TIMEZONE` | `Europe/Stockholm` | Time zone for the days and times in push rules |
+| `ADMIN_PASSWORD` | *(empty)* | Password for the **Admin** page (push rules). Empty switches Admin off and the rules cannot be changed |
 | `WEB_UI_BIND` / `WEB_UI_PORT` | `0.0.0.0` / `8080` | Where the web UI is published on the host. Use `127.0.0.1` on a server with a public address |
 | `INGEST_API_BIND` / `INGEST_API_PORT` | `0.0.0.0` / `8081` | Where the ingest API is published on the host: the address and port your reverse proxy forwards to |
 | `PUID` / `PGID` | `10001` / `10001` | User and group that own the files in `aggregator-data` and that the server runs as |
@@ -317,7 +318,8 @@ other characters into `-`.
 | `POST /api/v1/nodes/{id}/rotate` | New token |
 | `PATCH /api/v1/nodes/{id}` | `{"enabled": true\|false}` |
 | `DELETE /api/v1/nodes/{id}` | Remove node and its events |
-| `GET /api/v1/notify` | Push rules and the MQTT connection |
+| `GET /api/v1/admin/session`, `POST /api/v1/admin/login`\|`logout` | Admin login (session cookie) |
+| `GET /api/v1/notify` | Push rules and the MQTT connection (needs Admin login, as do all `/api/v1/notify*`) |
 | `POST /api/v1/notify/rules`, `PUT`/`DELETE /api/v1/notify/rules/{id}` | Edit push rules |
 | `POST /api/v1/notify/preview` | Try a rule on the stored history |
 | `POST /api/v1/notify/test` | Send a test message |
@@ -333,7 +335,9 @@ browser, come from the same origin.
   its own events.
 - Everything a satellite sends is validated and length-limited; audio must
   be OGG, at most 8 MiB, and is stored under a name the aggregator chooses.
-- The web UI and admin API have **no login**. Keep port 8080 on your LAN.
+- Only the push rules (**Admin → Aviseringar**) are behind a password,
+  `ADMIN_PASSWORD`. The rest of the web UI, including **Noder**, has **no
+  login**. Keep port 8080 on your LAN.
 - The server runs as an unprivileged user. The container starts as root
   only to make the `aggregator-data` folder writable for that user, and drops
   root before it opens the database or listens on a port.

@@ -86,6 +86,7 @@ COPY status.py /app/status.py
 COPY uplink.py /app/uplink.py
 COPY notify_rules.py /app/notify_rules.py
 COPY notifier.py /app/notifier.py
+COPY admin_auth.py /app/admin_auth.py
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
