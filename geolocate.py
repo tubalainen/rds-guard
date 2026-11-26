@@ -20,6 +20,7 @@ import calendar
 import json
 import logging
 import re
+import sqlite3
 import time
 from dataclasses import dataclass, field
 
@@ -663,6 +664,14 @@ CREATE INDEX IF NOT EXISTS idx_incident_events_key ON incident_events(event_key)
 
 def init_tables(conn):
     conn.executescript(SCHEMA)
+    # v0.6.1: the Trafikverket deviation an incident is linked to
+    try:
+        conn.execute("ALTER TABLE incidents ADD COLUMN trv_id TEXT")
+    except sqlite3.OperationalError as e:
+        if "duplicate column" not in str(e).lower():
+            raise
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_incidents_trv "
+                 "ON incidents(trv_id)")
 
 
 def _incident_dict(row):
@@ -797,9 +806,12 @@ def list_incidents(conn, since_iso=None):
         "SELECT * FROM incidents WHERE last_seen >= ? ORDER BY last_seen DESC",
         (since_iso or "",))]
     for inc in rows:
-        inc["events"] = [r[0] for r in conn.execute(
-            "SELECT event_key FROM incident_events WHERE incident_id = ? "
-            "ORDER BY seen_at DESC", (inc["id"],))]
+        seen = conn.execute(
+            "SELECT event_key, seen_at FROM incident_events WHERE "
+            "incident_id = ? ORDER BY seen_at DESC", (inc["id"],)).fetchall()
+        inc["events"] = [r[0] for r in seen]
+        # When the radio spoke of it, for the timeline
+        inc["mentions"] = [r[1] for r in seen]
     return rows
 
 
@@ -811,7 +823,7 @@ def incidents_for_events(conn, event_keys):
         part = keys[i:i + 500]
         for r in conn.execute(
                 "SELECT ie.event_key, i.id, i.label, i.lat, i.lon, i.radius_m, "
-                "i.bearing, i.both_directions, i.status, i.last_seen "
+                "i.bearing, i.both_directions, i.status, i.last_seen, i.trv_id "
                 "FROM incident_events ie JOIN incidents i ON i.id = ie.incident_id "
                 f"WHERE ie.event_key IN ({','.join('?' * len(part))})", part):
             d = dict(r)

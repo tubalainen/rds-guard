@@ -115,8 +115,13 @@ async def handle_event(request):
         return web.json_response({"error": "not_found"}, status=404)
 
     def work():
+        import trafikverket
         row = event_store.get_event(event_id)
-        return _attach_notify([_public_row(row)])[0] if row else None
+        if not row:
+            return None
+        row = _attach_notify([_public_row(row)])[0]
+        trafikverket.attach(event_store.trv, row.get("incidents") or [])
+        return row
 
     row = await _run(work)
     if row is None:
@@ -190,6 +195,8 @@ async def handle_incidents(request):
                         "audio_url": (f"/api/audio/{ev['audio_path']}"
                                       if ev.get("audio_path") else None),
                     }
+        import trafikverket
+        trafikverket.attach(event_store.trv, rows)
         for inc in rows:
             inc["latest"] = latest.get(inc["id"])
             inc["events"] = [int(k) for k in inc["events"] if str(k).isdigit()]
@@ -216,13 +223,18 @@ async def handle_incidents_backfill(request):
 async def handle_trafikverket(request):
     """GET /api/trafikverket — Trafikverket's deviations near the receiver:
     current ones and those changed in the last hours (default 12), each with
-    its versions for the timeline."""
+    its versions for the timeline. layer=1: only those for the map layer
+    (current accidents, obstacles and the like no radio incident is linked
+    to)."""
     try:
         hours = max(1, min(int(request.query.get("hours", 12)), 24 * 7))
     except (TypeError, ValueError):
         hours = 12
     import rds_guard as rg
-    rows = await _run(lambda: event_store.trv.list(hours, versions=True))
+    if request.query.get("layer") in ("1", "true"):
+        rows = await _run(event_store.trv.layer, hours)
+    else:
+        rows = await _run(lambda: event_store.trv.list(hours, versions=True))
     return web.json_response({"deviations": rows, "hours": hours,
                               "trafikverket": rg.trv_snapshot()})
 

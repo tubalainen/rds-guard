@@ -211,7 +211,7 @@ def test_feed_starts_from_zero_then_asks_for_changes(tstore):
     api = FakeApi(response([situation()], "100"), response([], "105"))
     seen = []
     feed = trv.TrafikverketFeed("k", tstore, lambda: [KARLSTAD],
-                                on_change=seen.append, post=api)
+                                on_change=lambda ids, after: seen.append(ids), post=api)
     assert feed.poll_once() and feed.poll_once()
     assert 'changeid="0"' in api.bodies[0]
     assert 'changeid="100"' in api.bodies[1]

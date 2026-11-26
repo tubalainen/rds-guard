@@ -17,6 +17,8 @@ from aiohttp import web
 import admin_auth
 import notify_rules
 
+import trafikverket
+
 from . import config, nodes, notifier, store
 from .ingest import valid_uid
 
@@ -163,7 +165,10 @@ async def handle_trafikverket(request):
     """GET /api/v1/trafikverket — Trafikverket's deviations near the nodes:
     current ones and those changed in the last hours, with their versions."""
     hours = _int_param(request, "hours", 12, 1, 24 * 7)
-    rows = await _run(lambda: store.trv.list(hours, versions=True))
+    if request.query.get("layer") in ("1", "true"):
+        rows = await _run(store.trv.layer, hours)
+    else:
+        rows = await _run(lambda: store.trv.list(hours, versions=True))
     return web.json_response({
         "deviations": rows, "hours": hours,
         "trafikverket": _trv_snapshot(request.app[PIPELINE])})
@@ -198,7 +203,11 @@ async def handle_event(request):
     row = await _run(store.get_event, uid) if valid_uid(uid) else None
     if row is None:
         return _error(404, "not_found")
-    return web.json_response((await _run(_with_notify, [row]))[0])
+    def work():
+        out = _with_notify([row])[0]
+        trafikverket.attach(store.trv, out.get("incidents") or [])
+        return out
+    return web.json_response(await _run(work))
 
 
 async def handle_calendar(request):
@@ -347,6 +356,7 @@ async def handle_incidents(request):
 
     def work():
         rows = store.list_incidents(hours)
+        trafikverket.attach(store.trv, rows)
         for inc in rows:
             ev = store.get_event(inc["events"][0]) if inc["events"] else None
             inc["latest"] = {

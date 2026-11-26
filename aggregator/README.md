@@ -278,7 +278,7 @@ All settings are in `.env`; see [.env.example](.env.example).
 | `ANTHROPIC_API_KEY` | | Claude API key for the map engine |
 | `CLAUDE_MODEL` | `claude-haiku-5-5` | Claude model |
 | `TRANSCRIPTION_PLACE_NAMES` | `true` | Give the transcriber the node's local place names (ElevenLabs keyterms, about 20 % more per clip; Whisper prompt) |
-| `TRAFIKVERKET_API_KEY` | | Optional, free key for Trafikverket's open API: keeps Trafikverket's accidents, obstacles and restrictions near every node that reports a location, with their updates |
+| `TRAFIKVERKET_API_KEY` | | Optional, free key for Trafikverket's open API, used around every node that reports a location: exact places, a timeline and push updates for the incidents the radio speaks of, and a map layer for the rest (as on the satellite, see its README) |
 | `TRAFIKVERKET_RADIUS_KM`, `TRAFIKVERKET_POLL_SEC` | `150`, `60` | Distance around each node, seconds between calls |
 | `TRANSCRIPTION_DEVICE` | `cpu` | `cpu` or `cuda` |
 | `WHISPER_REMOTE_URL` | | Remote ASR server for `remote` |
@@ -305,6 +305,7 @@ Transcription section lists the messages.
 ```
 rds-aggregator/alert                         # One message per finished event (see below)
 rds-aggregator/notify/{topic}                # Push messages from your rules (format as on the satellite)
+rds-aggregator/trafikverket/update           # Trafikverket's update of an incident the radio spoke of
 rds-aggregator/{pi}/traffic/ta               # TA active true/false (retained)
 rds-aggregator/{pi}/{type}/transcription     # Latest transcription per station (retained)
 rds-aggregator/nodes/{node}/status           # Node online/offline (retained)
@@ -332,7 +333,7 @@ other characters into `-`.
 | `GET /api/v1/stations` | Stations seen, with the nodes that reported them |
 | `GET /api/v1/incidents` | Incidents for the map, with the nodes that heard them. Params: `hours` (default 12), `history=1` (all stored, plus how far placing the older messages has come) |
 | `POST /api/v1/incidents/backfill` | Place the messages stored before the map existed (once, in the background; JSON body `{}`). Messages from nodes without `NODE_LOCATION` wait until the node reports one |
-| `GET /api/v1/trafikverket` | Trafikverket's deviations near the nodes, with their versions. Param: `hours` (default 12) |
+| `GET /api/v1/trafikverket` | Trafikverket's deviations near the nodes, with their versions. Params: `hours` (default 12), `layer=1` (only the map layer's) |
 | `GET /api/v1/nodes` | Nodes with status (needs Admin login, as do all `/api/v1/nodes*`) |
 | `GET /api/v1/status` | Aggregator status |
 | `POST /api/v1/nodes` | `{"name": "…"}` → node, token and setup lines |

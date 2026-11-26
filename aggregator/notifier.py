@@ -10,6 +10,7 @@ import logging
 import threading
 
 import notify_rules
+import trafikverket
 
 from . import config, store
 
@@ -80,3 +81,44 @@ def send_test(rule, publish):
     store.log_notification(None, status, rule=rule, topic=topic,
                            title=payload["title"], test=True)
     return status, topic, payload
+
+
+# ---------------------------------------------------------------------------
+# Trafikverket's updates of incidents a push already went out for
+# ---------------------------------------------------------------------------
+
+_gate = trafikverket.UpdateGate()
+
+
+def trv_updates(dev_ids, after_vid, publish, skip_incidents=()):
+    """Same as on the satellite: push what Trafikverket changed for
+    incidents whose radio message was pushed, to the same rules."""
+    now = store.trv.now()
+    sent = 0
+    for dev_id in dev_ids:
+        dev = store.trv.get(dev_id, versions=False)
+        incs = [i for i in store.incidents_for_deviation(dev_id)
+                if i["id"] not in skip_incidents]
+        if dev is None or not incs:
+            continue
+        changes = trafikverket.latest_changes(store.trv, dev_id, after_vid)
+        ended = trafikverket.deviation_ended(dev, now)
+        if not changes or not _gate.worth(dev_id, changes, ended):
+            continue
+        for inc in incs:
+            keys = store.incident_event_keys(inc["id"])
+            for rule_id in store.rules_sent_for(keys):
+                rule = store.get_rule(rule_id)
+                if not rule or not rule.get("enabled"):
+                    continue
+                payload = trafikverket.update_payload(
+                    dev, changes, inc, rule, keys[-1], config.WEB_UI_URL,
+                    zone(), now)
+                topic = f"notify/{rule['topic']}"
+                status = _status(publish(topic, payload))
+                store.log_notification(keys[-1], status, rule=rule,
+                                       topic=topic, title=payload["title"])
+                sent += 1
+                log.info("Push '%s', Trafikverket update for incident #%s: %s",
+                         rule["name"], inc["id"], status)
+    return sent

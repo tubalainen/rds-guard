@@ -13,6 +13,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import trafikverket
+
 from . import config, notifier, store
 from .ingest import Hooks
 from .mqtt_out import topic_slug
@@ -94,6 +96,10 @@ def alert_payload(row, transcription_status, locations=None):
             {k: loc.get(k) for k in ("label", "lat", "lon", "radius_m",
                                      "bearing", "both_directions", "status")}
             for loc in (locations or [])],
+        "trafikverket": [
+            {**{k: v for k, v in loc["trafikverket"].items() if k != "line"},
+             "incident_id": loc.get("id")}
+            for loc in (locations or []) if loc.get("trafikverket")],
         "event_id": row["event_uid"],
         "node": {"name": row.get("node_name")},
         "timestamp": store.now_iso(),
@@ -303,6 +309,25 @@ class Pipeline(Hooks):
             return None
         return self._mqtt.publish(topic, payload, qos=1)
 
+    def trv_changed(self, ids, after_vid):
+        """New or changed Trafikverket deviations: link them to the radio's
+        incidents and push updates of the linked ones."""
+        try:
+            new_links, _ = store.trv_relink(ids)
+            if new_links:
+                log.info("Trafikverket: %d radio incidents linked", len(new_links))
+            for dev_id in ids:
+                incs = store.incidents_for_deviation(dev_id)
+                if incs:
+                    self._publish("trafikverket/update", {
+                        "deviation": store.trv.get(dev_id, versions=False),
+                        "incidents": [i["id"] for i in incs],
+                        "timestamp": store.now_iso()})
+            notifier.trv_updates(ids, after_vid, self.notify_publish,
+                                 skip_incidents=set(new_links))
+        except Exception:
+            log.exception("Trafikverket: could not process the changes")
+
     def _notify_after_alert(self, row):
         # Emergencies were pushed when they started; only one that arrived
         # already ended (node was offline) is pushed here.
@@ -369,6 +394,7 @@ class Pipeline(Hooks):
                 continue
             locations = store.incidents_for_events(
                 [row["event_uid"]]).get(row["event_uid"], [])
+            trafikverket.attach(store.trv, locations, versions=False)
             if self._publish("alert", alert_payload(row, tstatus, locations)):
                 store.mark_alert(row["event_uid"], "published")
                 self._notify_after_alert(row)
