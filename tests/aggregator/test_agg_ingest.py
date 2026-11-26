@@ -267,3 +267,16 @@ async def test_rate_limit(aiohttp_client, agg_store, node):
                               headers=node["headers"])
         statuses.append(r.status)
     assert statuses == [200, 200, 429]
+
+
+async def test_heartbeat_carries_the_node_location(client, node, agg_store):
+    body = {"node_name": "Kalle", "version": "1.0", "sent_at": "2026-11-25T10:00:00Z",
+            "location": "Karlstad, Värmlands län " + "x" * 100,
+            "local_processing": "no"}
+    r = await client.post("/api/v1/ingest/heartbeat", json=body,
+                          headers=node["headers"])
+    assert r.status == 200
+    st = agg_store.get_node(node["node"]["id"])["status"]
+    assert st["location"].startswith("Karlstad, Värmlands län")
+    assert len(st["location"]) == 80
+    assert st["local_processing"] is None          # not a bool → dropped

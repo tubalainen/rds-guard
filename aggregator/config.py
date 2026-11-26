@@ -97,5 +97,16 @@ ELEVENLABS_KEYTERMS = os.environ.get("ELEVENLABS_KEYTERMS", "")
 ELEVENLABS_TIMEOUT = _int(os.environ.get("ELEVENLABS_TIMEOUT"), 60)
 # What to do when the API fails: "local" = transcribe with faster-whisper
 # instead (model loaded on first use), "none" = mark the clip as failed
+# --- Map: geolocation of traffic messages (same settings as the satellite) ---
+# "claude" (rules as fallback; runs as "rules" without ANTHROPIC_API_KEY),
+# "rules" (local, free) or "none". Each satellite's NODE_LOCATION tells
+# where its messages are from.
+GEO_ENGINE = os.environ.get("GEO_ENGINE", "claude").strip().lower()
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-5-5").strip()
+CLAUDE_TIMEOUT = _int(os.environ.get("CLAUDE_TIMEOUT"), 60)
+TRANSCRIPTION_PLACE_NAMES = _bool(
+    os.environ.get("TRANSCRIPTION_PLACE_NAMES", "true"))
+
 TRANSCRIPTION_FALLBACK = os.environ.get(
     "TRANSCRIPTION_FALLBACK", "local").strip().lower()

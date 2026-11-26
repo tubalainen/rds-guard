@@ -100,7 +100,7 @@ def test_elevenlabs_error_falls_back_to_local(clip, monkeypatch):
     t = make_el()
     monkeypatch.setattr(t, "_load_local_model",
                         lambda: setattr(t, "_model", object()))
-    monkeypatch.setattr(t, "_transcribe_local", lambda path: "lokal text")
+    monkeypatch.setattr(t, "_transcribe_local", lambda path, prompt=None: "lokal text")
     assert t.transcribe(clip) == "lokal text"
 
 
@@ -118,7 +118,7 @@ def test_missing_key_uses_fallback(clip, monkeypatch):
     monkeypatch.setattr("requests.post", no_call)
     t = make_el(elevenlabs_api_key="")
     t._model = object()
-    monkeypatch.setattr(t, "_transcribe_local", lambda path: "lokal")
+    monkeypatch.setattr(t, "_transcribe_local", lambda path, prompt=None: "lokal")
     assert t.transcribe(clip) == "lokal"
 
 
@@ -199,6 +199,29 @@ def test_completion_names_engine(clip, monkeypatch):
     monkeypatch.setattr("requests.post",
                         lambda *a, **k: FakeResponse(500, text="down"))
     t._model = object()
-    monkeypatch.setattr(t, "_transcribe_local", lambda path: "lokal")
+    monkeypatch.setattr(t, "_transcribe_local", lambda path, prompt=None: "lokal")
     t.transcribe(clip)
     assert t._last_engine.endswith("(fallback)")
+
+
+def test_place_names_are_added_to_keyterms_and_prompt():
+    t = make_el(initial_prompt="Trafikverket")
+    hints = {"keyterms": ["Bergviksmotet", "E18", "Bad<name>"],
+             "prompt": "Trafikmeddelande. Karlstad, Grums."}
+    assert t._keyterms(hints) == ["E18", "Karlstad", "Bergviksmotet"]
+    assert t._keyterms(None) == ["E18", "Karlstad"]
+    assert t._prompt(hints) == "Trafikverket Trafikmeddelande. Karlstad, Grums."
+    assert t._prompt(None) == "Trafikverket"
+
+
+def test_elevenlabs_request_sends_the_clip_keyterms(clip, monkeypatch):
+    sent = {}
+
+    def post(url, headers, data, files, timeout):
+        sent["keyterms"] = [v for k, v in data if k == "keyterms"]
+        return FakeResponse(200, {"text": "ok"})
+
+    import requests
+    monkeypatch.setattr(requests, "post", post)
+    make_el().transcribe(clip, {"keyterms": ["Våxnäsmotet"]})
+    assert sent["keyterms"] == ["E18", "Karlstad", "Våxnäsmotet"]

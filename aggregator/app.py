@@ -43,6 +43,7 @@ async def main():
     log.info("════════════════════════════════════════════")
     log.info("  Public URL:  %s", config.PUBLIC_URL or "(not set)")
     log.info("  Transcribe:  %s", config.TRANSCRIPTION_ENGINE)
+    log.info("  Map:         %s", config.GEO_ENGINE)
     log.info("  MQTT:        %s", "enabled" if config.MQTT_ENABLED else "disabled")
     log.info("  Retention:   %d days", config.EVENT_RETENTION_DAYS)
     Path(config.AUDIO_DIR).mkdir(parents=True, exist_ok=True)
@@ -75,7 +76,13 @@ async def main():
         mqtt = MqttOut()
         mqtt.start()
 
-    pipeline = Pipeline(transcriber=transcriber, mqtt=mqtt)
+    import geo_service
+    geo = geo_service.create_service(
+        config.GEO_ENGINE, api_key=config.ANTHROPIC_API_KEY,
+        model=config.CLAUDE_MODEL, timeout=config.CLAUDE_TIMEOUT,
+        place_names=config.TRANSCRIPTION_PLACE_NAMES)
+
+    pipeline = Pipeline(transcriber=transcriber, mqtt=mqtt, geo=geo)
     pipeline.requeue_pending()
     stop_threads = threading.Event()
     threading.Thread(target=pipeline.run, args=(stop_threads,),

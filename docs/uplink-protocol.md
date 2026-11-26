@@ -132,6 +132,11 @@ Body (JSON, at most 64 KiB):
 | `pipeline` | object | `{"state": string, "error": string or null}`, each ≤ 256 chars |
 | `stations` | array | ≤ 8 items: `frequency`, `pi`, `ps`, `long_ps`, `prog_type`, `tp`, `ta`, `groups_per_sec`, `groups_total` |
 | `queue_depth` | integer or null | Items waiting in the satellite's outbox |
+| `location` | string or null | ≤ 80 chars, the satellite's `NODE_LOCATION` as "Ort, Län" (e.g. `Karlstad, Värmlands län`); the aggregator looks it up in its place-name registry to place the node's messages on the map. Optional |
+| `local_processing` | boolean or null | Whether the satellite transcribes and maps its recordings itself (`LOCAL_PROCESSING`). Informational; the aggregator processes everything it receives either way. Optional |
+
+Unknown fields are ignored, and the two optional fields may be missing, so
+older satellites and aggregators keep working with newer ones.
 
 Response: `200 {"server_time": "<timestamp>"}`. The aggregator compares
 `sent_at` with its own clock to show each node's clock offset.

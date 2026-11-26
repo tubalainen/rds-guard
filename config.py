@@ -175,6 +175,34 @@ UPLINK_HEARTBEAT_SEC = max(10, _int(os.environ.get("UPLINK_HEARTBEAT_SEC"), 30))
 UPLINK_MAX_AGE_HOURS = max(1, _int(os.environ.get("UPLINK_MAX_AGE_HOURS"), 72))
 
 UPLINK_ENABLED: bool = bool(UPLINK_URL)
+
+# --- Location and map (geolocation of traffic messages) ---
+# Where this receiver is: "Ort, Län", e.g. "Örebro, Örebro län". Used to find
+# the places a traffic message mentions, and sent to the aggregator.
+NODE_LOCATION = os.environ.get("NODE_LOCATION", "").strip()
+# Process recordings here (transcription and map)? Only a satellite can turn
+# this off: it then records and forwards raw audio, and the aggregator does
+# all processing. A standalone installation always processes.
+LOCAL_PROCESSING = _bool(os.environ.get("LOCAL_PROCESSING", "true"))
+# "claude" = the Claude API reads the transcription, corrects misheard words
+#            and finds the places (rules engine as fallback); without
+#            ANTHROPIC_API_KEY it runs as "rules"
+# "rules"  = local patterns and place-name registry only (free, offline)
+# "none"   = no map
+GEO_ENGINE = os.environ.get("GEO_ENGINE", "claude").strip().lower()
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-5-5").strip()
+CLAUDE_TIMEOUT = _int(os.environ.get("CLAUDE_TIMEOUT"), 60)
+# Give the transcriber local place names to listen for: ElevenLabs keyterms
+# (about 20 % more per clip) and the local Whisper prompt
+TRANSCRIPTION_PLACE_NAMES = _bool(
+    os.environ.get("TRANSCRIPTION_PLACE_NAMES", "true"))
+
+if not LOCAL_PROCESSING and not UPLINK_ENABLED:
+    print("WARNING: LOCAL_PROCESSING=false only applies to a satellite "
+          "(UPLINK_URL set); a standalone installation processes everything "
+          "itself, so it stays on.", file=sys.stderr)
+    LOCAL_PROCESSING = True
 if UPLINK_ENABLED:
     if not UPLINK_URL.lower().startswith(("http://", "https://")):
         print(

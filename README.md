@@ -15,6 +15,7 @@ Built for Sveriges Radio P4, Sweden's primary traffic announcement carrier and e
 - Transcribes recorded audio with ElevenLabs Scribe, or locally with the bundled Swedish KB-Whisper model (used automatically as fallback, or without an API key)
 - Stores events in a local SQLite database with 30-day retention
 - Serves a web archive (in Swedish) with a calendar, search in transcriptions, audio playback and the push rules
+- Places each traffic message on a map: which road, where, which direction, and how certain the place is (see [Map](#map))
 - Sends ready-made push messages to MQTT (`rds/notify/<rule>`) for the events that match your rules, e.g. VMA always and traffic that mentions your roads on weekday mornings
 - Optionally forwards events and decoded data to an MQTT broker for Home Assistant or other automation
 - Optionally reports to a central [aggregator](aggregator/README.md) that collects events from several installations (see [Run as a satellite](#run-as-a-satellite))
@@ -200,12 +201,13 @@ HTTPS requests.
 
 ### Connect
 
-1. Add the lines you received to `.env`:
+1. Add the lines you received to `.env`, and where your receiver is:
 
 ```bash
 UPLINK_URL=https://rds.example.com    # Aggregator address
 UPLINK_TOKEN=paste-your-token-here    # Node token (keep it secret)
 NODE_NAME=Kalle, Karlstad             # Shown on the aggregator
+NODE_LOCATION=Karlstad, Värmlands län # Ort, Län: places your messages on the map
 ```
 
 2. Restart the container so it reads the new settings:
@@ -243,13 +245,36 @@ curl -s http://localhost:8022/api/status | python3 -m json.tool | grep -A6 '"upl
 | `uplink: update needed` | Your RDS Guard version is not supported by the aggregator | Update: `docker compose pull && docker compose up -d` |
 | *(no uplink shown)* | `UPLINK_URL` is empty | Standalone mode; see [Connect](#connect) |
 
+### Who processes the recordings: your choice
+
+A satellite can either process its recordings itself **and** send them to
+the aggregator (the default), or only record and send them, leaving all
+processing to the aggregator. Processing means transcription (speech to
+text) and placing the messages on the map. You choose with one line in
+`.env`:
+
+| `LOCAL_PROCESSING` | What your satellite does | What you see locally | Good when |
+|---|---|---|---|
+| `true` (default) | Records, transcribes, places on the map, and sends the raw recording to the aggregator | Everything: transcriptions, map, push rules on the text | You want your own installation to be complete |
+| `false` | Records and sends the raw recording only; no transcription, no map, no AI or cloud calls | Events with audio only; the map page says the aggregator has it | A small host (Raspberry Pi), or no ElevenLabs/Claude keys on this machine |
+
+The aggregator always transcribes and maps everything it receives, whatever
+you choose. With `true`, the same message is processed twice: once here and
+once on the aggregator. That costs nothing extra with the local engines, but
+if both have paid keys (ElevenLabs, Claude), both pay.
+
+`LOCAL_PROCESSING=false` only works for a satellite. A standalone
+installation (no `UPLINK_URL`) always processes its own recordings; the
+setting is then ignored with a warning in the log.
+
 ### What is sent
 
 - Each traffic announcement and emergency broadcast: station (PI, PS),
   frequency, programme type, RadioText, start and end time.
 - The recorded audio of each event (OGG/Opus, about 0.7 MB per 2 minutes).
 - A status report every 30 seconds: station, decode rate, pipeline health,
-  software version and queue length.
+  software version, queue length, your `NODE_LOCATION` ("Ort, Län") and
+  whether you process recordings yourself (`LOCAL_PROCESSING`).
 
 Transcriptions are **not** sent; the aggregator transcribes the audio itself.
 Nothing else leaves your network: no MQTT data, no web UI, no raw RDS stream.
@@ -369,6 +394,18 @@ Each transcription is logged with the engine that served it, e.g. `Transcription
 
 > **Local vs Remote:** Local transcription works out of the box but uses significant CPU/RAM (especially larger models). For Raspberry Pi or low-power hosts, use `TRANSCRIPTION_ENGINE=remote` with a [whisper-asr-webservice](https://github.com/ahmetoner/whisper-asr-webservice) container running on a more powerful machine, or set `TRANSCRIPTION_ENGINE=none` to disable transcription while still recording audio.
 
+### Location and map
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NODE_LOCATION` | | Where the receiver is, as `Ort, Län`, e.g. `Örebro, Örebro län` or `Karlstad, Värmland`. Needed for the map; a satellite also reports it to the aggregator |
+| `GEO_ENGINE` | `claude` | `claude` = Claude reads the transcription, corrects misheard words and finds the places, with the rules engine as fallback (runs as `rules` without an API key), `rules` = local patterns and place-name registry only, `none` = no map |
+| `ANTHROPIC_API_KEY` | | Claude API key (claude only) |
+| `CLAUDE_MODEL` | `claude-haiku-5-5` | Claude model for the map engine |
+| `CLAUDE_TIMEOUT` | `60` | HTTP timeout in seconds |
+| `TRANSCRIPTION_PLACE_NAMES` | `true` | Give the transcriber local place names to listen for: ElevenLabs keyterms (costs about 20 % more per clip) and the local Whisper prompt |
+| `LOCAL_PROCESSING` | `true` | Satellite only: `false` = do not transcribe or map here, leave it to the aggregator (see [Who processes the recordings](#who-processes-the-recordings-your-choice)) |
+
 ### Uplink to an aggregator (optional)
 
 | Variable | Default | Description |
@@ -394,14 +431,21 @@ what the receiver has heard:
 - **Sök** — search in RadioText and transcriptions, filtered by type,
   period and station. A search can be turned into a push rule with one
   click (*Bevaka*).
+- **Karta** — the incidents traffic messages mentioned in the last 12
+  hours, on a map (see [Map](#map)).
 - **Admin** — behind the password in `ADMIN_PASSWORD`. Its first section is
   **Aviseringar**: the push rules (see [Push notifications](#push-notifications)),
   the MQTT connection and the latest messages sent. A login lasts 12 hours,
   or until the container restarts or the password changes. Without
   `ADMIN_PASSWORD` the Admin page is switched off; rules already saved keep
   sending.
-- **Händelse** — one event: audio, full transcription, RadioText, pushes
-  and details. Push messages link here when `WEB_UI_URL` is set.
+- **Händelse** — one event: audio, full transcription, RadioText, pushes,
+  a small map of the places it mentions, and details. Push messages link
+  here when `WEB_UI_URL` is set.
+
+When Claude corrected misheard words in a transcription, the corrected text
+is shown with a **Rättad** tag; tap the tag to switch to the original text
+and back.
 
 The audio player is [wavesurfer.js](https://wavesurfer.xyz/) 7 (BSD-3,
 bundled in `static/shared/vendor/`, no CDN): a waveform you can click in,
@@ -476,6 +520,77 @@ automation:
             url: "{{ trigger.payload_json.url }}"
 ```
 
+## Map
+
+The **Karta** page shows where the traffic messages of the last 12 hours
+are, read from what the announcer said ("E18 i Karlstad, i höjd med
+Bergviksmotet, i riktning mot Grums"):
+
+- a **pin** for each incident, fading as it gets older and gone after 12 hours
+- a **red circle** around it: the larger, the less certain the place
+  (a junction ±500 m, a village ±1–2 km, "mellan A och B" half the
+  distance between them, a town alone ±5 km; places that were only
+  *heard* right, not spelt right, widen it by half; less certain than
+  ±25 km is not shown)
+- an **arrow** for the direction of traffic affected ("i riktning mot
+  Grums"), a double arrow when both directions are, none when the message
+  does not say
+- **grey** once a later message says the road is open again
+
+Several messages about the same incident update one pin. Each event card
+shows its places, and each event page has a small map.
+
+### How it works, and what it costs
+
+Everything needed runs locally, without a GPU and without paid services.
+ElevenLabs and Claude are options that make it better:
+
+| Step | Always available, local and free | Optional paid service |
+|---|---|---|
+| Speech to text | KB-Whisper on CPU | ElevenLabs Scribe |
+| Hearing place names right | Local place names in the Whisper prompt | The same names as ElevenLabs keyterms |
+| Reading the message: road, places, direction, open again? | Rules for how P4's traffic desk phrases things | Claude, which also corrects misheard words |
+| Correcting misheard names ("Skatscher" → Skattkärr) | Swedish sound-alike matching against the place-name registry | Claude, using the same registry |
+| Coordinates, circle, merging into incidents | Always local | — |
+
+| Level | Cost per message | Settings |
+|---|---|---|
+| Everything local | 0 kr | `TRANSCRIPTION_ENGINE=local`, `GEO_ENGINE=rules` |
+| + ElevenLabs | about 2–3 öre, +20 % with place names | `ELEVENLABS_API_KEY` |
+| + Claude (Haiku) | about 1–3 öre | `ANTHROPIC_API_KEY` |
+
+Coordinates never come from an AI: Claude only names places, and the names
+are looked up in a **place-name registry** bundled in the image
+(`geodata/gazetteer-se.tsv.gz`, about all Swedish towns, villages,
+junctions, roundabouts, tunnels, bridges, rest areas, airports and lakes
+from [OpenStreetMap](https://www.openstreetmap.org/copyright), ODbL). Only
+names within 200 km of `NODE_LOCATION` are considered, which tells apart
+places with the same name. Claude receives the transcription, RadioText,
+`NODE_LOCATION`, real place names nearby and the incidents already open;
+no audio. If the Claude call fails, the rules engine places the message
+instead.
+
+How good is it? On 40 real P4 Värmland messages (23 incidents) the rules
+engine put 22 incidents at the right place. These are the messages the rules
+were tuned on, so expect less on new ones. Typical misses are misheard
+names that are also real places ("Kristineberg" for Kristinehamn), which
+Claude can correct, and names missing from OpenStreetMap ("Grumsrondellen").
+Measure on your own messages:
+
+```bash
+docker compose exec rds-guard python3 /app/tools/measure_geolocation.py
+docker compose exec rds-guard python3 /app/tools/measure_geolocation.py --keyterms --limit 20
+```
+
+The first shows where the rules engine and (with `ANTHROPIC_API_KEY`)
+Claude place each message, Claude's corrected text and its token cost. The
+second also transcribes the clips again with ElevenLabs with and without
+the place names, to see whether they help.
+
+The map tiles come from `tile.openstreetmap.org`, loaded by your browser.
+Refresh the place-name registry now and then with
+`python3 tools/build_gazetteer.py` (needs the Overpass API).
+
 ## REST API
 
 | Endpoint | Method | Description |
@@ -484,6 +599,7 @@ automation:
 | `/api/events/{id}` | GET | One event |
 | `/api/events/active` | GET | In-progress announcements only |
 | `/api/calendar` | GET | Light rows for the whole retention period (calendar and figures) |
+| `/api/incidents` | GET | Incidents for the map. Param: `hours` (default 12) |
 | `/api/status` | GET | Decoder status (uptime, station info, decode rate) |
 | `/api/audio/{filename}` | GET | Stream recorded audio file (OGG/WAV) |
 | `/api/events` | DELETE | Clear all events |
@@ -497,7 +613,9 @@ automation:
 | `/api/notify/log` | GET | Latest push messages |
 | `/ws/console` | WS | Live stream of all decoded RDS messages |
 
-Event responses include `audio_url`, `transcription` and `notify` (the push
+Event responses include `audio_url`, `transcription`,
+`transcription_corrected` (Claude's corrected text, or `null`),
+`incidents` (the places on the map), `geo_status` and `notify` (the push
 messages sent for the event). Writes to `/api/notify` and `/api/admin` must
 be JSON and, from a browser, same-origin.
 
@@ -529,6 +647,8 @@ Each alert message includes:
 | `state` | `end` |
 | `transcribed_text` | Speech-to-text of the broadcast audio, or `null` if transcription failed/timed out |
 | `transcription_status` | `done`, `error`, `timeout`, or `none` (no audio) |
+| `transcribed_text_corrected` | The text with misheard words corrected by Claude, or `null` |
+| `locations` | Where the message was placed: `label` (e.g. `E18 Bergviksmotet`), `road`, `lat`, `lon`, `radius_m`, `bearing` (direction of affected traffic, degrees), `both_directions`, `cleared`, `what` |
 | `station` | Station context (PI code, PS name, etc.) |
 | `duration_sec` | Event duration in seconds |
 | `radiotext` | RadioText messages collected during the event |
@@ -654,7 +774,13 @@ rds-guard/
 ├── audio_tee.py          # PCM stream splitter (rtl_fm → redsea + recorder)
 ├── audio_recorder.py     # Recording lifecycle, ffmpeg conversion
 ├── transcriber.py        # Speech-to-text: ElevenLabs Scribe, local faster-whisper or remote ASR
+├── gazetteer.py          # Place-name registry: lookup, sound-alike correction (shared)
+├── geolocate.py          # Map engines (rules, Claude), placement, incidents (shared)
+├── geo_service.py        # Registry per node area + engine (shared with the aggregator)
+├── geodata/gazetteer-se.tsv.gz # Swedish place names from OpenStreetMap (ODbL)
 ├── tools/convert_kb_whisper.py # Build step: converts KB-Whisper strict for faster-whisper
+├── tools/build_gazetteer.py    # Rebuilds geodata/ from OpenStreetMap
+├── tools/measure_geolocation.py # Measures the map engines on your own messages
 ├── status.py             # Status snapshot (/api/status + uplink heartbeat)
 ├── uplink.py             # Satellite → aggregator sender (outbox + heartbeat)
 ├── docs/
@@ -671,7 +797,8 @@ rds-guard/
     ├── shared/           # Web UI shared with the aggregator
     │   ├── app.css
     │   ├── rdsui.js      # Arkiv, Sök, Händelse, Admin (Aviseringar), audio player
-    │   └── vendor/       # wavesurfer.js
+    │   ├── map.js        # Karta, place labels, event mini map
+    │   └── vendor/       # wavesurfer.js, Leaflet
     ├── css/
     │   └── debug.css     # Debug view
     └── js/

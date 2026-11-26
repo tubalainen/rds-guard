@@ -31,6 +31,9 @@ local events, transcriptions, web UI and MQTT. The protocol is in
 - Push notifications by rules (`rds-aggregator/notify/<rule>`), which can
   also be limited to certain nodes; see the main README's
   [Push notifications](../README.md#push-notifications)
+- A map (**Karta**) of the incidents all nodes' messages mentioned in the
+  last 12 hours, with how certain each place is and which direction is
+  affected; see the main README's [Map](../README.md#map)
 - Read API for other programs
 - Keeps 90 days of events by default
 
@@ -228,13 +231,20 @@ short:
 
 1. Install RDS Guard by following its [Quick start](../README.md#quick-start),
    with the frequency of the local P4 station, and check that it decodes.
-2. Add the three lines to `.env`:
+2. Add the three lines to `.env`, and where the receiver is:
 
 ```bash
 UPLINK_URL=https://rds.example.com
 UPLINK_TOKEN=…
 NODE_NAME=Kalle, Karlstad
+NODE_LOCATION=Karlstad, Värmlands län
 ```
+
+   `NODE_LOCATION` ("Ort, Län") is how the aggregator knows where the
+   node's messages are from; without it they are not placed on the map.
+   The owner can also choose `LOCAL_PROCESSING=false`: the satellite then
+   only records and sends, and this aggregator does all transcription and
+   mapping (see [Who processes the recordings](../README.md#who-processes-the-recordings-your-choice)).
 
 3. Restart with `docker compose up -d`.
 
@@ -264,6 +274,10 @@ All settings are in `.env`; see [.env.example](.env.example).
 | `TRANSCRIPTION_CPU_THREADS` | `0` | CPU threads, `0` = automatic |
 | `ELEVENLABS_API_KEY` / `ELEVENLABS_MODEL` / `ELEVENLABS_KEYTERMS` | / `scribe_v3` / | ElevenLabs Scribe settings for `elevenlabs` (see the main README) |
 | `TRANSCRIPTION_FALLBACK` | `local` | On ElevenLabs errors: `local` or `none` |
+| `GEO_ENGINE` | `claude` | Map engine: `claude` (rules as fallback; runs as `rules` without a key), `rules` (local, free) or `none` |
+| `ANTHROPIC_API_KEY` | | Claude API key for the map engine |
+| `CLAUDE_MODEL` | `claude-haiku-5-5` | Claude model |
+| `TRANSCRIPTION_PLACE_NAMES` | `true` | Give the transcriber the node's local place names (ElevenLabs keyterms, about 20 % more per clip; Whisper prompt) |
 | `TRANSCRIPTION_DEVICE` | `cpu` | `cpu` or `cuda` |
 | `WHISPER_REMOTE_URL` | | Remote ASR server for `remote` |
 | `MQTT_ENABLED` | `false` | Publish to MQTT |
@@ -314,6 +328,7 @@ other characters into `-`.
 | `GET /api/v1/events/{event_uid}` | One event |
 | `GET /api/v1/audio/{event_uid}.ogg` | Audio |
 | `GET /api/v1/stations` | Stations seen, with the nodes that reported them |
+| `GET /api/v1/incidents` | Incidents for the map, with the nodes that heard them. Param: `hours` (default 12) |
 | `GET /api/v1/nodes` | Nodes with status (needs Admin login, as do all `/api/v1/nodes*`) |
 | `GET /api/v1/status` | Aggregator status |
 | `POST /api/v1/nodes` | `{"name": "…"}` → node, token and setup lines |

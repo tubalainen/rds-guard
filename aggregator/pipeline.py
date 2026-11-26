@@ -64,8 +64,11 @@ def alert_decision(row, now, engine_enabled=True):
     return "wait", None
 
 
-def alert_payload(row, transcription_status):
-    """MQTT alert payload — the satellite's format plus a `node` field."""
+def alert_payload(row, transcription_status, locations=None):
+    """MQTT alert payload — the satellite's format plus a `node` field.
+
+    locations: the incidents the message was placed at (map), if any.
+    """
     station = {"pi": row["pi"]}
     for src, dst in (("station_ps", "ps"), ("long_ps", "long_ps"),
                      ("prog_type", "prog_type")):
@@ -85,6 +88,12 @@ def alert_payload(row, transcription_status):
         "transcribed_text": (row.get("transcription")
                              if transcription_status == "done" else None),
         "transcription_status": transcription_status,
+        "transcribed_text_corrected": (row.get("transcription_corrected")
+                                       if transcription_status == "done" else None),
+        "locations": [
+            {k: loc.get(k) for k in ("label", "lat", "lon", "radius_m",
+                                     "bearing", "both_directions", "status")}
+            for loc in (locations or [])],
         "event_id": row["event_uid"],
         "node": {"name": row.get("node_name")},
         "timestamp": store.now_iso(),
@@ -103,9 +112,10 @@ def remove_audio_files(paths):
 
 
 class Pipeline(Hooks):
-    def __init__(self, transcriber=None, mqtt=None):
+    def __init__(self, transcriber=None, mqtt=None, geo=None):
         self._transcriber = transcriber
         self._mqtt = mqtt
+        self._geo = geo          # geo_service.GeoService or None
         self._wake = threading.Event()
         self._lock = threading.Lock()
         self._online = {}        # node_id -> bool (current state)
@@ -147,7 +157,61 @@ class Pipeline(Hooks):
             return
         path = Path(config.AUDIO_DIR) / Path(row["audio_path"]).name
         # Transcriber reports by integer id (shared with the satellite code)
-        self._transcriber.enqueue(path, row["id"], self._on_transcribed)
+        # Place names are looked up by the transcriber's thread: this runs
+        # on the ingest event loop, which must not wait for the registry
+        self._transcriber.enqueue(path, row["id"], self._on_transcribed,
+                                  hints=lambda: self._hints(row))
+
+    # -- geolocation --------------------------------------------------------
+
+    def node_place(self, node_id):
+        """Where a node is, from the NODE_LOCATION it reports, or None."""
+        if self._geo is None:
+            return None
+        node = store.get_node(node_id) or {}
+        location = (node.get("status") or {}).get("location")
+        return self._geo.locate_node(location) if location else None
+
+    def _hints(self, row):
+        """The reporting node's place names, for the transcriber."""
+        place = self.node_place(row["node_id"]) if self._geo else None
+        if place is None:
+            return None
+        try:
+            return self._geo.hints(place.point,
+                                   store.recent_place_names(place.point))
+        except Exception:
+            log.exception("Could not build place-name hints")
+            return None
+
+    def _geolocate(self, row, text):
+        """Place a message's incidents and store them. Never raises."""
+        if self._geo is None or self._geo.engine == "none":
+            return
+        uid = row["event_uid"]
+        try:
+            place = self.node_place(row["node_id"])
+            if place is None:
+                store.save_geolocation(uid, None, "no_location")
+                return
+            location = ((store.get_node(row["node_id"]) or {}).get("status")
+                        or {}).get("location")
+            result = self._geo.locate(text, place.point, location,
+                                      row.get("radiotext"),
+                                      store.open_incidents(place.point))
+            status = "done" if result and result.placements else "none"
+            store.save_geolocation(uid, result, status)
+            if result:
+                log.info("Event %s from %s placed with %s: %s", uid,
+                         row.get("node_name"), result.engine,
+                         "; ".join(f"{p.label} (±{p.radius_m} m)"
+                                   for p in result.placements) or "no place found")
+        except Exception:
+            log.exception("Geolocation failed for event %s", uid)
+            try:
+                store.save_geolocation(uid, None, "error")
+            except Exception:
+                pass
 
     def requeue_pending(self):
         """After a restart, queue audio whose transcription never finished."""
@@ -165,6 +229,9 @@ class Pipeline(Hooks):
         if error:
             store.set_transcription(uid, None, "error")
         else:
+            # Placed before the text is marked done, so the alert (sent once
+            # it is done) carries the corrected text and the places
+            self._geolocate(row, text)
             store.set_transcription(uid, text, "done", duration_sec)
             self._publish(
                 f"{row['pi']}/{row['type']}/transcription", {
@@ -256,7 +323,9 @@ class Pipeline(Hooks):
                 store.mark_alert(row["event_uid"], "mqtt_disabled")
                 self._notify_after_alert(row)
                 continue
-            if self._publish("alert", alert_payload(row, tstatus)):
+            locations = store.incidents_for_events(
+                [row["event_uid"]]).get(row["event_uid"], [])
+            if self._publish("alert", alert_payload(row, tstatus, locations)):
                 store.mark_alert(row["event_uid"], "published")
                 self._notify_after_alert(row)
                 log.info("Alert published for %s from %s (%s)",

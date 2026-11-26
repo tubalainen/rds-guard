@@ -180,7 +180,11 @@ const Aggregator = (() => {
             idOf: (ev) => ev.event_uid,
             loadStations,
             loadNodes,
+            views: { karta: RDSMap.view },
+            extraNav: [RDSMap.nav],
             adminSections: [['noder', 'Noder', nodesView]],
+            cardMeta: RDSMap.cardMeta,
+            eventExtras: RDSMap.eventExtras,
         });
         poll();
         setInterval(() => { if (!document.hidden) poll(); }, 15000);

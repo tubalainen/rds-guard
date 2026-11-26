@@ -66,8 +66,10 @@ def _public_row(row):
 
 def _attach_notify(rows):
     log_rows = event_store.notify_for_events([r["id"] for r in rows])
+    places = event_store.incidents_for_events([r["id"] for r in rows])
     for row in rows:
         row["notify"] = log_rows.get(row["id"], [])
+        row["incidents"] = places.get(str(row["id"]), [])
     return rows
 
 
@@ -150,6 +152,44 @@ async def handle_calendar(request):
         "retention_days": cfg.EVENT_RETENTION_DAYS,
         "timezone": cfg.NOTIFY_TIMEZONE,
     })
+
+
+async def handle_incidents(request):
+    """GET /api/incidents — incidents for the map (default: last 12 hours)."""
+    try:
+        hours = max(1, min(int(request.query.get("hours", 12)), 24 * 7))
+    except (TypeError, ValueError):
+        hours = 12
+
+    def work():
+        rows = event_store.list_incidents(hours)
+        # The latest message about each incident, for the popup
+        latest = {}
+        for inc in rows:
+            for key in inc["events"][:1]:
+                try:
+                    ev = event_store.get_event(int(key))
+                except (TypeError, ValueError):
+                    ev = None
+                if ev:
+                    latest[inc["id"]] = {
+                        "id": ev["id"],
+                        "started_at": ev.get("started_at"),
+                        "station_ps": ev.get("station_ps"),
+                        "transcription": ev.get("transcription_corrected")
+                        or ev.get("transcription"),
+                        "audio_url": (f"/api/audio/{ev['audio_path']}"
+                                      if ev.get("audio_path") else None),
+                    }
+        for inc in rows:
+            inc["latest"] = latest.get(inc["id"])
+            inc["events"] = [int(k) for k in inc["events"] if str(k).isdigit()]
+        return rows
+
+    import rds_guard as rg
+    rows = await _run(work)
+    return web.json_response({"incidents": rows, "hours": hours,
+                              "geo": rg.geo_snapshot()})
 
 
 async def handle_status(request):
@@ -427,6 +467,7 @@ def create_app():
     app.router.add_get("/api/events/active", handle_events_active)
     app.router.add_get("/api/events/{event_id}", handle_event)
     app.router.add_get("/api/calendar", handle_calendar)
+    app.router.add_get("/api/incidents", handle_incidents)
     ADMIN.add_routes(app.router, "/api")
     app.router.add_get("/api/notify", handle_notify)
     app.router.add_get("/api/notify/log", handle_notify_log)

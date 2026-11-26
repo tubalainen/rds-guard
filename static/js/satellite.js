@@ -167,7 +167,10 @@ const Satellite = (() => {
             apiBase: '/api',
             idOf: (ev) => ev.id,
             loadStations,
-            views: { debug: debugView },
+            views: { debug: debugView, karta: RDSMap.view },
+            extraNav: [RDSMap.nav],
+            cardMeta: RDSMap.cardMeta,
+            eventExtras: RDSMap.eventExtras,
         });
         poll();
         setInterval(() => { if (!document.hidden) poll(); }, 15000);
