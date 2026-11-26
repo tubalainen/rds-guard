@@ -17,6 +17,11 @@ updates:
       # Python 3.11. Drop this when the base image moves to a newer Debian.
       - dependency-name: numpy
         versions: [">=2.5"]
+      # PyAV 19 removed av.open(metadata_errors=...), which faster-whisper
+      # (1.2.1) still passes: local transcription fails on every clip. Drop
+      # this once a faster-whisper release decodes audio with PyAV 19.
+      - dependency-name: av
+        versions: [">=19"]
     groups:
       python:
         patterns: ["*"]
@@ -27,6 +32,12 @@ updates:
       interval: daily
     cooldown:
       default-days: 7
+    ignore:
+      # PyAV 19 removed av.open(metadata_errors=...), which faster-whisper
+      # (1.2.1) still passes: local transcription fails on every clip. Drop
+      # this once a faster-whisper release decodes audio with PyAV 19.
+      - dependency-name: av
+        versions: [">=19"]
     groups:
       python-aggregator:
         patterns: ["*"]
