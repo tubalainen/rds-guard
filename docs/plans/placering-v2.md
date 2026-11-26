@@ -1,6 +1,8 @@
 # Plan: bättre tolkning och placering av trafikmeddelanden (v2)
 
-Status 2026-11-26: steg 1 och 2 klara. Facit (`tools/geo_corpus.json`)
+Status 2026-11-26: steg 1–3 klara (steg 1–2 i v0.7.0/v0.7.1). Steg 3:
+områdesvarningar lagras per meddelande (`area_warnings`) och listas ovanför
+kartan; samma varning sagd igen blir en rad. Facit (`tools/geo_corpus.json`)
 har 61 riktiga meddelanden från P4 Värmland (12–26 nov), uppmärkta: 77
 händelseposter, 4 områdesvarningar, kedjor som E45 Värmlandsbro (11
 sändningar) och E18 Bergviksmotet (7). Handinlagda platser finns i
