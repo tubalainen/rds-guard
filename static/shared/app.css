@@ -641,3 +641,18 @@ details.help[open] summary { margin-bottom: 10px; }
 .map.leaflet-container a.leaflet-popup-close-button { color: var(--muted); }
 .leaflet-control-zoom a, .leaflet-control-attribution { background: var(--surface) !important; color: var(--text-2) !important; }
 .leaflet-control-attribution a { color: var(--accent) !important; }
+
+/* Trafikverket */
+.map-checks { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.map-check.trv input { accent-color: #D92D20; }
+.lg-tri { width: 0; height: 0; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 10px solid #DC6803; }
+.trv-icon { background: none; border: 0; }
+.trv-box { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); }
+.trv-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+.trv-box p { margin: 6px 0; font-size: 13px; }
+.trv-timeline { list-style: none; margin: 8px 0; padding: 0 0 0 12px; border-left: 2px solid var(--border-strong); font-size: 12.5px; }
+.trv-timeline li { position: relative; display: flex; gap: 8px; padding: 3px 0; }
+.trv-timeline li::before { content: ""; position: absolute; left: -17px; top: 8px; width: 8px; height: 8px; border-radius: 50%; background: #D92D20; }
+.trv-timeline li.trv::before { background: var(--accent, #1D4ED8); }
+.trv-timeline time { flex: none; min-width: 84px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.map-item-tri { flex: none; width: 0; height: 0; margin-top: 5px; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 10px solid #DC6803; }
