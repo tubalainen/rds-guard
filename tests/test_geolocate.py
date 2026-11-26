@@ -475,3 +475,25 @@ def test_area_warnings_are_stored_and_said_again_once(db):
     assert b["events"] == ["2", "1"] and b["first_seen"] == "2026-11-26T10:00:00"
     geo.purge_incidents(db, "2026-11-26T10:30:00")
     assert [x["events"] for x in geo.list_areas(db)] == [["3"], ["2"]]
+
+
+def test_two_parts_of_one_message_stay_two_incidents(db):
+    ids = merge(db, [pl(59.38377, 13.48295, 500, label="E18 Klaramotet", names=["Klaramotet"]),
+                     pl(59.38152, 13.46373, 500, label="E18 Våxnäsmotet", names=["Våxnäsmotet"])],
+                1, "2026-11-26T15:04:00")
+    assert len(set(ids)) == 2
+
+
+def test_claude_new_joins_only_the_same_place_name(db):
+    [a] = merge(db, [pl(59.36209, 14.00995, 740, names=["Ölme"])], 1, "2026-11-26T16:47:00")
+    [b] = geo.merge_placements(db, [pl(59.36987, 14.01174, 600, names=["Stolpen"])],
+                               2, "2026-11-26T23:36:00", "2026-11-26T00:00:00", "claude")
+    [c] = geo.merge_placements(db, [pl(59.3622, 14.0101, 1500, names=["Ölme"])],
+                               3, "2026-11-26T23:40:00", "2026-11-26T00:00:00", "claude")
+    [d] = merge(db, [pl(59.36987, 14.01174, 600, names=["Stolpen"])], 4, "2026-11-26T23:45:00")
+    assert b != a and c == a and d in (a, b)   # the rules engine joins by place
+
+
+def test_a_town_on_the_stretch_beats_the_stretch(reg):
+    [p] = place("E18 mellan Väse och Karlstad, vid Skattkärr, olycka.", reg)
+    assert p.label == "E18 Skattkärr" and p.radius_m < 9000

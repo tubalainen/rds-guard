@@ -411,6 +411,13 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
     fine = sorted((m for m in landmarks if m.place.radius_m <= 2500),
                   key=lambda m: m.place.radius_m)
     coarse = [m for m in landmarks if m.place.radius_m > 2500]
+    if seg:
+        # A town on the stretch ("mellan Väse och Karlstad, vid Skattkärr")
+        # says more than the stretch, when its circle is the smaller one
+        seg_r = gz.km(seg[0].place.point, seg[1].place.point) * 500
+        inner = [m for m in coarse if m not in seg and m.place.radius_m < seg_r]
+    else:
+        inner = []
     beside = [m for n in mention.beside for m in look(n)[:1] if near_anchor(m.place, town)]
     names = []
     if len(fine) >= 2 and gz.km(fine[0].place.point, fine[1].place.point) <= 10:
@@ -423,6 +430,10 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
         if seg and f in seg:
             radius = max(radius, 2000)  # "strax innan Töcksfors"
         level, names = "nära en plats", [f]
+    elif inner:
+        c = inner[0]
+        point, radius = c.place.point, c.place.radius_m
+        level, names = "nära en plats", [c]
     elif seg:
         a, b = seg[0].place.point, seg[1].place.point
         point, radius = gz.midpoint(a, b), gz.km(a, b) * 500
@@ -716,6 +727,7 @@ class ClaudeReader:
                                            max_retries=2)
         self.model = model
         self.last_usage = None   # token counts of the latest call
+        self.last_raw = self.last_places = None
 
     def read(self, text, radiotext, location_label, candidates, open_incidents,
              gaz=None):
@@ -749,6 +761,7 @@ class ClaudeReader:
             raise RuntimeError(f"Claude stopped: {resp.stop_reason}")
         data = json.loads(next(b.text for b in resp.content if b.type == "text"))
         corrected = (data.get("corrected_text") or "").strip() or None
+        self.last_raw, self.last_places = data, by_id   # for tools/eval_geolocation
         mentions = mentions_from_items(data.get("items"), by_id,
                                        (corrected, text))
         return corrected, mentions
@@ -941,6 +954,17 @@ def _match(inc, pl):
     return dist if dist <= limit else None
 
 
+def _may_join(inc, pl, engine):
+    """Whether a placement may join an incident at the same place without
+    being told to. A reader that saw the known incidents and still says
+    "new" is believed, unless the place has the same name."""
+    if engine != "claude" or pl.kind != "new":
+        return True
+    names = {n.lower() for n in (inc.get("names") or [])}
+    return bool(names & {n.lower() for n in pl.names}) or (
+        gz.km((inc["lat"], inc["lon"]), (pl.lat, pl.lon)) < 0.3)
+
+
 def _shift_iso(iso, hours):
     """An ISO timestamp (with or without a trailing Z) moved by hours."""
     t = calendar.timegm(time.strptime(iso[:19], "%Y-%m-%dT%H:%M:%S"))
@@ -969,6 +993,7 @@ def merge_placements(conn, placements, event_key, now_iso, since_iso, engine,
         "SELECT * FROM incidents WHERE last_seen >= ? AND first_seen <= ?",
         (min(link_since, since_iso), _shift_iso(now_iso, INCIDENT_HOURS)))]
     ids = []
+    made_here = set()        # incidents this message created: not joined again
     for pl in placements:
         target = None
         if pl.updates_incident:
@@ -977,7 +1002,9 @@ def merge_placements(conn, placements, event_key, now_iso, since_iso, engine,
                           None)
         if target is None:
             fits = [(d, i) for i in recent if i["last_seen"] >= since_iso
-                    and (d := _match(i, pl)) is not None]
+                    and i["id"] not in made_here and i["id"] not in ids
+                    and (d := _match(i, pl)) is not None
+                    and _may_join(i, pl, engine)]
             target = min(fits, key=lambda di: di[0])[1] if fits else None
         status = "cleared" if pl.cleared or pl.kind == "cleared" else "active"
         if target is None:
@@ -990,8 +1017,10 @@ def merge_placements(conn, placements, event_key, now_iso, since_iso, engine,
                  json.dumps(pl.names, ensure_ascii=False), status, engine,
                  now_iso, now_iso))
             inc_id = cur.lastrowid
+            made_here.add(inc_id)
             recent.append({"id": inc_id, "road": pl.road, "lat": pl.lat,
                            "lon": pl.lon, "radius_m": pl.radius_m,
+                           "names": list(pl.names), "label": pl.label,
                            "first_seen": now_iso, "last_seen": now_iso})
         else:
             inc_id = target["id"]

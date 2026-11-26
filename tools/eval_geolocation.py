@@ -12,6 +12,13 @@ about the same incident is measured too.
     python3 tools/eval_geolocation.py --engine claude      # needs ANTHROPIC_API_KEY
     python3 tools/eval_geolocation.py --import events.json # add messages to label
     python3 tools/eval_geolocation.py --stored events.json # score what an installation stored
+    python3 tools/eval_geolocation.py --engine claude --save-claude claude.json
+    python3 tools/eval_geolocation.py --replay claude.json # Claude's saved answers, free
+
+--save-claude keeps Claude's answers (items, the numbered places, the known
+incidents it referred to); --replay runs them again through the server's
+own logic without calling Claude, so changes to placing and merging can be
+measured for free.
 
 events.json is the output of
     curl -s 'http://<host>:8022/api/events?type=traffic&limit=60'
@@ -152,6 +159,76 @@ def validate(corpus, reg, center):
 
 
 # ---------------------------------------------------------------------------
+# Claude's answers, saved and replayed
+# ---------------------------------------------------------------------------
+
+class RecordingReader:
+    """Wraps a ClaudeReader and keeps every answer, by transcription."""
+
+    def __init__(self, inner, path=None):
+        self.inner, self.saved, self.path = inner, {}, path
+
+    @property
+    def last_usage(self):
+        return self.inner.last_usage
+
+    def read(self, text, radiotext, location_label, candidates, open_incidents,
+             gaz=None):
+        out = self.inner.read(text, radiotext, location_label, candidates,
+                              open_incidents, gaz=gaz)
+        known = {i["id"]: i for i in open_incidents}
+        raw = self.inner.last_raw or {}
+        self.saved[text] = {
+            "corrected_text": raw.get("corrected_text"),
+            "items": raw.get("items") or [],
+            "places": {str(k): [p.name, p.kind, p.lat, p.lon, p.county]
+                       for k, p in (self.inner.last_places or {}).items()},
+            # What each incident id meant, to find it again in a replay
+            "known": {str(it["incident_id"]): {
+                k: known[it["incident_id"]].get(k)
+                for k in ("road", "label", "lat", "lon")}
+                for it in raw.get("items") or []
+                if it.get("incident_id") in known},
+        }
+        if self.path:   # after every answer: an interrupted run keeps them
+            with open(self.path, "w", encoding="utf-8") as f:
+                json.dump(self.saved, f, ensure_ascii=False, indent=1)
+        return out
+
+
+class ReplayReader:
+    """Answers with saved Claude answers instead of calling Claude."""
+
+    last_usage = None
+
+    def __init__(self, saved):
+        self.saved = saved
+
+    def read(self, text, radiotext, location_label, candidates, open_incidents,
+             gaz=None):
+        rec = self.saved.get(text)
+        if rec is None:
+            raise KeyError("no saved answer for this message")
+        by_id = {int(k): gz.Place(*v) for k, v in rec["places"].items()}
+        items = []
+        for it in rec["items"]:
+            it = dict(it)
+            ref = rec["known"].get(str(it.get("incident_id")))
+            it["incident_id"] = None
+            if ref:
+                # The incident in this run that is the one Claude named
+                near = [(gz.km((ref["lat"], ref["lon"]), (i["lat"], i["lon"])), i)
+                        for i in open_incidents
+                        if not ref.get("road") or i.get("road") in (None, ref["road"])]
+                near = [x for x in near if x[0] <= 5]
+                if near:
+                    it["incident_id"] = min(near, key=lambda x: x[0])[1]["id"]
+            items.append(it)
+        corrected = (rec.get("corrected_text") or "").strip() or None
+        return corrected, geolocate.mentions_from_items(items, by_id, (corrected, text))
+
+
+# ---------------------------------------------------------------------------
 # Run: the messages in broadcast order, placed and merged as in RDS Guard
 # ---------------------------------------------------------------------------
 
@@ -173,14 +250,15 @@ class CaseRun:
     areas: int = 0                   # area warnings the engine found
 
 
-def run(corpus, geolocator, reg, center, location_label=""):
+def run(corpus, geolocator, reg, center, location_label="", progress=None):
     """Every message of the set through placing and merging. Returns
-    [CaseRun] in broadcast order."""
+    [CaseRun] in broadcast order. progress(i, n, run) is called after each."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     geolocate.init_tables(conn)
     out = []
-    for case in sorted(corpus["cases"], key=lambda c: c["at"]):
+    cases = sorted(corpus["cases"], key=lambda c: c["at"])
+    for case in cases:
         at = norm_ts(case["at"])
         since = geolocate._shift_iso(at, -geolocate.INCIDENT_HOURS)
         known = geolocate.open_incidents(
@@ -199,6 +277,8 @@ def run(corpus, geolocator, reg, center, location_label=""):
         out.append(CaseRun(case, result.engine, predicted, result.corrected_text,
                            result.error, (usage.input_tokens, usage.output_tokens)
                            if usage else None, len(result.areas)))
+        if progress:
+            progress(len(out), len(cases), out[-1])
     conn.close()
     return out
 
@@ -405,6 +485,10 @@ def main():
                     help="add the messages in a saved /api/events answer to the set")
     ap.add_argument("--stored", metavar="EVENTS_JSON",
                     help="score the incidents stored with a saved /api/events answer")
+    ap.add_argument("--save-claude", metavar="FILE",
+                    help="with --engine claude: keep Claude's answers in FILE")
+    ap.add_argument("--replay", metavar="FILE",
+                    help="run Claude's answers saved with --save-claude, free")
     ap.add_argument("--check", action="store_true", help="only check the set")
     ap.add_argument("--quiet", action="store_true", help="only the totals")
     ap.add_argument("--json", metavar="FILE", help="also write the totals here")
@@ -449,18 +533,36 @@ def main():
                 json.dump(totals, f, ensure_ascii=False, indent=1)
         return
     engines = ["rules", "claude"] if args.engine == "both" else [args.engine]
+    if args.replay:
+        engines = ["replay"]
     for name in engines:
-        if name == "claude":
+        recorder = None
+        if name == "replay":
+            with open(args.replay, encoding="utf-8") as f:
+                g = geolocate.Geolocator(ReplayReader(json.load(f)))
+        elif name == "claude":
             import config
             if not config.ANTHROPIC_API_KEY:
                 sys.exit("ANTHROPIC_API_KEY saknas.")
-            g = geolocate.Geolocator(geolocate.ClaudeReader(
+            reader = geolocate.ClaudeReader(
                 config.ANTHROPIC_API_KEY, model=config.CLAUDE_MODEL,
-                timeout=config.CLAUDE_TIMEOUT))
+                timeout=config.CLAUDE_TIMEOUT)
+            if args.save_claude:
+                reader = recorder = RecordingReader(reader, args.save_claude)
+            g = geolocate.Geolocator(reader)
         else:
             g = geolocate.Geolocator(None)
         t0 = time.monotonic()
-        runs = run(corpus, g, reg, node.point, corpus["node_location"])
+        def progress(i, n, r):
+            print(f"  {i}/{n}  {r.case['id']}  {r.engine}"
+                  + (f"  {r.usage[0]}+{r.usage[1]} tokens" if r.usage else "")
+                  + (f"  FEL: {r.error}" if r.error else ""),
+                  file=sys.stderr, flush=True)
+
+        runs = run(corpus, g, reg, node.point, corpus["node_location"],
+                   progress if name in ("claude", "replay") else None)
+        if recorder is not None:
+            print(f"Claudes svar sparade i {args.save_claude}", file=sys.stderr)
         s = score(runs, reg, node.point)
         print_report(name, runs, s, verbose=not args.quiet)
         tin = sum(r.usage[0] for r in runs if r.usage)
