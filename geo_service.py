@@ -118,6 +118,16 @@ def create_service(engine, api_key="", model="claude-haiku-5-5", timeout=60,
 # Placing older messages: the first time the history map is shown
 # ---------------------------------------------------------------------------
 
+# What placing one message again costs, for the rebuild confirmation (öre)
+REBUILD_ORE_PER_MESSAGE = {"claude": 1.5, "rules": 0}
+
+
+def rebuild_estimate(engine, messages):
+    """{'messages', 'engine', 'cost_ore'} for placing messages again."""
+    ore = REBUILD_ORE_PER_MESSAGE.get(engine, 0) * messages
+    return {"messages": messages, "engine": engine, "cost_ore": round(ore, 1)}
+
+
 class Backfill:
     """Places the messages stored before the map existed, oldest first, in
     a background thread. Each one is placed as at the time it was broadcast,

@@ -1047,6 +1047,32 @@ def start_backfill():
         return False
     return _get_backfill().start()
 
+
+def rebuild_status():
+    """What a rebuild of the map would do: messages, engine, cost, and how
+    far placing has come."""
+    import geo_service as geo_service_mod
+    bf = backfill_status()
+    out = geo_service_mod.rebuild_estimate(bf["engine"],
+                                           event_store.geo_placeable_count())
+    out.update(available=bf["available"], running=bf["running"],
+               backfill=bf)
+    if bf.get("reason"):
+        out["reason"] = bf["reason"]
+    return out
+
+
+def start_rebuild():
+    """Delete every incident and place all stored messages again, oldest
+    first, with the current engine. False if it cannot run now."""
+    bf = backfill_status()
+    if not bf["available"] or bf["running"]:
+        return False
+    gone, todo = event_store.reset_geolocation()
+    log.info("Rebuilding the map: %d incidents deleted, %d messages to place "
+             "with %s", gone, todo, bf["engine"])
+    return _get_backfill().start()
+
 # ---------------------------------------------------------------------------
 # Statistics
 # ---------------------------------------------------------------------------

@@ -826,6 +826,30 @@ def geo_pending():
     return out
 
 
+_GEO_PLACEABLE_WHERE = (
+    " WHERE transcription IS NOT NULL AND TRIM(transcription) != '' "
+    "AND transcription_status = 'done'")
+
+
+def geo_placeable_count():
+    """Transcribed messages a rebuild would place again."""
+    return _conn().execute(
+        "SELECT COUNT(*) FROM events" + _GEO_PLACEABLE_WHERE).fetchone()[0]
+
+
+def reset_geolocation():
+    """Delete the incidents and mark every transcribed message as never
+    placed, so the backfill places them all again, oldest first.
+    Returns (incidents deleted, messages to place)."""
+    with _lock:
+        conn = _conn()
+        gone = geolocate.reset_incidents(conn)
+        cur = conn.execute("UPDATE events SET geo_status = NULL, geo_engine = NULL"
+                           + _GEO_PLACEABLE_WHERE)
+        conn.commit()
+    return gone, cur.rowcount
+
+
 def geo_pending_by_node():
     """{node_id: number of messages never placed on the map}."""
     return dict(_conn().execute(

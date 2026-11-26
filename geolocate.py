@@ -1067,6 +1067,21 @@ def recent_names(conn, since_iso, limit=60):
     return [n for n, _ in sorted(counts.items(), key=lambda kv: -kv[1])][:limit]
 
 
+def reset_incidents(conn):
+    """Delete every incident, its links to messages and the area warnings,
+    before the stored messages are placed again (a rebuild). The caller
+    holds its write lock and commits. Returns how many incidents went."""
+    n = conn.execute("SELECT COUNT(*) FROM incidents").fetchone()[0]
+    conn.execute("DELETE FROM incident_events")
+    conn.execute("DELETE FROM incidents")
+    try:
+        conn.execute("DELETE FROM area_warnings")
+    except sqlite3.OperationalError as e:
+        if "no such table" not in str(e).lower():
+            raise
+    return n
+
+
 def purge_incidents(conn, before_iso):
     conn.execute("DELETE FROM incident_events WHERE incident_id IN "
                  "(SELECT id FROM incidents WHERE last_seen < ?)", (before_iso,))

@@ -111,3 +111,74 @@ async def test_history_api(aiohttp_client, store, geo):
     # The normal map keeps to the last 12 hours
     data = await (await client.get("/api/incidents")).json()
     assert data["incidents"] == [] and "backfill" not in data
+
+
+# ---------------------------------------------------------------- rebuild
+
+def test_rebuild_replaces_every_incident(store, geo):
+    a = old_event(store, "2026-11-20T08:00:00")
+    b = old_event(store, "2026-11-20T09:00:00")
+    assert rds_guard.start_backfill()
+    wait(rds_guard._get_backfill())
+    [first] = event_store.list_incidents(None)
+    conn = store._conn()
+    conn.execute("UPDATE incidents SET label = 'gammal', engine = 'claude'")
+    conn.commit()
+
+    st = rds_guard.rebuild_status()
+    assert st == {**st, "messages": 2, "engine": "rules", "cost_ore": 0,
+                  "available": True, "running": False}
+    assert rds_guard.start_rebuild()
+    wait(rds_guard._get_backfill())
+    [inc] = event_store.list_incidents(None)
+    assert inc["id"] != first["id"] and inc["label"] == "E18 Bergviksmotet"
+    assert inc["first_seen"] == "2026-11-20T08:00:00"
+    assert sorted(inc["events"]) == sorted([str(a), str(b)])
+    bf = rds_guard.rebuild_status()["backfill"]
+    assert (bf["total"], bf["placed"], bf["finished"]) == (2, 2, True)
+
+
+def test_rebuild_clears_area_warnings_when_they_exist(store, geo):
+    conn = store._conn()
+    geolocate.reset_incidents(conn)          # no such table yet: no error
+    conn.execute("CREATE TABLE IF NOT EXISTS area_warnings "
+                 "(id INTEGER PRIMARY KEY, area TEXT)")
+    conn.execute("INSERT INTO area_warnings (area) VALUES ('Värmland')")
+    conn.commit()
+    old_event(store, "2026-11-20T08:00:00")
+    assert rds_guard.start_rebuild()
+    wait(rds_guard._get_backfill())
+    assert conn.execute("SELECT COUNT(*) FROM area_warnings").fetchone()[0] == 0
+
+
+def test_rebuild_cost_follows_the_engine():
+    assert geo_service.rebuild_estimate("claude", 144) == {
+        "messages": 144, "engine": "claude", "cost_ore": 216.0}
+    assert geo_service.rebuild_estimate("rules", 144)["cost_ore"] == 0
+
+
+def test_no_rebuild_without_a_receiver_location(store, geo, monkeypatch):
+    old_event(store, "2026-11-20T08:00:00", geo_status="done")
+    monkeypatch.setattr(rds_guard, "_node_place", None)
+    assert not rds_guard.start_rebuild()
+    # Nothing was deleted or reset
+    assert store._conn().execute(
+        "SELECT geo_status FROM events").fetchone()[0] == "done"
+
+
+async def test_rebuild_api_needs_admin(aiohttp_client, store, geo, monkeypatch):
+    import web_server
+    monkeypatch.setattr(config, "ADMIN_PASSWORD", "hemligt")
+    old_event(store, "2026-11-20T08:00:00")
+    client = await aiohttp_client(web_server.create_app())
+    assert (await client.get("/api/incidents/rebuild")).status == 401
+    assert (await client.post("/api/incidents/rebuild", json={})).status == 401
+    assert (await client.post("/api/admin/login",
+                              json={"password": "hemligt"})).status == 200
+    info = await (await client.get("/api/incidents/rebuild")).json()
+    assert (info["messages"], info["engine"], info["available"]) == (1, "rules", True)
+    resp = await client.post("/api/incidents/rebuild", json={})
+    assert resp.status == 202 and (await resp.json())["started"]
+    wait(rds_guard._get_backfill())
+    [inc] = event_store.list_incidents(None)
+    assert inc["label"] == "E18 Bergviksmotet"

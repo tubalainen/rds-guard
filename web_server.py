@@ -8,6 +8,8 @@ Uses aiohttp to serve:
   GET  /api/calendar  → light rows for the archive calendar
   GET  /api/incidents → incidents for the map (?history=1: all stored)
   POST /api/incidents/backfill → place messages stored before the map existed
+  GET  /api/incidents/rebuild  → what rebuilding the map would do (admin)
+  POST /api/incidents/rebuild  → delete the incidents, place every message again (admin)
   GET  /api/admin/session, POST /api/admin/login|logout → admin login
   (every /api/notify* route below needs a logged-in admin, see admin_auth)
   GET  /api/notify    → push rules + MQTT connection
@@ -220,6 +222,23 @@ async def handle_incidents_backfill(request):
                              status=202 if started else 200)
 
 
+async def handle_incidents_rebuild_info(request):
+    """GET /api/incidents/rebuild — what rebuilding the map would do: how
+    many messages, which engine, the cost, and how far a run has come."""
+    import rds_guard as rg
+    return web.json_response(await _run(rg.rebuild_status))
+
+
+async def handle_incidents_rebuild(request):
+    """POST /api/incidents/rebuild (admin) — delete every incident and place
+    all stored messages again, oldest first, with the current engine."""
+    import rds_guard as rg
+    started = await _run(rg.start_rebuild)
+    st = await _run(rg.rebuild_status)
+    return web.json_response({"started": started, "rebuild": st},
+                             status=202 if started else 409)
+
+
 async def handle_trafikverket(request):
     """GET /api/trafikverket — Trafikverket's deviations near the receiver:
     current ones and those changed in the last hours (default 12), each with
@@ -312,7 +331,8 @@ def _admin_password():
     return cfg.ADMIN_PASSWORD
 
 
-ADMIN = admin_auth.AdminAuth(_admin_password, protected=("/api/notify",),
+ADMIN = admin_auth.AdminAuth(_admin_password,
+                             protected=("/api/notify", "/api/incidents/rebuild"),
                              cookie_name="rdsguard_admin")
 
 
@@ -516,6 +536,8 @@ def create_app():
     app.router.add_get("/api/calendar", handle_calendar)
     app.router.add_get("/api/incidents", handle_incidents)
     app.router.add_post("/api/incidents/backfill", handle_incidents_backfill)
+    app.router.add_get("/api/incidents/rebuild", handle_incidents_rebuild_info)
+    app.router.add_post("/api/incidents/rebuild", handle_incidents_rebuild)
     app.router.add_get("/api/trafikverket", handle_trafikverket)
     ADMIN.add_routes(app.router, "/api")
     app.router.add_get("/api/notify", handle_notify)
