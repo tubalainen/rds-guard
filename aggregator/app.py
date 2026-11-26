@@ -37,6 +37,27 @@ async def _serve(app, port, label):
     return runner
 
 
+def _start_trafikverket(pipeline):
+    """Trafikverket feed around every node that reports a location, or
+    None without TRAFIKVERKET_API_KEY or with the map off."""
+    if not config.TRAFIKVERKET_API_KEY or config.GEO_ENGINE == "none":
+        return None
+
+    def centers():
+        out = []
+        for node in store.list_nodes():
+            place = pipeline.node_place(node["id"])
+            if place:
+                out.append(place.point)
+        return out
+
+    import trafikverket
+    return trafikverket.create_feed(
+        config.TRAFIKVERKET_API_KEY, store.trv, centers,
+        radius_km=config.TRAFIKVERKET_RADIUS_KM,
+        poll_sec=config.TRAFIKVERKET_POLL_SEC)
+
+
 async def main():
     log.info("════════════════════════════════════════════")
     log.info("  RDS Guard aggregator %s starting", config.BUILD_VERSION)
@@ -44,6 +65,7 @@ async def main():
     log.info("  Public URL:  %s", config.PUBLIC_URL or "(not set)")
     log.info("  Transcribe:  %s", config.TRANSCRIPTION_ENGINE)
     log.info("  Map:         %s", config.GEO_ENGINE)
+    log.info("  Trafikverket: %s", "on" if config.TRAFIKVERKET_API_KEY else "off")
     log.info("  MQTT:        %s", "enabled" if config.MQTT_ENABLED else "disabled")
     log.info("  Retention:   %d days", config.EVENT_RETENTION_DAYS)
     Path(config.AUDIO_DIR).mkdir(parents=True, exist_ok=True)
@@ -83,6 +105,7 @@ async def main():
         place_names=config.TRANSCRIPTION_PLACE_NAMES)
 
     pipeline = Pipeline(transcriber=transcriber, mqtt=mqtt, geo=geo)
+    pipeline.trv_feed = _start_trafikverket(pipeline)
     pipeline.requeue_pending()
     stop_threads = threading.Event()
     threading.Thread(target=pipeline.run, args=(stop_threads,),

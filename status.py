@@ -52,6 +52,7 @@ def build_status():
     uplink = rg.uplink
     snap["uplink"] = uplink.snapshot() if uplink else {"enabled": False}
     snap["geo"] = rg.geo_snapshot()
+    snap["trafikverket"] = rg.trv_snapshot()
     snap["local_processing"] = config.LOCAL_PROCESSING
 
     return snap

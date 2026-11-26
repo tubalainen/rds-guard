@@ -213,6 +213,20 @@ async def handle_incidents_backfill(request):
                              status=202 if started else 200)
 
 
+async def handle_trafikverket(request):
+    """GET /api/trafikverket — Trafikverket's deviations near the receiver:
+    current ones and those changed in the last hours (default 12), each with
+    its versions for the timeline."""
+    try:
+        hours = max(1, min(int(request.query.get("hours", 12)), 24 * 7))
+    except (TypeError, ValueError):
+        hours = 12
+    import rds_guard as rg
+    rows = await _run(lambda: event_store.trv.list(hours, versions=True))
+    return web.json_response({"deviations": rows, "hours": hours,
+                              "trafikverket": rg.trv_snapshot()})
+
+
 async def handle_status(request):
     """GET /api/status — decoder status."""
     import status
@@ -490,6 +504,7 @@ def create_app():
     app.router.add_get("/api/calendar", handle_calendar)
     app.router.add_get("/api/incidents", handle_incidents)
     app.router.add_post("/api/incidents/backfill", handle_incidents_backfill)
+    app.router.add_get("/api/trafikverket", handle_trafikverket)
     ADMIN.add_routes(app.router, "/api")
     app.router.add_get("/api/notify", handle_notify)
     app.router.add_get("/api/notify/log", handle_notify_log)

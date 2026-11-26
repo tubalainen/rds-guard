@@ -849,6 +849,44 @@ def geo_snapshot():
     return out
 
 
+# ---------------------------------------------------------------------------
+# Trafikverket — exact places and updates for traffic incidents (optional)
+# ---------------------------------------------------------------------------
+
+trv_feed = None          # trafikverket.TrafikverketFeed, with TRAFIKVERKET_API_KEY
+
+
+def _trv_centers():
+    """Where to watch: around this receiver, once NODE_LOCATION is found."""
+    return [_node_place.point] if _node_place else []
+
+
+def _trv_changed(ids):
+    broadcast_ws({"topic": "trafikverket", "deviations": ids,
+                  "timestamp": now_iso()})
+
+
+def _start_trafikverket():
+    """Start the Trafikverket feed when there is a key and the map is on."""
+    global trv_feed
+    if not config.TRAFIKVERKET_API_KEY or geo_service is None:
+        return
+    import trafikverket
+    trv_feed = trafikverket.create_feed(
+        config.TRAFIKVERKET_API_KEY, event_store.trv, _trv_centers,
+        radius_km=config.TRAFIKVERKET_RADIUS_KM,
+        poll_sec=config.TRAFIKVERKET_POLL_SEC, on_change=_trv_changed)
+
+
+def trv_snapshot():
+    """Trafikverket feed for /api/status."""
+    if trv_feed is None:
+        reason = ("no_key" if not config.TRAFIKVERKET_API_KEY else
+                  "no_processing" if geo_service is None else "off")
+        return {"enabled": False, "reason": reason}
+    return trv_feed.snapshot()
+
+
 def _transcription_hints():
     """Local place names for the transcriber (ElevenLabs keyterms, prompt)."""
     if (geo_service is None or _node_place is None
@@ -1593,6 +1631,8 @@ def main():
         log.info("  Transcribe: %s", config.TRANSCRIPTION_ENGINE)
         log.info("  Map:        %s, location %s", config.GEO_ENGINE,
                  config.NODE_LOCATION or "(NODE_LOCATION not set)")
+        log.info("  Trafikverket: %s", "on" if config.TRAFIKVERKET_API_KEY
+                 else "off (no TRAFIKVERKET_API_KEY)")
     else:
         log.info("  Processing: off — raw recordings go to the aggregator, "
                  "which transcribes and maps them")
@@ -1661,6 +1701,7 @@ def main():
             model=config.CLAUDE_MODEL, timeout=config.CLAUDE_TIMEOUT,
             place_names=config.TRANSCRIPTION_PLACE_NAMES)
         threading.Thread(target=_init_geo, daemon=True, name="geo-init").start()
+        _start_trafikverket()
         if transcriber_instance:
             transcriber_instance = _HintingTranscriber(transcriber_instance)
 

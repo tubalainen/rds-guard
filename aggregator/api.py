@@ -146,8 +146,27 @@ async def handle_status(request):
                  "connected": bool(mqtt and mqtt.connected),
                  "prefix": config.MQTT_TOPIC_PREFIX},
         "nodes_online": online,
+        "trafikverket": _trv_snapshot(pipeline),
         **counts,
     })
+
+
+def _trv_snapshot(pipeline):
+    feed = getattr(pipeline, "trv_feed", None)
+    if feed is None:
+        return {"enabled": False,
+                "reason": "no_key" if not config.TRAFIKVERKET_API_KEY else "off"}
+    return feed.snapshot()
+
+
+async def handle_trafikverket(request):
+    """GET /api/v1/trafikverket — Trafikverket's deviations near the nodes:
+    current ones and those changed in the last hours, with their versions."""
+    hours = _int_param(request, "hours", 12, 1, 24 * 7)
+    rows = await _run(lambda: store.trv.list(hours, versions=True))
+    return web.json_response({
+        "deviations": rows, "hours": hours,
+        "trafikverket": _trv_snapshot(request.app[PIPELINE])})
 
 
 async def handle_events(request):
@@ -507,6 +526,7 @@ def create_web_app(pipeline=None, mqtt=None):
     r.add_get("/api/v1/stations", handle_stations)
     r.add_get("/api/v1/incidents", handle_incidents)
     r.add_post("/api/v1/incidents/backfill", handle_incidents_backfill)
+    r.add_get("/api/v1/trafikverket", handle_trafikverket)
     r.add_get("/api/v1/nodes", handle_nodes)
     r.add_post("/api/v1/nodes", handle_create_node)
     r.add_post("/api/v1/nodes/{node_id}/rotate", handle_rotate_node)
