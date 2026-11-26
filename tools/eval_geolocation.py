@@ -1,6 +1,6 @@
 """Score the map engines against a labelled set of real traffic messages.
 
-The set (tests/fixtures/geo_corpus.json) holds real transcriptions from
+The set (tools/geo_corpus.json) holds real transcriptions from
 one receiver and, for each, what a person says the message contains: which
 incidents, of what kind (new, update, repeat, cleared, area warning),
 where, and which incident each one is about across messages. The messages
@@ -49,7 +49,7 @@ sys.path.insert(0, ROOT)
 import gazetteer as gz  # noqa: E402
 import geolocate  # noqa: E402
 
-DEFAULT_CORPUS = os.path.join(ROOT, "tests", "fixtures", "geo_corpus.json")
+DEFAULT_CORPUS = os.path.join(ROOT, "tools", "geo_corpus.json")
 KINDS = ("new", "update", "repeat", "cleared", "area_warning")
 # What the incident store can tell apart today: a new incident, a message
 # about one already known, and one that says it is over

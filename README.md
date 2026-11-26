@@ -675,7 +675,7 @@ docker compose exec rds-guard python3 /app/tools/measure_geolocation.py --keyter
 ```
 
 To score the engines against a labelled set of real messages
-(`tests/fixtures/geo_corpus.json`: which incidents each message holds,
+(`tools/geo_corpus.json`: which incidents each message holds,
 where, of what kind, and which messages are about the same incident):
 
 ```bash
