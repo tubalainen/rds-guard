@@ -497,3 +497,9 @@ def test_claude_new_joins_only_the_same_place_name(db):
 def test_a_town_on_the_stretch_beats_the_stretch(reg):
     [p] = place("E18 mellan Väse och Karlstad, vid Skattkärr, olycka.", reg)
     assert p.label == "E18 Skattkärr" and p.radius_m < 9000
+
+
+def test_a_named_hamlet_beats_the_stretch_it_is_on(reg):
+    m = geo.Mention(road="Rv 61", town="Hynboholm", between=("Karlstad", "Kil"))
+    p = geo.resolve(m, reg, KARLSTAD)
+    assert p.label == "Rv 61 Hynboholm" and p.radius_m <= 1500

@@ -408,9 +408,13 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
         used.append(town)
     used += [m for m in landmarks if m not in used]
 
-    fine = sorted((m for m in landmarks if m.place.radius_m <= 2500),
+    # The town the announcer names counts like any other place: a hamlet
+    # or farm ("i höjd med Brunsberg") pins it down better than a stretch
+    spots = landmarks + ([town] if town and town not in landmarks
+                         and town not in (seg or ()) else [])
+    fine = sorted((m for m in spots if m.place.radius_m <= 2500),
                   key=lambda m: m.place.radius_m)
-    coarse = [m for m in landmarks if m.place.radius_m > 2500]
+    coarse = [m for m in spots if m.place.radius_m > 2500]
     if seg:
         # A town on the stretch ("mellan Väse och Karlstad, vid Skattkärr")
         # says more than the stretch, when its circle is the smaller one
