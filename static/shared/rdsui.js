@@ -5,13 +5,15 @@
  *   #/arkiv[/YYYY-MM-DD]   calendar over the stored days + one day's events
  *   #/sok?q=…              search in RadioText and transcriptions
  *   #/event/<id>           one event (push messages link here)
- *   #/aviseringar[/<id>|/ny]  push rules sent over MQTT
- * plus views the host page registers (debug, noder).
+ *   #/admin[/aviseringar[/<id>|/ny]]  password-protected admin (ADMIN_PASSWORD);
+ *                          first section: push rules sent over MQTT
+ * plus views the host page registers (debug) and admin sections (noder).
  *
  * The host page calls RDSUI.start({...}) with what differs between the two
  * apps: API prefix, how an event is identified, stations and nodes, plus
  * optional extras:
  *   views: {name: async (root, route, ctx) => {}}, extraNav: [[name, label, svg]]
+ *   adminSections: [[name, label, view]]  extra tabs under #/admin
  *   cardMeta: (ev) => html       extra label in every event card's meta row
  *   eventExtras: async (ev, el, ctx) => {}   fills an empty element on #/event
  */
@@ -38,6 +40,7 @@ const RDSUI = (() => {
         calendar: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>',
         searchNav: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>',
         bellNav: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.9 1.9 0 0 0 3.4 0"/></svg>',
+        lockNav: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
         nodes: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8 7.5 10.5 16M16 7.5 13.5 16M8.5 6h7"/></svg>',
         logo: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8"/></svg>',
     };
@@ -201,6 +204,11 @@ const RDSUI = (() => {
 
     async function route() {
         const r = parseHash();
+        if (!views[r.name] && adminSections.some(([n]) => n === r.name)) {
+            // old address of a section that has moved into admin
+            location.replace(`#/admin/${location.hash.replace(/^#\/?/, '')}`);
+            return;
+        }
         const view = views[r.name] || views.arkiv;
         const seq = ++routeSeq;
         if (current && current.cleanup) current.cleanup();
@@ -644,7 +652,7 @@ const RDSUI = (() => {
         if (!ctx.alive()) return;
         const watch = state.q ? `<div class="watch">${ICON.bell}<span><strong>Vill du få push nästa gång?</strong>
             Gör sökningen till en regel som skickas via MQTT.</span>
-            <a class="btn primary" href="${hashWith('aviseringar/ny', { ord: state.q })}">Bevaka ”${esc(state.q)}”</a></div>` : '';
+            <a class="btn primary" href="${hashWith('admin/aviseringar/ny', { ord: state.q })}">Bevaka ”${esc(state.q)}”</a></div>` : '';
         out.innerHTML = `${watch}${hint}
             <div class="day-head" style="margin-top:4px"><h2 style="font-size:22px;text-transform:none">${first.total} träff${first.total === 1 ? '' : 'ar'}</h2>
                 <span class="muted">nyast först</span></div>
@@ -738,7 +746,7 @@ const RDSUI = (() => {
         : `<p class="muted small" style="margin:0">${notify.length ? 'Ingen regel matchade, så ingen push skickades.'
             : (live || ev.transcription_status === 'transcribing' || ev.transcription_status === 'saving' || ev.transcription_status === 'queued'
                 ? 'Reglerna kontrolleras när sändningen och transkriptionen är klara.' : 'Ingen push skickades.')}</p>`}
-                        <p class="small" style="margin:10px 0 0"><a href="#/aviseringar">Ändra regler</a></p></section>
+                        <p class="small" style="margin:10px 0 0"><a href="#/admin/aviseringar">Ändra regler</a></p></section>
                     <section class="card"><h2 style="margin-bottom:6px">Detaljer</h2>
                         ${kv.map(([k, v]) => `<div class="kv"><span>${esc(k)}</span><span>${esc(v)}</span></div>`).join('')}</section>
                 </div>
@@ -802,7 +810,7 @@ const RDSUI = (() => {
         };
     }
 
-    views.aviseringar = async (root, r, ctx) => {
+    const notifySection = async (root, r, ctx) => {
         const [data, stations, nodes, logData] = await Promise.all([
             api('GET', '/notify'), cfg.loadStations(), cfg.loadNodes ? cfg.loadNodes() : null,
             api('GET', '/notify/log?limit=8'),
@@ -829,14 +837,14 @@ const RDSUI = (() => {
             <div class="page-head"><div class="grow"><h1>Pushnotiser via MQTT</h1>
                 <p>När en händelse matchar en regel får din MQTT-broker ett färdigt notismeddelande. Home Assistant, Node-RED
                 eller liknande tar emot det och skickar vidare till mobilen.</p></div>
-                <a class="btn primary" href="#/aviseringar/ny">+ Ny regel</a></div>
+                <a class="btn primary" href="#/admin/aviseringar/ny">+ Ny regel</a></div>
             ${!m.enabled ? `<div class="notice warn">MQTT är inte påslaget, så inga notiser skickas. Sätt <code>MQTT_ENABLED=true</code>
                 och <code>MQTT_HOST</code> i <code>.env</code>. Du kan ändå skapa regler och provköra dem mot historiken.</div>` : ''}
             <div class="cols">
                 <div class="col-narrow" style="display:flex;flex-direction:column;gap:18px">
                     <section aria-label="Regler"><h2 class="label" style="margin-bottom:10px">Regler</h2>
                         <div class="rule-list">${data.rules.length ? data.rules.map((x) => `
-                            <a class="rule-item" href="#/aviseringar/${x.id}"${String(x.id) === String(draft.id) ? ' aria-current="true"' : ''}>
+                            <a class="rule-item" href="#/admin/aviseringar/${x.id}"${String(x.id) === String(draft.id) ? ' aria-current="true"' : ''}>
                                 <span class="row"><span class="type-mark${x.event_types.includes('emergency') ? ' vma' : ''}"></span>
                                     <span class="name">${esc(x.name)}</span>
                                     <span class="pill ${x.enabled ? 'ok' : ''}">${x.enabled ? 'På' : 'Av'}</span></span>
@@ -1048,7 +1056,7 @@ const RDSUI = (() => {
                     : await api('POST', '/notify/rules', body());
                 dirty = false;
                 toast(`Regeln ”${saved.name}” är sparad`);
-                go(`#/aviseringar/${saved.id}`);
+                go(`#/admin/aviseringar/${saved.id}`);
             } catch (e) { showErr(e); }
         }
 
@@ -1070,7 +1078,7 @@ const RDSUI = (() => {
                 await api('DELETE', `/notify/rules/${draft.id}`, {});
                 dirty = false;
                 toast('Regeln är borttagen');
-                go('#/aviseringar');
+                go('#/admin/aviseringar');
             } catch (e) { showErr(e); }
         }
 
@@ -1128,16 +1136,93 @@ const RDSUI = (() => {
         runPreview();
     };
 
+    // ------------------------------------------------------------------ admin
+
+    // Sections of #/admin, in tab order: [route, label, view]. Each view gets
+    // the route with the section name taken off its args.
+    const adminSections = [
+        ['aviseringar', 'Aviseringar', notifySection],
+    ];
+
+    function adminLogin(root, session) {
+        if (!session.enabled) {
+            root.innerHTML = `
+                <div class="page-head"><div class="grow"><h1>Admin</h1></div></div>
+                <section class="card admin-login">
+                    <h2>Admin är avstängt</h2>
+                    <p class="muted">Sätt ett lösenord i <code>ADMIN_PASSWORD</code> i <code>.env</code> och starta om
+                    containern. Därefter loggar du in här för att ändra aviseringar.</p>
+                </section>`;
+            return;
+        }
+        root.innerHTML = `
+            <div class="page-head"><div class="grow"><h1>Admin</h1>
+                <p>Inställningar som bara den som har lösenordet får ändra.</p></div></div>
+            <form class="card admin-login" id="admin-login">
+                <h2>Logga in</h2>
+                <label class="field"><span class="label">Lösenord</span>
+                    <input type="password" name="password" autocomplete="current-password" required></label>
+                <div class="row-actions"><button class="btn primary" type="submit">Logga in</button>
+                    <span class="error-text" id="admin-msg" role="alert"></span></div>
+            </form>`;
+        const form = root.querySelector('#admin-login');
+        form.password.focus();
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = form.querySelector('button');
+            btn.disabled = true;
+            try {
+                await api('POST', '/admin/login', { password: form.password.value });
+                route();
+            } catch (err) {
+                root.querySelector('#admin-msg').textContent = err.message;
+                form.password.select();
+            } finally {
+                btn.disabled = false;
+            }
+        });
+    }
+
+    views.admin = async (root, r, ctx) => {
+        const session = await api('GET', '/admin/session');
+        if (!ctx.alive()) return;
+        if (!session.logged_in) { adminLogin(root, session); return; }
+
+        const name = r.args[0] || adminSections[0][0];
+        const section = adminSections.find(([n]) => n === name) || adminSections[0];
+        root.innerHTML = `
+            <div class="admin-bar">
+                <nav class="seg" aria-label="Admin">${adminSections.map(([n, l]) =>
+        `<a href="#/admin/${n}"${n === section[0] ? ' aria-current="true"' : ''}>${esc(l)}</a>`).join('')}</nav>
+                <span class="grow"></span>
+                <button class="btn" type="button" id="admin-logout">Logga ut</button>
+            </div>
+            <div id="admin-section" style="display:flex;flex-direction:column;gap:22px"></div>`;
+        root.querySelector('#admin-logout').addEventListener('click', async () => {
+            try { await api('POST', '/admin/logout', {}); } catch (e) { /* logged out anyway */ }
+            toast('Du är utloggad');
+            route();
+        });
+        const sub = { ...r, args: r.args.slice(1) };
+        try {
+            await section[2](root.querySelector('#admin-section'), sub, ctx);
+        } catch (e) {
+            if (e.status === 401 && ctx.alive()) { adminLogin(root, { enabled: true }); return; }
+            throw e;
+        }
+    };
+
     // ------------------------------------------------------------------ start
 
     function start(options) {
         Object.assign(cfg, options);
         Object.assign(views, options.views || {});
+        adminSections.push(...(options.adminSections || []));
         const nav = [
             ['arkiv', 'Arkiv', ICON.calendar],
             ['sok', 'Sök', ICON.searchNav],
-            ['aviseringar', 'Aviseringar', ICON.bellNav],
             ...(options.extraNav || []),
+            ['admin', 'Admin', ICON.lockNav],
         ];
         document.getElementById('nav').innerHTML = nav.map(([v, l, icon]) =>
             `<a href="#/${v}" data-view="${v}">${icon || ''}<span>${esc(l)}</span></a>`).join('');

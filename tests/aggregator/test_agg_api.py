@@ -8,8 +8,13 @@ UID = "22222222-2222-4222-8222-222222222222"
 
 
 @pytest.fixture
-async def web(aiohttp_client, agg_store):
-    return await aiohttp_client(api.create_web_app())
+async def web(aiohttp_client, agg_store, monkeypatch):
+    """A client logged in as admin (node admin needs it)."""
+    monkeypatch.setattr(config, "ADMIN_PASSWORD", "hemligt")
+    client = await aiohttp_client(api.create_web_app())
+    resp = await client.post("/api/v1/admin/login", json={"password": "hemligt"})
+    assert resp.status == 200
+    return client
 
 
 @pytest.fixture

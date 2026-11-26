@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from aggregator import api, notifier, pipeline, store
+from aggregator import api, config, notifier, pipeline, store
 
 
 
@@ -45,8 +45,13 @@ def node(agg_store):
 
 
 @pytest.fixture
-async def web(aiohttp_client, node):
-    return await aiohttp_client(api.create_web_app(mqtt=FakeMqtt()))
+async def web(aiohttp_client, node, monkeypatch):
+    """A client logged in as admin (the push rules need it)."""
+    monkeypatch.setattr(config, "ADMIN_PASSWORD", "hemligt")
+    client = await aiohttp_client(api.create_web_app(mqtt=FakeMqtt()))
+    resp = await client.post("/api/v1/admin/login", json={"password": "hemligt"})
+    assert resp.status == 200
+    return client
 
 
 async def test_rules_api_and_test_message(web):

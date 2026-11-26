@@ -116,6 +116,9 @@ WEB_UI_URL = os.environ.get("WEB_UI_URL", "").strip().rstrip("/")
 # this time zone.
 NOTIFY_TIMEZONE = os.environ.get("NOTIFY_TIMEZONE", "Europe/Stockholm")
 
+# Password for the admin pages in the web UI (push rules). Empty = admin off.
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+
 # --- Audio Recording (always on) ---
 AUDIO_DIR = os.environ.get("AUDIO_DIR", "/data/audio")
 RECORD_EVENT_TYPES = os.environ.get("RECORD_EVENT_TYPES", "traffic,emergency")

@@ -30,6 +30,9 @@ WEB_UI_URL = os.environ.get("WEB_UI_URL", "").strip().rstrip("/")
 # Push notification rules check days and times in this time zone
 NOTIFY_TIMEZONE = os.environ.get("NOTIFY_TIMEZONE", "Europe/Stockholm")
 
+# Password for the admin pages in the web UI (push rules). Empty = admin off.
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+
 # --- Storage ---
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 DB_PATH = os.environ.get("DB_PATH", os.path.join(DATA_DIR, "aggregator.db"))

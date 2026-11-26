@@ -23,8 +23,9 @@ local events, transcriptions, web UI and MQTT. The protocol is in
 - Transcribes all audio centrally with ElevenLabs Scribe, falling back to the bundled Swedish KB-Whisper model (or a remote Whisper server)
 - Web UI on your LAN, the same as on the satellites (in Swedish): an
   archive calendar over all stations, search in transcriptions filtered by
-  station and node, push rules, and a **Noder** view (online/offline,
-  station, decode rate, version, queue, clock offset)
+  station and node, and a password-protected **Admin** page with the push
+  rules and **Noder** (online/offline, station, decode rate, version, queue,
+  clock offset)
 - Publishes one MQTT alert per event, with the transcription, for all
   stations to one broker (Home Assistant etc.)
 - Push notifications by rules (`rds-aggregator/notify/<rule>`), which can
@@ -70,7 +71,8 @@ docker compose up -d
    [Publishing the ingest API](#publishing-the-ingest-api)) and
    [check that it works](#check-that-it-works).
 
-5. Open the web UI at **http://your-host:8080**, go to **Noder**, add a node
+5. Set `ADMIN_PASSWORD` in `.env`. Open the web UI at **http://your-host:8080**,
+   log in under **Admin**, go to **Noder**, add a node
    per friend, and send them the three lines that are shown (see
    [Adding a satellite](#adding-a-satellite)).
 
@@ -93,7 +95,7 @@ The aggregator listens on two ports, both plain HTTP:
 | Port | What | Reachable from |
 |---|---|---|
 | `8081` | Ingest API for satellites. Serves `/api/v1/ingest/*` and nothing else; every request needs a node token | The internet, through HTTPS |
-| `8080` | Web UI, read API and node admin, **without login** | Your LAN only |
+| `8080` | Web UI and read API **without login**; push rules and node admin behind `ADMIN_PASSWORD` | Your LAN only |
 
 Point your proxy or tunnel at port **8081** and never at 8080. No extra
 filter is needed in front: the web UI and the admin API do not exist on port
@@ -183,7 +185,7 @@ a satellite.
 | 403 from Cloudflare | See [Bot protection](#bot-protection) |
 | 521, 525 or 526 from Cloudflare | Cloudflare cannot reach the proxy over HTTPS: check the DNS record, that port 443 reaches the proxy, and its certificate |
 
-Then add a node under **Noder** in the web UI (see
+Then add a node under **Admin → Noder** in the web UI (see
 [Adding a satellite](#adding-a-satellite)). When its owner has started the
 satellite, the node turns green within a minute.
 
@@ -205,7 +207,7 @@ such answers; they keep it queued and retry.
 
 ## Adding a satellite
 
-**In the web UI:** Noder → type a name (e.g. `Kalle, Karlstad`) → *Lägg
+**In the web UI:** Admin → Noder → type a name (e.g. `Kalle, Karlstad`) → *Lägg
 till nod*. The token is shown once, together with the lines to send.
 
 **Or from the command line:**
@@ -237,7 +239,7 @@ NODE_NAME=Kalle, Karlstad
 3. Restart with `docker compose up -d`.
 
 The satellite's status bar shows `uplink` in green when it is connected, and
-the node turns green under **Noder** here within a minute. No ports need to be
+the node turns green under **Admin → Noder** here within a minute. No ports need to be
 opened at the satellite.
 
 ## Configuration
@@ -249,6 +251,7 @@ All settings are in `.env`; see [.env.example](.env.example).
 | `PUBLIC_URL` | | Address satellites use; shown in their setup lines |
 | `WEB_UI_URL` | | Address of the web UI on your network. When set, push messages link to the event |
 | `NOTIFY_TIMEZONE` | `Europe/Stockholm` | Time zone for the days and times in push rules |
+| `ADMIN_PASSWORD` | *(empty)* | Password for the **Admin** page (push rules). Empty switches Admin off and the rules cannot be changed |
 | `WEB_UI_BIND` / `WEB_UI_PORT` | `0.0.0.0` / `8080` | Where the web UI is published on the host. Use `127.0.0.1` on a server with a public address |
 | `INGEST_API_BIND` / `INGEST_API_PORT` | `0.0.0.0` / `8081` | Where the ingest API is published on the host: the address and port your reverse proxy forwards to |
 | `PUID` / `PGID` | `10001` / `10001` | User and group that own the files in `aggregator-data` and that the server runs as |
@@ -311,13 +314,14 @@ other characters into `-`.
 | `GET /api/v1/events/{event_uid}` | One event |
 | `GET /api/v1/audio/{event_uid}.ogg` | Audio |
 | `GET /api/v1/stations` | Stations seen, with the nodes that reported them |
-| `GET /api/v1/nodes` | Nodes with status |
+| `GET /api/v1/nodes` | Nodes with status (needs Admin login, as do all `/api/v1/nodes*`) |
 | `GET /api/v1/status` | Aggregator status |
 | `POST /api/v1/nodes` | `{"name": "…"}` → node, token and setup lines |
 | `POST /api/v1/nodes/{id}/rotate` | New token |
 | `PATCH /api/v1/nodes/{id}` | `{"enabled": true\|false}` |
 | `DELETE /api/v1/nodes/{id}` | Remove node and its events |
-| `GET /api/v1/notify` | Push rules and the MQTT connection |
+| `GET /api/v1/admin/session`, `POST /api/v1/admin/login`\|`logout` | Admin login (session cookie) |
+| `GET /api/v1/notify` | Push rules and the MQTT connection (needs Admin login, as do all `/api/v1/notify*`) |
 | `POST /api/v1/notify/rules`, `PUT`/`DELETE /api/v1/notify/rules/{id}` | Edit push rules |
 | `POST /api/v1/notify/preview` | Try a rule on the stored history |
 | `POST /api/v1/notify/test` | Send a test message |
@@ -333,7 +337,9 @@ browser, come from the same origin.
   its own events.
 - Everything a satellite sends is validated and length-limited; audio must
   be OGG, at most 8 MiB, and is stored under a name the aggregator chooses.
-- The web UI and admin API have **no login**. Keep port 8080 on your LAN.
+- The push rules and node admin (**Admin → Aviseringar** and **Noder**)
+  are behind a password, `ADMIN_PASSWORD`. The archive, search and read API
+  have **no login**. Keep port 8080 on your LAN.
 - The server runs as an unprivileged user. The container starts as root
   only to make the `aggregator-data` folder writable for that user, and drops
   root before it opens the database or listens on a port.

@@ -1,6 +1,7 @@
 """Web UI, read API and node admin — served on the LAN port only.
 
-This server has no login: keep it off the internet (a reverse proxy or
+Only the admin pages (push rules, nodes) have a login, see admin_auth and
+ADMIN_PASSWORD. The rest has none: keep this port off the internet (a reverse proxy or
 tunnel must only ever forward to the ingest port, never to this one). Write
 requests must be JSON and same-origin, so a web page on another site
 cannot drive the admin endpoints through the owner's browser.
@@ -13,6 +14,7 @@ from urllib.parse import urlsplit
 
 from aiohttp import web
 
+import admin_auth
 import notify_rules
 
 from . import config, nodes, notifier, store
@@ -21,6 +23,10 @@ from .ingest import valid_uid
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
 # The web UI code and styles shared with the satellite (static/shared/)
 SHARED_DIR = pathlib.Path(__file__).resolve().parent.parent / "static" / "shared"
+
+ADMIN = admin_auth.AdminAuth(lambda: config.ADMIN_PASSWORD,
+                             protected=("/api/v1/notify", "/api/v1/nodes"),
+                             cookie_name="rdsguard_agg_admin")
 
 PIPELINE = web.AppKey("pipeline", object)
 MQTT = web.AppKey("mqtt", object)
@@ -398,7 +404,8 @@ async def security_headers(request, handler):
 
 
 def create_web_app(pipeline=None, mqtt=None):
-    app = web.Application(middlewares=[security_headers, write_guard],
+    app = web.Application(middlewares=[security_headers, write_guard,
+                                       ADMIN.middleware],
                           client_max_size=64 * 1024)
     app[PIPELINE] = pipeline
     app[MQTT] = mqtt
@@ -408,6 +415,7 @@ def create_web_app(pipeline=None, mqtt=None):
     r.add_get("/api/v1/events/active", handle_events_active)
     r.add_get("/api/v1/events/{uid}", handle_event)
     r.add_get("/api/v1/calendar", handle_calendar)
+    ADMIN.add_routes(r, "/api/v1")
     r.add_get("/api/v1/notify", handle_notify)
     r.add_get("/api/v1/notify/log", handle_notify_log)
     r.add_post("/api/v1/notify/rules", handle_create_rule)
