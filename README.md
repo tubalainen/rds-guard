@@ -620,6 +620,18 @@ what changed since the last call.
 No AI is involved and there is no cost per message. Without the key
 everything works as before.
 
+**Why was a message linked, or not?** Each placed message records the
+reason in its incident (`trv_note` in `/api/incidents`) and in the log: the
+deviation it was linked to and why, or the three nearest deviations and
+what stopped each (another road, too far away, published too late, another
+kind of incident, …). Since Trafikverket keeps removed deviations for only
+24 hours, this is how a miss can be looked into afterwards:
+
+```bash
+docker compose logs rds-guard | grep "Trafikverket: incident"
+curl -s 'http://localhost:8022/api/incidents?hours=168' | python3 -c 'import json,sys; [print(i["label"], "|", i.get("trv_note")) for i in json.load(sys.stdin)["incidents"]]'
+```
+
 ### How it works, and what it costs
 
 Everything needed runs locally, without a GPU and without paid services.

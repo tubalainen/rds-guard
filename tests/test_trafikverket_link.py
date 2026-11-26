@@ -309,3 +309,49 @@ def test_current_deviation_keeps_the_incident_on_the_map(store):
                  "WHERE id = ?", (inc_id,))
     conn.commit()
     assert store.trv.touch_linked() == 0
+
+
+# ---------------------------------------------------------------- why not
+
+def test_reasons():
+    assert trv.evaluate(inc(road="Rv 61"), dev_dict(), NOW)[1] == \
+        "other road (radio 61, Trafikverket E18)"
+    assert "km away" in trv.evaluate(inc(lat=59.45), dev_dict(), NOW)[1]
+    late = dev_dict(CreationTime=trv_time(120), StartTime=trv_time(120))
+    assert trv.evaluate(inc(), late, NOW)[1].startswith("published 12")
+    score, why = trv.evaluate(inc(), dev_dict(), NOW)
+    assert score >= trv.MIN_SCORE and "same road, same kind" in why
+
+
+def test_the_incident_says_why_it_was_not_linked(store, caplog):
+    store.trv.apply([situation(devs=[deviation(RoadNumber="Rv 61",
+                                               RoadNumberNumeric=61)])])
+    with caplog.at_level("INFO", logger="rds-guard"):
+        [inc_id] = place(store, radio_event(store))
+    row = store.incident(inc_id)
+    assert row["trv_id"] is None
+    assert row["trv_note"] == ("nearest: D1 (Olycka, E18 från Trafikplats "
+                               "Bergvik till Trafikplats Våxnäs): other road "
+                               "(radio E18, Trafikverket 61)")
+    assert "not linked: nearest: D1" in caplog.text
+
+
+def test_the_incident_says_why_it_was_linked(store):
+    store.trv.apply([situation()])
+    [inc_id] = place(store, radio_event(store))
+    assert store.incident(inc_id)["trv_note"].startswith("linked to D1: ")
+
+
+def test_nothing_near(store):
+    store.trv.apply([situation(devs=[deviation(
+        Geometry={"Point": {"WGS84": "POINT (18.06 59.33 0)"}})])])
+    [inc_id] = place(store, radio_event(store))
+    assert store.incident(inc_id)["trv_note"] == \
+        "no Trafikverket deviation within 30 km"
+
+
+def test_without_trafikverket_nothing_is_noted(store, caplog):
+    with caplog.at_level("INFO", logger="rds-guard"):
+        [inc_id] = place(store, radio_event(store))
+    assert store.incident(inc_id)["trv_note"] is None
+    assert "Trafikverket" not in caplog.text
