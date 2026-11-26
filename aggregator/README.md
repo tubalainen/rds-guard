@@ -35,18 +35,16 @@ You need a Linux host with Docker, and a way to publish one port over HTTPS:
 a reverse proxy you already run (Nginx Proxy Manager, Caddy, Traefik …) or a
 Cloudflare Tunnel.
 
-1. Get the files. The image is ready-made, so you only need two files from
-   this folder; the rest of the repository is the satellite:
+1. Get the two files you need. There is no need to clone the repository:
+   `docker-compose.yml` uses the ready-made image
+   `ghcr.io/tubalainen/rds-guard-aggregator:latest`, which Docker pulls for
+   you.
 
 ```bash
 mkdir rds-guard-aggregator && cd rds-guard-aggregator
 curl -fsSLo docker-compose.yml https://raw.githubusercontent.com/tubalainen/rds-guard/master/aggregator/docker-compose.yml
 curl -fsSLo .env https://raw.githubusercontent.com/tubalainen/rds-guard/master/aggregator/.env.example
 ```
-
-   To build the image yourself instead, clone the whole repository (the
-   build uses files outside this folder) and work in its `aggregator`
-   folder: `git clone https://github.com/tubalainen/rds-guard.git && cd rds-guard/aggregator && cp .env.example .env`
 
 2. Edit `.env`. These are the settings to look at; the rest have working
    defaults (see [Configuration](#configuration)):
@@ -57,9 +55,10 @@ curl -fsSLo .env https://raw.githubusercontent.com/tubalainen/rds-guard/master/a
    | `ELEVENLABS_API_KEY` | Your ElevenLabs key. Empty = all audio is transcribed locally |
    | `MQTT_ENABLED`, `MQTT_HOST` … | Only if you want alerts on MQTT (Home Assistant etc.) |
 
-3. Start it. This is a single container:
+3. Pull the image and start it. This is a single container:
 
 ```bash
+docker compose pull
 docker compose up -d
 ```
 
@@ -74,8 +73,13 @@ docker compose up -d
 Database, audio and downloaded models are stored in the `aggregator-data`
 folder next to `docker-compose.yml`.
 
-To build locally instead of pulling `ghcr.io/tubalainen/rds-guard-aggregator`,
-use a clone of the repository (see step 1), uncomment `build:` in
+To update later, run `docker compose pull && docker compose up -d` in the
+same folder. Your `.env` and `aggregator-data` are kept.
+
+Only if you want to build the image yourself instead of pulling it, you need
+the whole repository, because the build uses files outside this folder:
+`git clone https://github.com/tubalainen/rds-guard.git`, then in
+`rds-guard/aggregator` copy `.env.example` to `.env`, uncomment `build:` in
 `docker-compose.yml` and run `docker compose up -d --build`.
 
 ## Publishing the ingest API
@@ -339,8 +343,11 @@ Up to v0.2.3 the compose file also started nginx (and optionally
 `cloudflared`), and kept the data in a Docker volume. To move to the
 single-container setup:
 
-1. Update the files (`git pull`). In `.env`, `NGINX_BIND` / `NGINX_PORT` are
-   no longer used.
+1. In the folder you run the aggregator from, replace `docker-compose.yml`
+   with the new one (keep your `.env`):
+   `curl -fsSLo docker-compose.yml https://raw.githubusercontent.com/tubalainen/rds-guard/master/aggregator/docker-compose.yml`.
+   If that folder is a clone of the repository, `git pull` does the same.
+   In `.env`, `NGINX_BIND` / `NGINX_PORT` are no longer used.
 2. Stop the aggregator and remove the nginx and `cloudflared` containers:
    `docker compose down --remove-orphans`. The data volume is kept.
 3. Copy the data from the volume into the folder. The volume is normally
