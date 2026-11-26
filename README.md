@@ -1,4 +1,4 @@
-# RDS Guard
+# <img src="static/shared/icons/favicon.svg" width="40" height="40" alt="" align="top"> RDS Guard
 
 FM radio traffic and emergency monitoring for Sweden. Decodes RDS data from an RTL-SDR dongle, captures traffic announcements and emergency broadcasts, transcribes the captured audio with ElevenLabs Scribe (falling back to a local, Swedish-tuned Whisper model), sends push notifications over MQTT by rules you set in the web UI, and serves a web archive of everything it has heard.
 
