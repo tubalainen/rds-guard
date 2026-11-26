@@ -870,7 +870,7 @@ class _HintingTranscriber:
 
     def enqueue(self, audio_path, event_id, callback):
         self._t.enqueue(audio_path, event_id, callback,
-                        hints=_transcription_hints())
+                        hints=_transcription_hints)
 
     def __getattr__(self, name):
         return getattr(self._t, name)

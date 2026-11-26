@@ -227,7 +227,7 @@ class Gazetteer:
     def load(cls, path=None, centers=None, radius_km=250):
         """Read the registry, keeping names within radius_km of any center.
 
-        centers=None keeps the whole country (about 100 MB of memory).
+        centers=None keeps the whole country.
         """
         path = path or os.environ.get("GAZETTEER_PATH") or DEFAULT_PATH
         centers = [c for c in (centers or []) if c]
@@ -353,12 +353,21 @@ class Gazetteer:
         return names[:limit]
 
 
-_REGISTRY = None
+def locate_in_file(text, path=None):
+    """Find 'Ort, Region' by reading the registry file line by line.
 
+    Keeps only settlements in memory, so finding the node's location does
+    not need the whole country's names loaded at once.
+    """
+    path = path or os.environ.get("GAZETTEER_PATH") or DEFAULT_PATH
+    places = []
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("#"):
+                continue
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) >= 5 and parts[1] in SETTLEMENTS:
+                places.append(Place(parts[0], parts[1], float(parts[2]),
+                                    float(parts[3]), parts[4]))
+    return Gazetteer(places).locate(text)
 
-def registry():
-    """The process-wide registry, loaded on first use (whole country)."""
-    global _REGISTRY
-    if _REGISTRY is None:
-        _REGISTRY = Gazetteer.load()
-    return _REGISTRY

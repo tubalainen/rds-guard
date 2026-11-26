@@ -361,8 +361,13 @@ async def handle_stations(request):
 
 async def handle_nodes(request):
     pipeline = request.app[PIPELINE]
-    node_list = await _run(store.list_nodes)
-    return web.json_response({"nodes": [public_node(n, pipeline) for n in node_list]})
+
+    def work():
+        # public_node looks up each node's location in the place-name
+        # registry, which reads a file the first time: not on the loop
+        return [public_node(n, pipeline) for n in store.list_nodes()]
+
+    return web.json_response({"nodes": await _run(work)})
 
 
 async def _json_body(request):

@@ -207,7 +207,9 @@ class Transcriber:
 
         callback(event_id, text, error, duration_sec) is called when done.
         hints = {"keyterms": [...], "prompt": "..."} adds words to listen for
-        in this clip (local place names), on top of the configured ones.
+        in this clip (local place names), on top of the configured ones. It
+        may also be a function returning that dict, called by the worker
+        thread, so callers on an event loop do not wait for it.
         """
         self._queue.put((audio_path, event_id, callback, hints))
 
@@ -230,6 +232,12 @@ class Transcriber:
             if item is None:
                 break  # Shutdown sentinel
             audio_path, event_id, callback, hints = item
+            if callable(hints):
+                try:
+                    hints = hints()
+                except Exception:
+                    log.exception("Could not build hints for event %s", event_id)
+                    hints = None
             try:
                 t0 = time.monotonic()
                 text = self.transcribe(Path(audio_path), hints)

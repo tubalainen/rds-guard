@@ -44,12 +44,10 @@ class GeoService:
             if key in self._located:
                 return self._located[key]
         try:
-            whole = gz.Gazetteer.load(self._path)
-            place = whole.locate(text)
+            place = gz.locate_in_file(text, self._path)
         except OSError as e:
             log.error("Place-name registry could not be read: %s", e)
             place = None
-        whole = None  # the whole country is only needed for this lookup
         if place:
             log.info("Node location '%s' -> %s (%s, %s) %.4f, %.4f", text,
                      place.name, place.kind,

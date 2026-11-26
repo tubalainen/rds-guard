@@ -157,8 +157,10 @@ class Pipeline(Hooks):
             return
         path = Path(config.AUDIO_DIR) / Path(row["audio_path"]).name
         # Transcriber reports by integer id (shared with the satellite code)
+        # Place names are looked up by the transcriber's thread: this runs
+        # on the ingest event loop, which must not wait for the registry
         self._transcriber.enqueue(path, row["id"], self._on_transcribed,
-                                  hints=self._hints(row))
+                                  hints=lambda: self._hints(row))
 
     # -- geolocation --------------------------------------------------------
 
