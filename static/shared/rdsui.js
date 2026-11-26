@@ -30,11 +30,11 @@ const RDSUI = (() => {
     // ------------------------------------------------------------------ icons
 
     const ICON = {
-        play: '<svg width="16" height="16" viewBox="0 0 24 24" fill="#fff" aria-hidden="true"><path d="M7 4.5v15l13-7.5z"/></svg>',
-        pause: '<svg width="16" height="16" viewBox="0 0 24 24" fill="#fff" aria-hidden="true"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>',
-        download: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#344054" stroke-width="2" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>',
+        play: '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15l13-7.5z"/></svg>',
+        pause: '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>',
+        download: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>',
         bell: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.9 1.9 0 0 0 3.4 0"/></svg>',
-        search: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#475467" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>',
+        search: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>',
         left: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>',
         right: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>',
         calendar: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>',
@@ -42,7 +42,7 @@ const RDSUI = (() => {
         bellNav: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.9 1.9 0 0 0 3.4 0"/></svg>',
         lockNav: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
         nodes: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8 7.5 10.5 16M16 7.5 13.5 16M8.5 6h7"/></svg>',
-        logo: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8"/></svg>',
+        logo: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8"/></svg>',
     };
 
     // ------------------------------------------------------------------ utils
@@ -50,6 +50,8 @@ const RDSUI = (() => {
     const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => (
         { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const pad = (n) => String(n).padStart(2, '0');
+    const cssVar = (name, fallback) => (
+        getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback);
 
     /** Timestamps from the API are UTC, with or without a trailing Z. */
     function parseTs(ts) {
@@ -302,8 +304,8 @@ const RDSUI = (() => {
                     container: wave,
                     url: el.dataset.src,
                     height: wave.clientHeight || 36,
-                    waveColor: '#B8C2D1',
-                    progressColor: '#1D4ED8',
+                    waveColor: cssVar('--wave', '#3A4757'),
+                    progressColor: cssVar('--wave-progress', '#7AB4FF'),
                     cursorWidth: 0,
                     barWidth: 3,
                     barGap: 2,
@@ -539,10 +541,10 @@ const RDSUI = (() => {
                 ${cells}
             </div>
             <div class="cal-legend">Färre
-                <span class="sw" style="background:#F1F5F9"></span><span class="sw" style="background:var(--l1)"></span>
+                <span class="sw" style="background:var(--l0)"></span><span class="sw" style="background:var(--l1)"></span>
                 <span class="sw" style="background:var(--l2)"></span><span class="sw" style="background:var(--l3)"></span>Fler
                 <span style="flex:1"></span>
-                <span class="sw" style="box-shadow:inset 0 0 0 2px #DC2626"></span>VMA
+                <span class="sw" style="box-shadow:inset 0 0 0 2px var(--vma-ring)"></span>VMA
             </div>
             <p class="small muted" style="margin:12px 0 0">Händelser sparas i ${retention} dagar.</p>`;
     }
@@ -1137,8 +1139,8 @@ const RDSUI = (() => {
                     ${list.map((d) => `<span style="height:${Math.max(3, Math.round(d.total / max * 48))}px" title="${esc(d.k)}: ${d.matched} av ${d.total}">
                         <i style="height:${d.total ? Math.round(d.matched / d.total * 100) : 0}%"></i></span>`).join('')}
                 </div>
-                <div class="legend"><span><i style="background:var(--accent)"></i>Hade skickats</span>
-                    <span><i style="background:#E3E8EF"></i>Övriga meddelanden</span></div>
+                <div class="legend"><span><i style="background:var(--l3)"></i>Hade skickats</span>
+                    <span><i style="background:var(--bar)"></i>Övriga meddelanden</span></div>
                 ${res.samples.map((s) => {
         const d = evStart(s);
         return `<div class="sample"><span>${esc(d ? `${fmtRelDay(d)} ${fmtTime(d)}` : '')}</span>
@@ -1254,6 +1256,7 @@ const RDSUI = (() => {
                 form.q.blur();
             });
         }
+        addThemeToggle();
         // "Rättad" tag: switch between the corrected and the original text
         document.addEventListener('click', (e) => {
             const b = e.target.closest('.fix-toggle');
@@ -1269,6 +1272,37 @@ const RDSUI = (() => {
         });
         window.addEventListener('hashchange', route);
         route();
+    }
+
+    // ------------------------------------------------------------------ theme
+
+    /* Dark is the default. theme.js (loaded in <head>) applies a stored
+       choice before the page paints; this adds the switch in the footer. */
+    function setTheme(theme) {
+        if (theme === 'light') document.documentElement.dataset.theme = 'light';
+        else delete document.documentElement.dataset.theme;
+        try { localStorage.setItem('rdsguard-theme', theme); } catch (e) { /* private mode */ }
+        const meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.content = theme === 'light' ? '#FFFFFF' : '#0B0F14';
+        const btn = document.getElementById('theme-toggle');
+        if (btn) btn.textContent = theme === 'light' ? 'Mörkt tema' : 'Ljust tema';
+        // Waveforms read their colours when created: redraw the visible ones
+        route();
+    }
+
+    function addThemeToggle() {
+        const foot = document.querySelector('.foot-inner');
+        if (!foot || document.getElementById('theme-toggle')) return;
+        const light = document.documentElement.dataset.theme === 'light';
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.id = 'theme-toggle';
+        btn.className = 'theme-toggle';
+        btn.textContent = light ? 'Mörkt tema' : 'Ljust tema';
+        btn.addEventListener('click', () => {
+            setTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
+        });
+        foot.appendChild(btn);
     }
 
     return {

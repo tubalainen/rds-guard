@@ -22,6 +22,7 @@ import gzip
 import json
 import math
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -77,6 +78,15 @@ def kind_and_name(tags):
     if tags.get("natural") == "water":
         return "water", tags.get("name")
     return None, None
+
+
+def airport_alias(name):
+    """'Karlstad Airport' -> 'Karlstad flygplats', as the radio says it."""
+    m = re.match(r"^(.+?)\s+(?:Airport|flygplats|flygfält)$", name, re.IGNORECASE)
+    if not m:
+        return None
+    alias = f"{m.group(1)} flygplats"
+    return None if alias == name else alias
 
 
 def km(a, b):
@@ -213,6 +223,9 @@ def main():
             rows.append((name, kind, f"{lat:.5f}", f"{lon:.5f}", code,
                          ref.replace("\t", " ")))
             added += 1
+            alias = airport_alias(name) if kind == "airport" else None
+            if alias:
+                rows.append((alias, kind, f"{lat:.5f}", f"{lon:.5f}", code, ""))
         print(f"tile {n:3}/{len(tiles)} {tile}: {added} names", flush=True)
 
     rows.sort(key=lambda r: (r[4], r[0], r[1]))

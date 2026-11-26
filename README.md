@@ -1,4 +1,4 @@
-# RDS Guard
+# <img src="static/shared/icons/favicon.svg" width="40" height="40" alt="" align="top"> RDS Guard
 
 FM radio traffic and emergency monitoring for Sweden. Decodes RDS data from an RTL-SDR dongle, captures traffic announcements and emergency broadcasts, transcribes the captured audio with ElevenLabs Scribe (falling back to a local, Swedish-tuned Whisper model), sends push notifications over MQTT by rules you set in the web UI, and serves a web archive of everything it has heard.
 
@@ -418,8 +418,10 @@ Each transcription is logged with the engine that served it, e.g. `Transcription
 
 ## Web UI
 
-The web UI is in Swedish and works on phones and desktops. It is built
-around the history of what the receiver has heard:
+The web UI is in Swedish and works on phones and desktops, with a dark
+theme by default (*Ljust tema* in the footer switches to light, and the
+choice is remembered in the browser). It is built around the history of
+what the receiver has heard:
 
 - **Arkiv** — a calendar over the stored days (colour = number of
   messages, red ring = VMA) and the messages of the chosen day, each with
@@ -859,7 +861,7 @@ and existing rows are not changed. The outbox is only used in satellite mode.
 
 **Pinning a version:** `ghcr.io/tubalainen/rds-guard:latest` follows
 `master`. To stay on a release, set the image to
-`ghcr.io/tubalainen/rds-guard:0.4.2` (or `:0.4` to get 0.4.x patch releases).
+`ghcr.io/tubalainen/rds-guard:0.4.3` (or `:0.4` to get 0.4.x patch releases).
 
 **Rolling back:** set the image to `ghcr.io/tubalainen/rds-guard:0.1.3`, and
 restore `rds-data.backup-0.1.3` if you want the database exactly as it was.
