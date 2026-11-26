@@ -167,18 +167,85 @@ const RDSMap = (() => {
         return text || 'Uppdaterad';
     }
 
-    /** The radio's mentions and Trafikverket's updates, oldest first. */
+    // What a broadcast said about an incident (kind, stored since v0.7)
+    const KIND_SV = { new: 'Ny', update: 'Uppdatering', repeat: 'Påminnelse', cleared: 'Avklarad' };
+    const KIND_PILL = { new: 'bad', update: 'warn', repeat: '', cleared: 'ok' };
+    const PLAY = '<svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z" fill="currentColor"/></svg>';
+
+    /** One radio entry of a timeline: a time (string, before v0.7) or a
+     *  broadcast {seen_at, started_at, kind, evidence, audio_url, event_id}. */
+    function radioItem(m) {
+        if (typeof m === 'string') return { at: m, src: 'radio', text: 'Nämnd i trafikmeddelandet' };
+        return {
+            at: m.started_at || m.seen_at, src: 'radio', kind: m.kind,
+            text: m.evidence || 'Nämnd i trafikmeddelandet',
+            audio: m.audio_url, event: m.event_id, node: m.node_name,
+        };
+    }
+
+    function radioHtml(i) {
+        const badge = KIND_SV[i.kind] ? ` <span class="pill ${KIND_PILL[i.kind]} tl-kind">${KIND_SV[i.kind]}</span>` : '';
+        const node = i.node ? ` <span class="muted">· ${esc(i.node)}</span>` : '';
+        const play = i.audio ? `<button type="button" class="tl-play" data-audio="${esc(i.audio)}"
+            title="Lyssna" aria-label="Lyssna på sändningen">${PLAY}</button>` : '';
+        const link = i.event != null ? ` <a href="#/event/${encodeURIComponent(i.event)}">Sändningen</a>` : '';
+        return `<span class="tl-body"><span class="tl-head"><b>Radio</b>${badge}${node}${play}</span>
+            <span class="tl-text">${esc(i.text)}${link}</span></span>`;
+    }
+
+    /** The radio's broadcasts and Trafikverket's updates, oldest first. */
     function timeline(mentions, dev) {
-        const items = (mentions || []).map((at) => ({ at, src: 'radio', text: 'Nämnd i trafikmeddelandet' }));
+        const items = (mentions || []).map(radioItem);
         (dev && dev.versions ? dev.versions : []).forEach((v, n) => items.push({
             // Trafikverket's own time for the version; when it was seen for removals
             at: v.version_time || v.seen_at, src: 'trv', text: versionText(v.changes || {}, n === 0),
         }));
         if (!items.length) return '';
         items.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+        const audio = items.filter((i) => i.audio).length;
+        const all = audio > 1 ? `<button type="button" class="btn small tl-playall">${PLAY} Spela alla (${audio})</button>` : '';
         return `<ol class="trv-timeline">${items.map((i) => `<li class="${i.src}">
-            <time>${esc(tsShort(i.at))}</time><span><b>${i.src === 'radio' ? 'Radio' : 'Trafikverket'}</b> ${esc(i.text)}</span></li>`).join('')}</ol>`;
+            <time>${esc(tsShort(i.at))}</time>${i.src === 'radio' ? radioHtml(i)
+                : `<span><b>Trafikverket</b> ${esc(i.text)}</span>`}</li>`).join('')}</ol>${all}`;
     }
+
+    // One player for every timeline: a play button plays its broadcast,
+    // "Spela alla" the broadcasts of its timeline in order
+    const player = { audio: null, queue: [], btn: null };
+    function playNext() {
+        if (player.btn) player.btn.classList.remove('playing');
+        const next = player.queue.shift();
+        if (!next) { player.btn = null; return; }
+        player.btn = next;
+        next.classList.add('playing');
+        player.audio.src = next.dataset.audio;
+        player.audio.play().catch(() => { next.classList.remove('playing'); });
+    }
+    document.addEventListener('click', (e) => {
+        const one = e.target.closest('.tl-play');
+        const all = e.target.closest('.tl-playall');
+        if (!one && !all) return;
+        e.preventDefault();
+        if (!player.audio) {
+            player.audio = new Audio();
+            player.audio.addEventListener('ended', playNext);
+        }
+        if (one && one === player.btn && !player.audio.paused) {
+            player.audio.pause();   // a second click stops
+            one.classList.remove('playing');
+            player.queue = [];
+            player.btn = null;
+            return;
+        }
+        player.audio.pause();
+        if (one) {
+            player.queue = [one];
+        } else {
+            const list = all.previousElementSibling;
+            player.queue = list ? [...list.querySelectorAll('.tl-play')] : [];
+        }
+        playNext();
+    });
 
     /** Trafikverket's part of a popup or the event page. */
     function trvBox(dev, mentions) {
@@ -272,15 +339,22 @@ const RDSMap = (() => {
             // Current incidents above the history
             zIndexOffset: hist ? -1000 : Math.round(f * 1000),
         }).addTo(layer);
-        marker.bindPopup(() => popupHtml(inc), { maxWidth: 340, minWidth: 240 });
+        // On a phone the popup must fit the map, or its timeline is cut off
+        const width = Math.min(340, Math.max(200, window.innerWidth - 90));
+        marker.bindPopup(() => popupHtml(inc), { maxWidth: width, minWidth: Math.min(240, width) });
         const line = addLine(layer, inc.trafikverket, color, false);
         return { marker, circle, line };
     }
 
     function popupHtml(inc) {
         const latest = inc.latest;
-        const text = latest && latest.transcription ? latest.transcription : '';
+        const said = (inc.timeline || []).filter((t) => t.evidence);
+        // What the latest broadcast said about this incident; before v0.7
+        // only the start of the whole message is known
+        const text = said.length ? said[said.length - 1].evidence
+            : latest && latest.transcription ? latest.transcription : '';
         const short = text.length > 240 ? `${text.slice(0, 240)}…` : text;
+        const radio = inc.timeline && inc.timeline.length ? inc.timeline : inc.mentions;
         const status = isHist(inc) ? '<span class="pill hist">Historisk</span>'
             : inc.status === 'cleared' ? '<span class="pill">Avklarad</span>' : '<span class="pill bad">Pågår</span>';
         return `<div class="inc-pop">
@@ -293,7 +367,9 @@ const RDSMap = (() => {
             ${inc.nodes && inc.nodes.length ? `<div class="kv"><span>Hörd av</span><span>${esc(inc.nodes.join(', '))}</span></div>` : ''}
             ${short ? `<p class="inc-pop-text">”${esc(short)}”</p>` : ''}
             ${latest ? `<a href="#/event/${encodeURIComponent(latest.id)}">Öppna senaste meddelandet</a>` : ''}
-            ${trvBox(inc.trafikverket, inc.mentions)}
+            ${inc.trafikverket ? trvBox(inc.trafikverket, radio)
+                : radio && radio.length > 1 || (inc.timeline || []).some((t) => t.audio_url)
+                    ? `<div class="trv-box"><div class="trv-head"><span>Förlopp</span></div>${timeline(radio, null)}</div>` : ''}
         </div>`;
     }
 
@@ -590,9 +666,10 @@ const RDSMap = (() => {
         el.innerHTML = `<section class="card">
             <div class="card-head"><h2>Plats</h2><a class="small" href="#/karta?i=${encodeURIComponent(inc[0].id)}">Visa på kartan</a></div>
             <div class="map mini" id="event-map"></div>
-            ${inc.map((i) => `<div class="kv"><span>${esc(i.label)}</span>
+            ${inc.map((i) => `<div class="kv"><span><a href="#/karta?i=${encodeURIComponent(i.id)}" title="Visa på kartan med hela förloppet">${esc(i.label)}</a></span>
                 <span>${esc(precision(i.radius_m))} · ${esc(direction(i))}${i.status === 'cleared' ? ' · avklarad' : ''}</span></div>
-                ${trvBox(i.trafikverket, [ev.started_at || ev.created_at].filter(Boolean))}`).join('')}
+                ${trvBox(i.trafikverket, [ev.started_at || ev.created_at].filter(Boolean).map((at) => (
+                    { seen_at: at, kind: i.kind, evidence: i.evidence })))}`).join('')}
         </section>`;
         await loadLeaflet();
         if (!ctx.alive()) return;

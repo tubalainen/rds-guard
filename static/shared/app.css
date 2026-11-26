@@ -655,4 +655,19 @@ details.help[open] summary { margin-bottom: 10px; }
 .trv-timeline li::before { content: ""; position: absolute; left: -17px; top: 8px; width: 8px; height: 8px; border-radius: 50%; background: #D92D20; }
 .trv-timeline li.trv::before { background: var(--accent, #1D4ED8); }
 .trv-timeline time { flex: none; min-width: 84px; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* Radio broadcasts in a timeline: kind, the words said, audio */
+.tl-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.tl-head { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.tl-kind { font-size: 11px; padding: 1px 7px; }
+.tl-text { color: var(--text-2); overflow-wrap: anywhere; }
+.tl-text a { margin-left: 4px; white-space: nowrap; }
+.tl-play { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0;
+    border: 1px solid var(--border-strong); border-radius: 50%; background: var(--surface); color: var(--accent); cursor: pointer; }
+.tl-play:hover { background: var(--surface-2); }
+.tl-play.playing { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-accent); }
+.tl-playall { display: inline-flex; gap: 6px; align-items: center; margin: 0 0 6px; }
+@media (max-width: 560px) {
+    .trv-timeline li { flex-direction: column; gap: 2px; }
+    .trv-timeline time { min-width: 0; }
+}
 .map-item-tri { flex: none; width: 0; height: 0; margin-top: 5px; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 10px solid #DC6803; }

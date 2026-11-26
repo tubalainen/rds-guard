@@ -831,6 +831,25 @@ def list_incidents(hours=geolocate.INCIDENT_HOURS):
         _conn(), _iso_hours_ago(hours) if hours else None)
 
 
+def get_incident(incident_id):
+    """One incident with its broadcasts, or None."""
+    return geolocate.get_incident(_conn(), incident_id)
+
+
+def event_briefs(event_ids):
+    """{id: {id, started_at, station_ps, audio_path}} for the given events,
+    in one query per 500 ids (for incident timelines)."""
+    ids = sorted({int(i) for i in event_ids if str(i).isdigit()})
+    out = {}
+    for n in range(0, len(ids), 500):
+        part = ids[n:n + 500]
+        for r in _conn().execute(
+                "SELECT id, started_at, station_ps, audio_path FROM events "
+                f"WHERE id IN ({','.join('?' * len(part))})", part):
+            out[r["id"]] = dict(r)
+    return out
+
+
 _GEO_PENDING_WHERE = (
     "transcription IS NOT NULL AND TRIM(transcription) != '' "
     "AND transcription_status = 'done' AND (geo_status IS NULL OR geo_status IN ("

@@ -7,6 +7,7 @@ Uses aiohttp to serve:
   GET  /api/events/:id → one event
   GET  /api/calendar  → light rows for the archive calendar
   GET  /api/incidents → incidents for the map (?history=1: all stored)
+  GET  /api/incidents/{id} → one incident with every broadcast about it
   POST /api/incidents/backfill → place messages stored before the map existed
   GET  /api/admin/session, POST /api/admin/login|logout → admin login
   (every /api/notify* route below needs a logged-in admin, see admin_auth)
@@ -161,6 +162,62 @@ async def handle_calendar(request):
     })
 
 
+def _decorate_incidents(rows):
+    """Add to incidents what the map needs: the latest message (popup),
+    each broadcast's time and audio (timeline) and Trafikverket's data."""
+    latest = {}
+    for inc in rows:
+        for key in inc["events"][:1]:
+            try:
+                ev = event_store.get_event(int(key))
+            except (TypeError, ValueError):
+                ev = None
+            if ev:
+                latest[inc["id"]] = {
+                    "id": ev["id"],
+                    "started_at": ev.get("started_at"),
+                    "station_ps": ev.get("station_ps"),
+                    "transcription": ev.get("transcription_corrected")
+                    or ev.get("transcription"),
+                    "audio_url": (f"/api/audio/{ev['audio_path']}"
+                                  if ev.get("audio_path") else None),
+                }
+    briefs = event_store.event_briefs(
+        t["event_key"] for inc in rows for t in inc.get("timeline", []))
+    for inc in rows:
+        for t in inc.get("timeline", []):
+            ev = briefs.get(int(t["event_key"])) if str(t["event_key"]).isdigit() else None
+            t["event_id"] = ev["id"] if ev else None
+            t["started_at"] = ev.get("started_at") if ev else None
+            t["station_ps"] = ev.get("station_ps") if ev else None
+            t["audio_url"] = (f"/api/audio/{ev['audio_path']}"
+                              if ev and ev.get("audio_path") else None)
+    import trafikverket
+    trafikverket.attach(event_store.trv, rows)
+    for inc in rows:
+        inc["latest"] = latest.get(inc["id"])
+        inc["events"] = [int(k) for k in inc["events"] if str(k).isdigit()]
+    return rows
+
+
+async def handle_incident(request):
+    """GET /api/incidents/{id} — one incident with every broadcast about it
+    (time, kind, the words, audio), oldest first."""
+    try:
+        inc_id = int(request.match_info["incident_id"])
+    except (TypeError, ValueError):
+        return _error(400, "bad_id")
+
+    def work():
+        inc = event_store.get_incident(inc_id)
+        return _decorate_incidents([inc])[0] if inc else None
+
+    inc = await _run(work)
+    if inc is None:
+        return _error(404, "not_found")
+    return web.json_response(inc)
+
+
 async def handle_incidents(request):
     """GET /api/incidents — incidents for the map (default: last 12 hours).
 
@@ -175,35 +232,8 @@ async def handle_incidents(request):
     if history:
         hours = None
 
-    def work():
-        rows = event_store.list_incidents(hours)
-        # The latest message about each incident, for the popup
-        latest = {}
-        for inc in rows:
-            for key in inc["events"][:1]:
-                try:
-                    ev = event_store.get_event(int(key))
-                except (TypeError, ValueError):
-                    ev = None
-                if ev:
-                    latest[inc["id"]] = {
-                        "id": ev["id"],
-                        "started_at": ev.get("started_at"),
-                        "station_ps": ev.get("station_ps"),
-                        "transcription": ev.get("transcription_corrected")
-                        or ev.get("transcription"),
-                        "audio_url": (f"/api/audio/{ev['audio_path']}"
-                                      if ev.get("audio_path") else None),
-                    }
-        import trafikverket
-        trafikverket.attach(event_store.trv, rows)
-        for inc in rows:
-            inc["latest"] = latest.get(inc["id"])
-            inc["events"] = [int(k) for k in inc["events"] if str(k).isdigit()]
-        return rows
-
     import rds_guard as rg
-    rows = await _run(work)
+    rows = await _run(lambda: _decorate_incidents(event_store.list_incidents(hours)))
     out = {"incidents": rows, "hours": hours, "geo": rg.geo_snapshot()}
     if history:
         out["backfill"] = await _run(rg.backfill_status)
@@ -516,6 +546,7 @@ def create_app():
     app.router.add_get("/api/calendar", handle_calendar)
     app.router.add_get("/api/incidents", handle_incidents)
     app.router.add_post("/api/incidents/backfill", handle_incidents_backfill)
+    app.router.add_get("/api/incidents/{incident_id:\\d+}", handle_incident)
     app.router.add_get("/api/trafikverket", handle_trafikverket)
     ADMIN.add_routes(app.router, "/api")
     app.router.add_get("/api/notify", handle_notify)

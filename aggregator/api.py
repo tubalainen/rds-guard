@@ -346,6 +346,53 @@ async def handle_audio(request):
         "Accept-Ranges": "none", "Cache-Control": "no-store"})
 
 
+def _decorate_incidents(rows):
+    """Add to incidents what the map needs: the latest message (popup),
+    each broadcast's time, node and audio (timeline), Trafikverket's data."""
+    trafikverket.attach(store.trv, rows)
+    briefs = store.event_briefs(
+        t["event_key"] for inc in rows for t in inc.get("timeline", []))
+    for inc in rows:
+        ev = store.get_event(inc["events"][0]) if inc["events"] else None
+        inc["latest"] = {
+            "id": ev["event_uid"],
+            "started_at": ev.get("started_at"),
+            "station_ps": ev.get("station_ps"),
+            "node_name": ev.get("node_name"),
+            "transcription": ev.get("transcription_corrected")
+            or ev.get("transcription"),
+            "audio_url": (f"/api/v1/audio/{ev['event_uid']}.ogg"
+                          if ev.get("audio_path") else None),
+        } if ev else None
+        for t in inc.get("timeline", []):
+            b = briefs.get(str(t["event_key"]))
+            t["event_id"] = b["event_uid"] if b else None
+            t["started_at"] = b.get("started_at") if b else None
+            t["station_ps"] = b.get("station_ps") if b else None
+            t["node_name"] = b.get("node_name") if b else None
+            t["audio_url"] = (f"/api/v1/audio/{b['event_uid']}.ogg"
+                              if b and b.get("audio_path") else None)
+    return rows
+
+
+async def handle_incident(request):
+    """GET /api/v1/incidents/{id} — one incident with every broadcast about
+    it (time, node, kind, the words, audio), oldest first."""
+    try:
+        inc_id = int(request.match_info["incident_id"])
+    except (TypeError, ValueError):
+        return _error(400, "bad_id")
+
+    def work():
+        inc = store.get_incident(inc_id)
+        return _decorate_incidents([inc])[0] if inc else None
+
+    inc = await _run(work)
+    if inc is None:
+        return _error(404, "not_found")
+    return web.json_response(inc)
+
+
 async def handle_incidents(request):
     """GET /api/v1/incidents — incidents for the map (default: 12 hours)."""
     hours = _int_param(request, "hours", 12, 1, 24 * 7)
@@ -355,20 +402,7 @@ async def handle_incidents(request):
     pipeline = request.app[PIPELINE]
 
     def work():
-        rows = store.list_incidents(hours)
-        trafikverket.attach(store.trv, rows)
-        for inc in rows:
-            ev = store.get_event(inc["events"][0]) if inc["events"] else None
-            inc["latest"] = {
-                "id": ev["event_uid"],
-                "started_at": ev.get("started_at"),
-                "station_ps": ev.get("station_ps"),
-                "node_name": ev.get("node_name"),
-                "transcription": ev.get("transcription_corrected")
-                or ev.get("transcription"),
-                "audio_url": (f"/api/v1/audio/{ev['event_uid']}.ogg"
-                              if ev.get("audio_path") else None),
-            } if ev else None
+        rows = _decorate_incidents(store.list_incidents(hours))
         nodes = []
         for n in store.list_nodes():
             place = (pipeline.node_place(n["id"])
@@ -536,6 +570,7 @@ def create_web_app(pipeline=None, mqtt=None):
     r.add_get("/api/v1/stations", handle_stations)
     r.add_get("/api/v1/incidents", handle_incidents)
     r.add_post("/api/v1/incidents/backfill", handle_incidents_backfill)
+    r.add_get("/api/v1/incidents/{incident_id:\\d+}", handle_incident)
     r.add_get("/api/v1/trafikverket", handle_trafikverket)
     r.add_get("/api/v1/nodes", handle_nodes)
     r.add_post("/api/v1/nodes", handle_create_node)
