@@ -1,6 +1,7 @@
 """The measuring tool for the map engines (tools/eval_geolocation.py)."""
 
 import gzip
+import json
 
 import pytest
 
@@ -134,3 +135,51 @@ def test_stored_incidents_are_scored_without_placing_again(reg):
     s = ev.score(runs, reg, KARLSTAD)
     assert [p.group for r in runs for p in r.predicted] == ["new", "linked"]
     assert (s["found"], s["precise"], s["linked_ok"]) == (2, 2, 1)
+
+
+class FakeClaude:
+    """Answers like ClaudeReader, from a fixed list of items per text."""
+
+    def __init__(self, reg, answers):
+        self.reg, self.answers = reg, answers
+        self.last_usage = self.last_raw = self.last_places = None
+
+    def read(self, text, radiotext, label, candidates, open_incidents, gaz=None):
+        by_id = {i + 1: p for i, p in enumerate(candidates)}
+        ids = {p.name: f"p{i}" for i, p in by_id.items()}
+        items = []
+        for it in self.answers[text]:
+            it = dict(it, places=[ids.get(n, n) for n in it.get("places", [])])
+            if it.get("incident_id") == "last":
+                it["incident_id"] = open_incidents[0]["id"] if open_incidents else None
+            items.append({"evidence": "", "when": "now", "confidence": "high",
+                          "road": "E18", "town": None, "between": None,
+                          "toward": None, "coming_from": None,
+                          "both_directions": False, "area": None, "what": "x",
+                          "incident_id": None, **it})
+        self.last_raw = {"corrected_text": text, "items": items}
+        self.last_places = by_id
+        return text, geo.mentions_from_items(items, by_id, (text,))
+
+
+def test_saved_claude_answers_replay_the_same(reg, tmp_path):
+    c = corpus(
+        case("a", "2026-11-26T10:00:00", "Olycka på E18 vid Bergviksmotet.",
+             [item("berg", "new", ["Bergviksmotet"])]),
+        case("b", "2026-11-26T10:30:00", "Fortfarande köer vid Bergviksmotet.",
+             [item("berg", "repeat", ["Bergviksmotet"])]),
+    )
+    fake = FakeClaude(reg, {
+        "Olycka på E18 vid Bergviksmotet.": [{"kind": "new", "places": ["Bergviksmotet"]}],
+        "Fortfarande köer vid Bergviksmotet.": [{"kind": "repeat", "places": ["Bergviksmotet"],
+                                                 "incident_id": "last"}],
+    })
+    path = tmp_path / "claude.json"
+    rec = ev.RecordingReader(fake, str(path))
+    first = ev.run(c, geo.Geolocator(rec), reg, KARLSTAD)
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["Fortfarande köer vid Bergviksmotet."]["known"]["1"]["label"] == "E18 Bergviksmotet"
+    again = ev.run(c, geo.Geolocator(ev.ReplayReader(saved)), reg, KARLSTAD)
+    assert ([[(p.placement.label, p.incident_id, p.placement.kind) for p in r.predicted] for r in first]
+            == [[(p.placement.label, p.incident_id, p.placement.kind) for p in r.predicted] for r in again])
+    assert again[1].engine == "claude" and again[1].predicted[0].group == "linked"
