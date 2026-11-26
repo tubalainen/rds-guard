@@ -35,13 +35,18 @@ You need a Linux host with Docker, and a way to publish one port over HTTPS:
 a reverse proxy you already run (Nginx Proxy Manager, Caddy, Traefik …) or a
 Cloudflare Tunnel.
 
-1. Get the files:
+1. Get the files. The image is ready-made, so you only need two files from
+   this folder; the rest of the repository is the satellite:
 
 ```bash
-git clone https://github.com/tubalainen/rds-guard.git
-cd rds-guard/aggregator
-cp .env.example .env
+mkdir rds-guard-aggregator && cd rds-guard-aggregator
+curl -fsSLo docker-compose.yml https://raw.githubusercontent.com/tubalainen/rds-guard/master/aggregator/docker-compose.yml
+curl -fsSLo .env https://raw.githubusercontent.com/tubalainen/rds-guard/master/aggregator/.env.example
 ```
+
+   To build the image yourself instead, clone the whole repository (the
+   build uses files outside this folder) and work in its `aggregator`
+   folder: `git clone https://github.com/tubalainen/rds-guard.git && cd rds-guard/aggregator && cp .env.example .env`
 
 2. Edit `.env`. These are the settings to look at; the rest have working
    defaults (see [Configuration](#configuration)):
@@ -70,7 +75,8 @@ Database, audio and downloaded models are stored in the `aggregator-data`
 folder next to `docker-compose.yml`.
 
 To build locally instead of pulling `ghcr.io/tubalainen/rds-guard-aggregator`,
-uncomment `build:` in `docker-compose.yml` and run `docker compose up -d --build`.
+use a clone of the repository (see step 1), uncomment `build:` in
+`docker-compose.yml` and run `docker compose up -d --build`.
 
 ## Publishing the ingest API
 
