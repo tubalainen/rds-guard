@@ -454,7 +454,7 @@ def test_road_numbers_with_a_suffix():
 
 
 def test_a_stretch_of_the_same_road_joins_a_precise_incident(db):
-    [a] = merge(db, [pl(59.18151, 13.01479, 1500, road="E45")], 1, "2026-11-13T11:52:00")
-    [b] = merge(db, [pl(59.24241, 13.01527, 13210, road="E45")], 2, "2026-11-13T12:04:00")
-    [c] = merge(db, [pl(59.24241, 13.01527, 13210, road="Rv 61")], 3, "2026-11-13T12:05:00")
+    [a] = merge(db, [pl(59.18151, 13.01479, 1500, road="E45")], 1, "2026-11-26T11:52:00")
+    [b] = merge(db, [pl(59.24241, 13.01527, 13210, road="E45")], 2, "2026-11-26T12:04:00")
+    [c] = merge(db, [pl(59.24241, 13.01527, 13210, road="Rv 61")], 3, "2026-11-26T12:05:00")
     assert a == b and c != a
