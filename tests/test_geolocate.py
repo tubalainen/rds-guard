@@ -296,3 +296,32 @@ def test_open_incidents_at_a_past_time(db):
 def test_shift_keeps_the_timestamp_form():
     assert geo._shift_iso("2026-11-26T23:00:00Z", 2) == "2026-11-27T01:00:00Z"
     assert geo._shift_iso("2026-11-26T23:00:00", -24) == "2026-11-25T23:00:00"
+
+
+# ---------------------------------------------------------------- places added by hand
+
+def test_a_place_added_by_hand_wins_over_others_with_its_name(tmp_path):
+    path = tmp_path / "gaz.tsv.gz"
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        f.write("Ölme\tvillage\t59.36209\t14.00995\tS\t\n"
+                "Stolpen\tlocality\t59.36980\t14.01170\tS\t\n"      # replaced
+                "Stolpen\tisolated_dwelling\t59.44863\t13.99557\tS\t\n"
+                "Stolpen\tisolated_dwelling\t59.51357\t14.30688\tS\t\n")
+    local = tmp_path / "local.tsv"
+    local.write_text("# comment\n"
+                     "Stolpen\tlandmark\t59.36987\t14.01174\tS\tvid E18\n"
+                     "broken line\n", encoding="utf-8")
+    reg = gz.Gazetteer.load(str(path), local_path=str(local))
+    stolpen = reg.exact("Stolpen")
+    assert len(stolpen) == 3                          # the OSM twin is gone
+    assert [p.local for p in stolpen].count(True) == 1
+    assert reg.search("Stolpen", limit=1)[0].place.local
+    [p] = place("Olycka på E18 vid Stolpen.", reg, center=(59.38, 13.5))
+    assert (p.lat, p.lon, p.radius_m) == (59.36987, 14.01174, 600)
+
+
+def test_bundled_hand_made_places_are_valid():
+    places = gz.read_local(gz.LOCAL_PATH)
+    assert places
+    for p in places:
+        assert p.kind in gz.KIND_RADIUS_M and p.county in gz.COUNTIES

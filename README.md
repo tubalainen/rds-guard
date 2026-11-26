@@ -609,6 +609,12 @@ Claude place each message, Claude's corrected text and its token cost. The
 second also transcribes the clips again with ElevenLabs with and without
 the place names, to see whether they help.
 
+Places missing from OpenStreetMap, or the one of several same-named places
+that the traffic desk means, are added by hand in
+`geodata/places-local.tsv` (name, kind, lat, lon, county; one per line). A
+name there replaces OpenStreetMap entries of the same name within 5 km and
+wins over the others.
+
 The map tiles come from `tile.openstreetmap.org`, loaded by your browser.
 Refresh the place-name registry now and then with
 `python3 tools/build_gazetteer.py` (needs the Overpass API).

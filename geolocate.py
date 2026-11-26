@@ -291,7 +291,11 @@ def resolve(mention, gaz, center, area_km=DEFAULT_AREA_KM):
 
     # 2. The town the announcer gives ("E18 i Karlstad")
     town = None
-    if mention.town:
+    best = look(mention.town)[:1] if mention.town else []
+    if best and best[0].place.local and best[0].place.kind not in gz.SETTLEMENTS:
+        # A spot added by hand ("E18 vid Stolpen"), not a town
+        _add(places, mention.town)
+    elif mention.town:
         ms = look(mention.town, kinds=gz.SETTLEMENTS)
         if seg:
             ms = [m for m in ms if gz.segment_km(m.place.point, seg[0].place.point,
