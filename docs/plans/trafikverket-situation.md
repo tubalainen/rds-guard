@@ -1,6 +1,6 @@
 # Plan: Trafikverkets händelser (Situation) i RDS Guard
 
-Status: förslag, inget är byggt. Undersökt 2026-11-26.
+Status: steg 1 (grunden) byggt 2026-11-26: `trafikverket.py`, lagring, status, inställningar, API `/api/trafikverket` och `/api/v1/trafikverket`, tester. Ännu inte verifierat mot riktig data. Matchning, karta och push återstår.
 
 ## Beslut (2026-11-26)
 

@@ -108,5 +108,14 @@ CLAUDE_TIMEOUT = _int(os.environ.get("CLAUDE_TIMEOUT"), 60)
 TRANSCRIPTION_PLACE_NAMES = _bool(
     os.environ.get("TRANSCRIPTION_PLACE_NAMES", "true"))
 
+# --- Trafikverket (optional): exact places and updates for traffic incidents ---
+# A free key from Trafikverket's open API (data.trafikverket.se). Empty = off.
+TRAFIKVERKET_API_KEY = os.environ.get("TRAFIKVERKET_API_KEY", "").strip()
+# Deviations within this many km of the receiver(s) are kept
+TRAFIKVERKET_RADIUS_KM = max(10, min(500, _int(
+    os.environ.get("TRAFIKVERKET_RADIUS_KM"), 150)))
+# Seconds between polls (only changes are fetched)
+TRAFIKVERKET_POLL_SEC = max(30, _int(os.environ.get("TRAFIKVERKET_POLL_SEC"), 60))
+
 TRANSCRIPTION_FALLBACK = os.environ.get(
     "TRANSCRIPTION_FALLBACK", "local").strip().lower()

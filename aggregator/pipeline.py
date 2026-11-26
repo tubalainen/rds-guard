@@ -116,6 +116,7 @@ class Pipeline(Hooks):
         self._transcriber = transcriber
         self._mqtt = mqtt
         self._geo = geo          # geo_service.GeoService or None
+        self.trv_feed = None     # trafikverket.TrafikverketFeed, set by app.py
         self._wake = threading.Event()
         self._lock = threading.Lock()
         self._online = {}        # node_id -> bool (current state)

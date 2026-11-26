@@ -10,6 +10,7 @@ import threading
 import time
 
 import geolocate
+import trafikverket
 import gazetteer as gz
 
 log = logging.getLogger("rds-aggregator")
@@ -154,6 +155,7 @@ def init_db(db_path):
             if "duplicate column" not in str(e).lower():
                 raise
     geolocate.init_tables(conn)
+    trafikverket.init_tables(conn)
     conn.commit()
     log.info("Aggregator store initialized at %s", _DB_PATH)
 
@@ -551,6 +553,7 @@ def purge_old_events(days):
         cur = conn.execute("DELETE FROM events WHERE received_at < ?",
                            (cutoff,))
         geolocate.purge_incidents(conn, cutoff)
+        trv.purge(cutoff)
         conn.commit()
     if cur.rowcount:
         log.info("Purged %d events older than %d days", cur.rowcount, days)
@@ -793,3 +796,10 @@ def recent_place_names(center=None, days=90, limit=60):
         except ValueError:
             continue
     return [n for n, _ in sorted(counts.items(), key=lambda kv: -kv[1])][:limit]
+
+
+# ---------------------------------------------------------------------------
+# Trafikverket's deviations (trafikverket.py), in this database
+# ---------------------------------------------------------------------------
+
+trv = trafikverket.TrvStore(lambda: _conn(), _lock, fmt="%Y-%m-%dT%H:%M:%SZ")

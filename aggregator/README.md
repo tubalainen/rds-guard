@@ -278,6 +278,8 @@ All settings are in `.env`; see [.env.example](.env.example).
 | `ANTHROPIC_API_KEY` | | Claude API key for the map engine |
 | `CLAUDE_MODEL` | `claude-haiku-5-5` | Claude model |
 | `TRANSCRIPTION_PLACE_NAMES` | `true` | Give the transcriber the node's local place names (ElevenLabs keyterms, about 20 % more per clip; Whisper prompt) |
+| `TRAFIKVERKET_API_KEY` | | Optional, free key for Trafikverket's open API: keeps Trafikverket's accidents, obstacles and restrictions near every node that reports a location, with their updates |
+| `TRAFIKVERKET_RADIUS_KM`, `TRAFIKVERKET_POLL_SEC` | `150`, `60` | Distance around each node, seconds between calls |
 | `TRANSCRIPTION_DEVICE` | `cpu` | `cpu` or `cuda` |
 | `WHISPER_REMOTE_URL` | | Remote ASR server for `remote` |
 | `MQTT_ENABLED` | `false` | Publish to MQTT |
@@ -329,6 +331,7 @@ other characters into `-`.
 | `GET /api/v1/audio/{event_uid}.ogg` | Audio |
 | `GET /api/v1/stations` | Stations seen, with the nodes that reported them |
 | `GET /api/v1/incidents` | Incidents for the map, with the nodes that heard them. Param: `hours` (default 12) |
+| `GET /api/v1/trafikverket` | Trafikverket's deviations near the nodes, with their versions. Param: `hours` (default 12) |
 | `GET /api/v1/nodes` | Nodes with status (needs Admin login, as do all `/api/v1/nodes*`) |
 | `GET /api/v1/status` | Aggregator status |
 | `POST /api/v1/nodes` | `{"name": "…"}` → node, token and setup lines |

@@ -13,6 +13,7 @@ import time
 import uuid
 
 import geolocate
+import trafikverket
 
 log = logging.getLogger("rds-guard")
 
@@ -101,6 +102,7 @@ def init_db(db_path=None):
     _migrate_add_column(conn, "geo_status", "TEXT")
     _migrate_add_column(conn, "geo_engine", "TEXT")
     geolocate.init_tables(conn)
+    trafikverket.init_tables(conn)
     conn.commit()
 
     conn.executescript("""
@@ -362,6 +364,7 @@ def purge_old_events(days):
             "DELETE FROM events WHERE created_at < ?", (cutoff,)
         )
         geolocate.purge_incidents(conn, cutoff)
+        trv.purge(cutoff)
         conn.commit()
         deleted = cur.rowcount
         if deleted > 0:
@@ -807,6 +810,10 @@ def list_incidents(hours=geolocate.INCIDENT_HOURS):
 
 def incidents_for_events(event_ids):
     return geolocate.incidents_for_events(_conn(), event_ids)
+
+
+# Trafikverket's deviations (trafikverket.py), in this database
+trv = trafikverket.TrvStore(lambda: _conn(), _lock)
 
 
 def recent_place_names(days=90, limit=60):

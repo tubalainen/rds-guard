@@ -404,6 +404,9 @@ Each transcription is logged with the engine that served it, e.g. `Transcription
 | `CLAUDE_MODEL` | `claude-haiku-5-5` | Claude model for the map engine |
 | `CLAUDE_TIMEOUT` | `60` | HTTP timeout in seconds |
 | `TRANSCRIPTION_PLACE_NAMES` | `true` | Give the transcriber local place names to listen for: ElevenLabs keyterms (costs about 20 % more per clip) and the local Whisper prompt |
+| `TRAFIKVERKET_API_KEY` | | Optional, free key for [Trafikverket's open API](https://data.trafikverket.se/). Keeps a copy of Trafikverket's accidents, obstacles and restrictions near the receiver, with their updates (road works are left out). Needs `NODE_LOCATION`. Empty = off |
+| `TRAFIKVERKET_RADIUS_KM` | `150` | Trafikverket's deviations within this distance of the receiver are kept |
+| `TRAFIKVERKET_POLL_SEC` | `60` | Seconds between calls to Trafikverket (each call only fetches what changed) |
 | `LOCAL_PROCESSING` | `true` | Satellite only: `false` = do not transcribe or map here, leave it to the aggregator (see [Who processes the recordings](#who-processes-the-recordings-your-choice)) |
 
 ### Uplink to an aggregator (optional)
@@ -600,6 +603,7 @@ Refresh the place-name registry now and then with
 | `/api/events/active` | GET | In-progress announcements only |
 | `/api/calendar` | GET | Light rows for the whole retention period (calendar and figures) |
 | `/api/incidents` | GET | Incidents for the map. Param: `hours` (default 12) |
+| `/api/trafikverket` | GET | Trafikverket's deviations near the receiver (with `TRAFIKVERKET_API_KEY`): current ones and those changed in the last `hours` (default 12), each with its versions |
 | `/api/status` | GET | Decoder status (uptime, station info, decode rate) |
 | `/api/audio/{filename}` | GET | Stream recorded audio file (OGG/WAV) |
 | `/api/events` | DELETE | Clear all events |
@@ -777,6 +781,7 @@ rds-guard/
 ├── gazetteer.py          # Place-name registry: lookup, sound-alike correction (shared)
 ├── geolocate.py          # Map engines (rules, Claude), placement, incidents (shared)
 ├── geo_service.py        # Registry per node area + engine (shared with the aggregator)
+├── trafikverket.py       # Trafikverket's deviations: feed and storage (shared with the aggregator)
 ├── geodata/gazetteer-se.tsv.gz # Swedish place names from OpenStreetMap (ODbL)
 ├── tools/convert_kb_whisper.py # Build step: converts KB-Whisper strict for faster-whisper
 ├── tools/build_gazetteer.py    # Rebuilds geodata/ from OpenStreetMap
