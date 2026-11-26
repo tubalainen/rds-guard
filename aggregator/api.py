@@ -321,6 +321,9 @@ async def handle_audio(request):
 async def handle_incidents(request):
     """GET /api/v1/incidents — incidents for the map (default: 12 hours)."""
     hours = _int_param(request, "hours", 12, 1, 24 * 7)
+    history = request.query.get("history") in ("1", "true")
+    if history:
+        hours = None   # every incident still stored
     pipeline = request.app[PIPELINE]
 
     def work():
@@ -348,13 +351,28 @@ async def handle_incidents(request):
         return rows, nodes
 
     rows, nodes = await _run(work)
-    return web.json_response({
+    out = {
         "incidents": rows, "hours": hours, "nodes": nodes,
         "geo": {"enabled": config.GEO_ENGINE != "none",
                 "engine": ("claude" if config.GEO_ENGINE == "claude"
                            and config.ANTHROPIC_API_KEY else
                            "none" if config.GEO_ENGINE == "none" else "rules")},
-    })
+    }
+    if history and hasattr(pipeline, "backfill_status"):
+        out["backfill"] = await _run(pipeline.backfill_status)
+    return web.json_response(out)
+
+
+async def handle_incidents_backfill(request):
+    """POST /api/v1/incidents/backfill — place the messages stored before
+    the map existed (once; later messages are placed as they come)."""
+    pipeline = request.app[PIPELINE]
+    if not hasattr(pipeline, "start_backfill"):
+        return _error(503, "unavailable", "no processing pipeline")
+    started = await _run(pipeline.start_backfill)
+    st = await _run(pipeline.backfill_status)
+    return web.json_response({"started": started, "backfill": st},
+                             status=202 if started else 200)
 
 
 async def handle_stations(request):
@@ -488,6 +506,7 @@ def create_web_app(pipeline=None, mqtt=None):
     r.add_get("/api/v1/audio/{uid}.ogg", handle_audio)
     r.add_get("/api/v1/stations", handle_stations)
     r.add_get("/api/v1/incidents", handle_incidents)
+    r.add_post("/api/v1/incidents/backfill", handle_incidents_backfill)
     r.add_get("/api/v1/nodes", handle_nodes)
     r.add_post("/api/v1/nodes", handle_create_node)
     r.add_post("/api/v1/nodes/{node_id}/rotate", handle_rotate_node)

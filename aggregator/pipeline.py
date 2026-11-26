@@ -121,6 +121,7 @@ class Pipeline(Hooks):
         self._online = {}        # node_id -> bool (current state)
         self._synced = {}        # node_id -> state was published to MQTT
         self._last_purge = 0.0
+        self._backfill = None    # geo_service.Backfill, made on first use
 
     # -- hooks (event loop thread; must be quick) ---------------------------
 
@@ -212,6 +213,48 @@ class Pipeline(Hooks):
                 store.save_geolocation(uid, None, "error")
             except Exception:
                 pass
+
+    # -- older messages (the first time the history map is shown) -----------
+
+    def _place_older(self, row):
+        """Place one message stored before the map existed. No alert: it
+        was broadcast long ago. None: its node has no location (yet)."""
+        place = self.node_place(row["node_id"])
+        if place is None:
+            return None
+        location = ((store.get_node(row["node_id"]) or {}).get("status")
+                    or {}).get("location")
+        result = self._geo.locate(row["transcription"], place.point, location,
+                                  row.get("radiotext"),
+                                  store.open_incidents(place.point, at=row["at"]))
+        status = "done" if result and result.placements else "none"
+        store.save_geolocation(row["event_uid"], result, status, at=row["at"])
+        return bool(result and result.placements)
+
+    def _placeable_count(self):
+        """Messages waiting to be placed whose node has a location (the
+        others wait until their node reports one)."""
+        return sum(n for node_id, n in store.geo_pending_by_node().items()
+                   if self.node_place(node_id) is not None)
+
+    @property
+    def backfill(self):
+        if getattr(self, "_backfill", None) is None:
+            import geo_service
+            self._backfill = geo_service.Backfill(
+                store.geo_pending, self._place_older, self._placeable_count)
+        return self._backfill
+
+    def backfill_status(self):
+        on = self._geo is not None and self._geo.engine != "none"
+        st = self.backfill.status(available=on, reason=None if on else "none")
+        st["engine"] = self._geo.engine if self._geo is not None else "none"
+        return st
+
+    def start_backfill(self):
+        if self._geo is None or self._geo.engine == "none":
+            return False
+        return self.backfill.start()
 
     def requeue_pending(self):
         """After a restart, queue audio whose transcription never finished."""

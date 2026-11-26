@@ -6,6 +6,8 @@ Uses aiohttp to serve:
   GET  /api/events/active → in-progress announcements
   GET  /api/events/:id → one event
   GET  /api/calendar  → light rows for the archive calendar
+  GET  /api/incidents → incidents for the map (?history=1: all stored)
+  POST /api/incidents/backfill → place messages stored before the map existed
   GET  /api/admin/session, POST /api/admin/login|logout → admin login
   (every /api/notify* route below needs a logged-in admin, see admin_auth)
   GET  /api/notify    → push rules + MQTT connection
@@ -155,11 +157,18 @@ async def handle_calendar(request):
 
 
 async def handle_incidents(request):
-    """GET /api/incidents — incidents for the map (default: last 12 hours)."""
+    """GET /api/incidents — incidents for the map (default: last 12 hours).
+
+    ?history=1 gives every incident still stored (EVENT_RETENTION_DAYS),
+    plus how far placing the older messages has come (backfill).
+    """
+    history = request.query.get("history") in ("1", "true")
     try:
         hours = max(1, min(int(request.query.get("hours", 12)), 24 * 7))
     except (TypeError, ValueError):
         hours = 12
+    if history:
+        hours = None
 
     def work():
         rows = event_store.list_incidents(hours)
@@ -188,8 +197,20 @@ async def handle_incidents(request):
 
     import rds_guard as rg
     rows = await _run(work)
-    return web.json_response({"incidents": rows, "hours": hours,
-                              "geo": rg.geo_snapshot()})
+    out = {"incidents": rows, "hours": hours, "geo": rg.geo_snapshot()}
+    if history:
+        out["backfill"] = await _run(rg.backfill_status)
+    return web.json_response(out)
+
+
+async def handle_incidents_backfill(request):
+    """POST /api/incidents/backfill — place the messages stored before the
+    map existed (once; later messages are placed as they come)."""
+    import rds_guard as rg
+    started = await _run(rg.start_backfill)
+    st = await _run(rg.backfill_status)
+    return web.json_response({"started": started, "backfill": st},
+                             status=202 if started else 200)
 
 
 async def handle_status(request):
@@ -280,7 +301,7 @@ async def write_guard(request, handler):
     On top of the SameSite cookie, this keeps a page on another site from
     logging in or changing the rules through the owner's browser.
     """
-    if (request.path.startswith(("/api/notify", "/api/admin"))
+    if (request.path.startswith(("/api/notify", "/api/admin", "/api/incidents"))
             and request.method not in ("GET", "HEAD", "OPTIONS")):
         if request.content_type != "application/json":
             return _error(415, "json_required")
@@ -468,6 +489,7 @@ def create_app():
     app.router.add_get("/api/events/{event_id}", handle_event)
     app.router.add_get("/api/calendar", handle_calendar)
     app.router.add_get("/api/incidents", handle_incidents)
+    app.router.add_post("/api/incidents/backfill", handle_incidents_backfill)
     ADMIN.add_routes(app.router, "/api")
     app.router.add_get("/api/notify", handle_notify)
     app.router.add_get("/api/notify/log", handle_notify_log)

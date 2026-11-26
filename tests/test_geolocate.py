@@ -261,3 +261,38 @@ def test_old_incidents_are_purged(db):
     merge(db, [pl(59.379, 13.43247, 500)], 1, "2026-10-01T10:00:00")
     geo.purge_incidents(db, "2026-11-01T00:00:00")
     assert geo.list_incidents(db, "2026-01-01T00:00:00") == []
+
+
+# ---------------------------------------------------------------- older messages
+
+def test_an_older_message_joins_but_does_not_overwrite(db):
+    """Placed afterwards: it adds to the incident without changing what the
+    later message said, and moves first_seen back."""
+    [a] = merge(db, [pl(59.379, 13.43247, 500, cleared=True, what="Öppet igen")],
+                2, "2026-11-26T11:00:00")
+    [b] = geo.merge_placements(db, [pl(59.3791, 13.4326, 500, what="Olycka")], 1,
+                               "2026-11-26T09:30:00", "2026-11-25T21:30:00", "rules")
+    assert a == b
+    [inc] = geo.list_incidents(db)
+    assert inc["status"] == "cleared" and inc["what"] == "Öppet igen"
+    assert inc["first_seen"] == "2026-11-26T09:30:00"
+    assert inc["last_seen"] == "2026-11-26T11:00:00"
+    assert sorted(inc["events"]) == ["1", "2"]
+
+
+def test_an_older_message_long_before_is_its_own_incident(db):
+    merge(db, [pl(59.379, 13.43247, 500)], 2, "2026-11-26T11:00:00")
+    geo.merge_placements(db, [pl(59.379, 13.43247, 500)], 1,
+                         "2026-11-20T08:00:00", "2026-11-19T20:00:00", "rules")
+    assert len(geo.list_incidents(db)) == 2
+
+
+def test_open_incidents_at_a_past_time(db):
+    merge(db, [pl(59.379, 13.43247, 500)], 1, "2026-11-26T10:00:00")
+    assert geo.open_incidents(db, "2026-11-25T20:00:00", "2026-11-26T09:00:00") == []
+    assert len(geo.open_incidents(db, "2026-11-25T20:00:00", "2026-11-26T10:30:00")) == 1
+
+
+def test_shift_keeps_the_timestamp_form():
+    assert geo._shift_iso("2026-11-26T23:00:00Z", 2) == "2026-11-27T01:00:00Z"
+    assert geo._shift_iso("2026-11-26T23:00:00", -24) == "2026-11-25T23:00:00"

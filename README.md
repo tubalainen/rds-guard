@@ -432,7 +432,8 @@ what the receiver has heard:
   period and station. A search can be turned into a push rule with one
   click (*Bevaka*).
 - **Karta** — the incidents traffic messages mentioned in the last 12
-  hours, on a map (see [Map](#map)).
+  hours, on a map; *Visa historiska händelser* shows all stored ones
+  (see [Map](#map)).
 - **Admin** — behind the password in `ADMIN_PASSWORD`. Its first section is
   **Aviseringar**: the push rules (see [Push notifications](#push-notifications)),
   the MQTT connection and the latest messages sent. A login lasts 12 hours,
@@ -540,6 +541,24 @@ Bergviksmotet, i riktning mot Grums"):
 Several messages about the same incident update one pin. Each event card
 shows its places, and each event page has a small map.
 
+### History
+
+Tick **Visa historiska händelser** to see every incident still stored
+(`EVENT_RETENTION_DAYS`), not only the last 12 hours. Incidents older than
+12 hours are violet, and the list is grouped by day. An incident becomes
+history by itself once 12 hours have passed since it was last mentioned.
+The choice is remembered in your browser. A place label on an older event
+opens the map with the history shown.
+
+The first time, the messages stored before the map existed (before
+v0.5.0, or while `NODE_LOCATION` was not set) are placed on the map, once,
+in the background; the map shows how far it has come. Each is placed as at
+the time it was broadcast, so messages about the same incident join one pin
+that day. It uses the same engine as new messages: with Claude on
+(`GEO_ENGINE=claude` and a key) that is about 1–3 öre per stored message
+(a few kronor for a few hundred), otherwise the free rules engine. No push
+or MQTT alerts are sent for them.
+
 ### How it works, and what it costs
 
 Everything needed runs locally, without a GPU and without paid services.
@@ -599,7 +618,8 @@ Refresh the place-name registry now and then with
 | `/api/events/{id}` | GET | One event |
 | `/api/events/active` | GET | In-progress announcements only |
 | `/api/calendar` | GET | Light rows for the whole retention period (calendar and figures) |
-| `/api/incidents` | GET | Incidents for the map. Param: `hours` (default 12) |
+| `/api/incidents` | GET | Incidents for the map. Params: `hours` (default 12), `history=1` (all stored, plus how far placing the older messages has come) |
+| `/api/incidents/backfill` | POST | Place the messages stored before the map existed (once, in the background; JSON body `{}`) |
 | `/api/status` | GET | Decoder status (uptime, station info, decode rate) |
 | `/api/audio/{filename}` | GET | Stream recorded audio file (OGG/WAV) |
 | `/api/events` | DELETE | Clear all events |
