@@ -9,7 +9,11 @@
  * plus views the host page registers (debug, noder).
  *
  * The host page calls RDSUI.start({...}) with what differs between the two
- * apps: API prefix, how an event is identified, stations and nodes.
+ * apps: API prefix, how an event is identified, stations and nodes, plus
+ * optional extras:
+ *   views: {name: async (root, route, ctx) => {}}, extraNav: [[name, label, svg]]
+ *   cardMeta: (ev) => html       extra label in every event card's meta row
+ *   eventExtras: async (ev, el, ctx) => {}   fills an empty element on #/event
  */
 'use strict';
 
@@ -399,6 +403,10 @@ const RDSUI = (() => {
         const meta = [typePill(ev), `<span>${esc(stationLabel(ev))}</span>`];
         if (opt.showDate) meta.push(`<span>· ${esc(fmtRelDay(start))}</span>`);
         if (ev.node_name) meta.push(`<span>· ${esc(ev.node_name)}</span>`);
+        if (cfg.cardMeta) {
+            // Host hook (e.g. a place label from the map): trusted HTML
+            try { meta.push(cfg.cardMeta(ev) || ''); } catch (e) { /* ignore */ }
+        }
         return `<article class="ev${ev.type === 'emergency' ? ' vma-ev' : ''}${live ? ' live' : ''}">
             <div class="ev-when">
                 <span class="ev-time">${esc(fmtTime(start))}</span>
@@ -721,6 +729,7 @@ const RDSUI = (() => {
                         ${ev.transcription ? `<p class="prose">${esc(ev.transcription)}</p>`
         : `<p class="muted" style="margin:0">${tStatus || 'Ingen transkription för den här händelsen.'}</p>`}
                     </section>
+                    <div id="event-extras"></div>
                 </div>
                 <div class="col-side">
                     <section class="card"><h2 style="margin-bottom:10px">Radiotext</h2>
@@ -737,6 +746,12 @@ const RDSUI = (() => {
                         ${kv.map(([k, v]) => `<div class="kv"><span>${esc(k)}</span><span>${esc(v)}</span></div>`).join('')}</section>
                 </div>
             </div>`;
+        if (cfg.eventExtras) {
+            // Host hook: fill the empty element (e.g. a mini map)
+            try {
+                await cfg.eventExtras(ev, root.querySelector('#event-extras'), ctx);
+            } catch (e) { /* the event itself is already shown */ }
+        }
         const pending = live || ['recording', 'saving', 'transcribing', 'queued'].includes(ev.transcription_status);
         if (pending) {
             const timer = setInterval(() => {
