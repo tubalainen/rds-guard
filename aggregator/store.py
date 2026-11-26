@@ -800,13 +800,40 @@ def list_incidents(hours=geolocate.INCIDENT_HOURS):
     conn = _conn()
     rows = geolocate.list_incidents(conn, iso_ago(hours * 3600) if hours else None)
     for inc in rows:
-        nodes = conn.execute(
-            "SELECT DISTINCT n.name FROM incident_events ie "
-            "JOIN events e ON e.event_uid = ie.event_key "
-            "JOIN nodes n ON n.id = e.node_id WHERE ie.incident_id = ?",
-            (inc["id"],)).fetchall()
-        inc["nodes"] = sorted(r[0] for r in nodes)
+        _incident_nodes(conn, inc)
     return rows
+
+
+def _incident_nodes(conn, inc):
+    nodes = conn.execute(
+        "SELECT DISTINCT n.name FROM incident_events ie "
+        "JOIN events e ON e.event_uid = ie.event_key "
+        "JOIN nodes n ON n.id = e.node_id WHERE ie.incident_id = ?",
+        (inc["id"],)).fetchall()
+    inc["nodes"] = sorted(r[0] for r in nodes)
+    return inc
+
+
+def get_incident(incident_id):
+    """One incident with its broadcasts and nodes, or None."""
+    conn = _conn()
+    inc = geolocate.get_incident(conn, incident_id)
+    return _incident_nodes(conn, inc) if inc else None
+
+
+def event_briefs(event_uids):
+    """{event_uid: {event_uid, started_at, station_ps, node_name,
+    audio_path}} for the given events (for incident timelines)."""
+    uids = sorted({str(u) for u in event_uids})
+    out = {}
+    for n in range(0, len(uids), 500):
+        part = uids[n:n + 500]
+        for r in _conn().execute(
+                "SELECT e.event_uid, e.started_at, e.station_ps, e.audio_path, "
+                "n.name AS node_name FROM events e JOIN nodes n ON n.id = e.node_id "
+                f"WHERE e.event_uid IN ({','.join('?' * len(part))})", part):
+            out[r["event_uid"]] = dict(r)
+    return out
 
 
 def incidents_for_events(event_uids):

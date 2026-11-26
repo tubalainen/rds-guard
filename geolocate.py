@@ -1032,20 +1032,36 @@ def merge_placements(conn, placements, event_key, now_iso, since_iso, engine,
     return ids
 
 
-def list_incidents(conn, since_iso=None):
-    """Incidents mentioned since since_iso (None: all), newest first, with
-    their events."""
-    rows = [_incident_dict(r) for r in conn.execute(
-        "SELECT * FROM incidents WHERE last_seen >= ? ORDER BY last_seen DESC",
-        (since_iso or "",))]
+def _with_events(conn, rows):
+    """Add each incident's broadcasts: events and mentions (newest first,
+    as before v0.7) and the timeline (oldest first, with what each said)."""
     for inc in rows:
         seen = conn.execute(
-            "SELECT event_key, seen_at FROM incident_events WHERE "
-            "incident_id = ? ORDER BY seen_at DESC", (inc["id"],)).fetchall()
+            "SELECT event_key, seen_at, kind, evidence FROM incident_events "
+            "WHERE incident_id = ? ORDER BY seen_at DESC", (inc["id"],)).fetchall()
         inc["events"] = [r[0] for r in seen]
         # When the radio spoke of it, for the timeline
         inc["mentions"] = [r[1] for r in seen]
+        inc["timeline"] = [{"event_key": r[0], "seen_at": r[1],
+                            "kind": r[2] or None, "evidence": r[3] or ""}
+                           for r in reversed(seen)]
     return rows
+
+
+def list_incidents(conn, since_iso=None):
+    """Incidents mentioned since since_iso (None: all), newest first, with
+    their broadcasts (see _with_events)."""
+    rows = [_incident_dict(r) for r in conn.execute(
+        "SELECT * FROM incidents WHERE last_seen >= ? ORDER BY last_seen DESC",
+        (since_iso or "",))]
+    return _with_events(conn, rows)
+
+
+def get_incident(conn, incident_id):
+    """One incident with its broadcasts, or None."""
+    row = conn.execute("SELECT * FROM incidents WHERE id = ?",
+                       (incident_id,)).fetchone()
+    return _with_events(conn, [_incident_dict(row)])[0] if row else None
 
 
 def incidents_for_events(conn, event_keys):
