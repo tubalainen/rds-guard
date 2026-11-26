@@ -347,6 +347,17 @@ Recorded audio is transcribed for searchable text and MQTT alerts. By default El
 
 > **ElevenLabs:** on P4 traffic clips Scribe was more complete than local KB-Whisper (fewer dropped place names and details, phone and road numbers right) and took 2–5 s per clip. Audio is sent to ElevenLabs (US processing by default). With the default fallback, a failed call is transcribed locally, so alerts still get text.
 
+**Check that ElevenLabs works:** at startup the container checks the key against ElevenLabs (an account lookup, no credits used) and logs the result. `docker compose logs rds-guard | grep -i elevenlabs` shows one of:
+
+```
+ElevenLabs: connected and authenticated (plan starter, 20 264 of 90 000 credits used) — transcribing with scribe_v3, fallback local
+ElevenLabs: authentication failed (HTTP 401: invalid_api_key) — check ELEVENLABS_API_KEY; clips will be transcribed locally (…)
+ElevenLabs: could not reach api.elevenlabs.io (…) — clips will be transcribed locally (…) until it answers
+ElevenLabs: no ELEVENLABS_API_KEY set — transcribing locally instead
+```
+
+Each transcription is logged with the engine that served it, e.g. `Transcription complete for event 42 via ElevenLabs scribe_v3 (333 chars, 3.1s)` or `… via local … (fallback)`. A warning appears when 90 % of the period's credits are used.
+
 > **Local vs Remote:** Local transcription works out of the box but uses significant CPU/RAM (especially larger models). For Raspberry Pi or low-power hosts, use `TRANSCRIPTION_ENGINE=remote` with a [whisper-asr-webservice](https://github.com/ahmetoner/whisper-asr-webservice) container running on a more powerful machine, or set `TRANSCRIPTION_ENGINE=none` to disable transcription while still recording audio.
 
 ### Uplink to an aggregator (optional)

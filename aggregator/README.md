@@ -168,6 +168,11 @@ The Swedish KB-Whisper model is bundled in the image, so local transcription
 needs no download. A model you set with `TRANSCRIPTION_MODEL` is downloaded
 once into the data volume.
 
+At startup the log says whether the ElevenLabs key works, and each
+transcription names the engine that served it:
+`docker compose logs aggregator | grep -i elevenlabs`. The main README's
+Transcription section lists the messages.
+
 ## MQTT topics
 
 ```
