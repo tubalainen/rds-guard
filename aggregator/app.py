@@ -15,7 +15,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from . import config, privileges, store
+from . import config, notifier, privileges, store
 from .api import create_web_app
 from .ingest import create_ingest_app
 from .mqtt_out import MqttOut
@@ -47,6 +47,7 @@ async def main():
     log.info("  Retention:   %d days", config.EVENT_RETENTION_DAYS)
     Path(config.AUDIO_DIR).mkdir(parents=True, exist_ok=True)
     store.init_db(config.DB_PATH)
+    notifier.init()
 
     # Central transcription (shared implementation with the satellite)
     from transcriber import create_transcriber

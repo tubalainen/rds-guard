@@ -21,11 +21,15 @@ local events, transcriptions, web UI and MQTT. The protocol is in
 - Receives events, audio and status from any number of satellites, each
   with its own token that can be revoked at any time
 - Transcribes all audio centrally with ElevenLabs Scribe, falling back to the bundled Swedish KB-Whisper model (or a remote Whisper server)
-- Web UI on your LAN: events from all stations with audio and
-  transcription, filters per station and per node, and a **Nodes** view
-  (online/offline, station, decode rate, version, queue, clock offset)
+- Web UI on your LAN, the same as on the satellites (in Swedish): an
+  archive calendar over all stations, search in transcriptions filtered by
+  station and node, push rules, and a **Noder** view (online/offline,
+  station, decode rate, version, queue, clock offset)
 - Publishes one MQTT alert per event, with the transcription, for all
   stations to one broker (Home Assistant etc.)
+- Push notifications by rules (`rds-aggregator/notify/<rule>`), which can
+  also be limited to certain nodes; see the main README's
+  [Push notifications](../README.md#push-notifications)
 - Read API for other programs
 - Keeps 90 days of events by default
 
@@ -66,7 +70,7 @@ docker compose up -d
    [Publishing the ingest API](#publishing-the-ingest-api)) and
    [check that it works](#check-that-it-works).
 
-5. Open the web UI at **http://your-host:8080**, go to **Nodes**, add a node
+5. Open the web UI at **http://your-host:8080**, go to **Noder**, add a node
    per friend, and send them the three lines that are shown (see
    [Adding a satellite](#adding-a-satellite)).
 
@@ -179,7 +183,7 @@ a satellite.
 | 403 from Cloudflare | See [Bot protection](#bot-protection) |
 | 521, 525 or 526 from Cloudflare | Cloudflare cannot reach the proxy over HTTPS: check the DNS record, that port 443 reaches the proxy, and its certificate |
 
-Then add a node under **Nodes** in the web UI (see
+Then add a node under **Noder** in the web UI (see
 [Adding a satellite](#adding-a-satellite)). When its owner has started the
 satellite, the node turns green within a minute.
 
@@ -201,8 +205,8 @@ such answers; they keep it queued and retry.
 
 ## Adding a satellite
 
-**In the web UI:** Nodes → type a name (e.g. `Kalle, Karlstad`) → *Add
-node*. The token is shown once, together with the lines to send.
+**In the web UI:** Noder → type a name (e.g. `Kalle, Karlstad`) → *Lägg
+till nod*. The token is shown once, together with the lines to send.
 
 **Or from the command line:**
 
@@ -233,7 +237,7 @@ NODE_NAME=Kalle, Karlstad
 3. Restart with `docker compose up -d`.
 
 The satellite's status bar shows `uplink` in green when it is connected, and
-the node turns green under **Nodes** here within a minute. No ports need to be
+the node turns green under **Noder** here within a minute. No ports need to be
 opened at the satellite.
 
 ## Configuration
@@ -243,6 +247,8 @@ All settings are in `.env`; see [.env.example](.env.example).
 | Variable | Default | Description |
 |---|---|---|
 | `PUBLIC_URL` | | Address satellites use; shown in their setup lines |
+| `WEB_UI_URL` | | Address of the web UI on your network. When set, push messages link to the event |
+| `NOTIFY_TIMEZONE` | `Europe/Stockholm` | Time zone for the days and times in push rules |
 | `WEB_UI_BIND` / `WEB_UI_PORT` | `0.0.0.0` / `8080` | Where the web UI is published on the host. Use `127.0.0.1` on a server with a public address |
 | `INGEST_API_BIND` / `INGEST_API_PORT` | `0.0.0.0` / `8081` | Where the ingest API is published on the host: the address and port your reverse proxy forwards to |
 | `PUID` / `PGID` | `10001` / `10001` | User and group that own the files in `aggregator-data` and that the server runs as |
@@ -279,6 +285,7 @@ Transcription section lists the messages.
 
 ```
 rds-aggregator/alert                         # One message per finished event (see below)
+rds-aggregator/notify/{topic}                # Push messages from your rules (format as on the satellite)
 rds-aggregator/{pi}/traffic/ta               # TA active true/false (retained)
 rds-aggregator/{pi}/{type}/transcription     # Latest transcription per station (retained)
 rds-aggregator/nodes/{node}/status           # Node online/offline (retained)
@@ -298,7 +305,8 @@ other characters into `-`.
 
 | Endpoint | Description |
 |---|---|
-| `GET /api/v1/events` | Events, newest first. Params: `type`, `pi`, `node`, `since`, `active` (`1`/`0`), `limit` (≤ 200), `offset` |
+| `GET /api/v1/events` | Events, newest first. Params: `type`, `pi`, `node`, `since`, `q` (words in RadioText/transcription), `from`/`to` (UTC start time), `active` (`1`/`0`), `limit` (≤ 200), `offset` |
+| `GET /api/v1/calendar` | Light rows for the whole retention period |
 | `GET /api/v1/events/active` | Events in progress |
 | `GET /api/v1/events/{event_uid}` | One event |
 | `GET /api/v1/audio/{event_uid}.ogg` | Audio |
@@ -309,6 +317,11 @@ other characters into `-`.
 | `POST /api/v1/nodes/{id}/rotate` | New token |
 | `PATCH /api/v1/nodes/{id}` | `{"enabled": true\|false}` |
 | `DELETE /api/v1/nodes/{id}` | Remove node and its events |
+| `GET /api/v1/notify` | Push rules and the MQTT connection |
+| `POST /api/v1/notify/rules`, `PUT`/`DELETE /api/v1/notify/rules/{id}` | Edit push rules |
+| `POST /api/v1/notify/preview` | Try a rule on the stored history |
+| `POST /api/v1/notify/test` | Send a test message |
+| `GET /api/v1/notify/log` | Latest push messages |
 
 Write requests must send `Content-Type: application/json` and, from a
 browser, come from the same origin.

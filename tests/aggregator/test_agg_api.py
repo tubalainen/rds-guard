@@ -122,6 +122,7 @@ async def test_ui_served_with_security_headers(web):
     assert r.status == 200
     assert "RDS Guard Aggregator" in await r.text()
     assert "frame-ancestors 'none'" in r.headers["Content-Security-Policy"]
-    for path in ("/static/css/base.css", "/static/css/aggregator.css",
-                 "/static/js/app.js", "/static/js/events.js", "/static/js/nodes.js"):
+    for path in ("/static/shared/app.css", "/static/shared/rdsui.js",
+                 "/static/shared/vendor/wavesurfer-7.12.12.min.js",
+                 "/static/js/aggregator.js"):
         assert (await web.get(path)).status == 200, path
