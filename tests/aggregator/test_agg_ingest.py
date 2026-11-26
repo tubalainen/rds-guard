@@ -69,6 +69,37 @@ async def test_every_response_has_protocol_header(client, node):
     assert resp.headers[H] == "1"
 
 
+@pytest.mark.parametrize("method,path", [
+    ("GET", "/"),
+    ("GET", "/index.html"),
+    ("GET", "/static/js/app.js"),
+    ("GET", "/api/v1/status"),
+    ("GET", "/api/v1/events"),
+    ("GET", "/api/v1/nodes"),
+    ("POST", "/api/v1/nodes"),
+    ("DELETE", "/api/v1/nodes/1"),
+    ("GET", "/api/v1/audio/x.ogg"),
+])
+async def test_ingest_port_serves_nothing_but_ingest(client, node, method, path):
+    """This port is the one put on the internet, without a filter in front:
+    the web UI, the read API and node admin must not exist on it."""
+    r = await client.request(method, path, headers=node["headers"], json={})
+    assert r.status == 404
+    assert r.headers[H] == "1"
+    # … and without a token the caller does not even learn that
+    r = await client.request(method, path)
+    assert r.status == 426
+
+
+async def test_reachability_check_from_readme(client):
+    """aggregator/README.md, "Check that it works": a plain curl gets a 426
+    that is recognisably from the aggregator."""
+    r = await client.get("/api/v1/ingest/heartbeat")
+    assert r.status == 426
+    assert r.headers[H] == "1"
+    assert (await r.json())["error"] == "unsupported_protocol"
+
+
 async def test_auth_required(client):
     resp = await client.put(_url(uuid.uuid4()), json=_event(), headers={H: "1"})
     assert resp.status == 401

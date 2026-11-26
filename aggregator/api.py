@@ -1,7 +1,7 @@
 """Web UI, read API and node admin — served on the LAN port only.
 
-This server has no login: keep it off the internet (the nginx config only
-forwards /api/v1/ingest/ to the ingest port, never this one). Write
+This server has no login: keep it off the internet (a reverse proxy or
+tunnel must only ever forward to the ingest port, never to this one). Write
 requests must be JSON and same-origin, so a web page on another site
 cannot drive the admin endpoints through the owner's browser.
 """

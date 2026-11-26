@@ -11,6 +11,8 @@ build/
 # Data
 *.db
 /data/
+rds-data/
+aggregator-data/
 
 # IDE
 .vscode/

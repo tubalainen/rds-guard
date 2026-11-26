@@ -2,7 +2,7 @@
 **/.env
 **/*.db
 rds-data/
-aggregator-data/
+**/aggregator-data/
 .git/
 .github/
 tests/

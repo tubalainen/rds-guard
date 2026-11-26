@@ -22,13 +22,14 @@ Built for Sveriges Radio P4, Sweden's primary traffic announcement carrier and e
 
 ### System overview
 
-![RDS Guard architecture: a satellite decodes P4 with an RTL-SDR, stores events and audio locally and, optionally, sends them over HTTPS through Cloudflare and nginx to the aggregator, which stores, transcribes and publishes alerts](docs/architecture/rds-guard.architecture.svg)
+![RDS Guard architecture: a satellite decodes P4 with an RTL-SDR, stores events and audio locally and, optionally, sends them over HTTPS through a reverse proxy to the aggregator, which stores, transcribes and publishes alerts](docs/architecture/rds-guard.architecture.svg)
 
 Every installation is a complete RDS Guard on its own (**standalone**). With
 `UPLINK_URL` set it also becomes a **satellite** and sends a copy of each event
 and its audio to an **aggregator**, a separate container that collects events
 from many satellites, transcribes them centrally and publishes MQTT alerts. Only
-the aggregator's ingest API is on the internet, behind Cloudflare and nginx.
+the aggregator's ingest API is on the internet, behind an HTTPS reverse proxy or
+a Cloudflare Tunnel.
 See [Run as a satellite](#run-as-a-satellite) and
 [aggregator/README.md](aggregator/README.md).
 
@@ -265,7 +266,11 @@ The installation is standalone again; local data is not affected.
 ### Run the aggregator yourself
 
 To collect events from friends' satellites, run the separate aggregator
-container: see [aggregator/README.md](aggregator/README.md).
+container: see [aggregator/README.md](aggregator/README.md). It is a single
+container that you put behind your own HTTPS reverse proxy (for example
+Nginx Proxy Manager with Cloudflare) or a Cloudflare Tunnel; its README has
+the settings for both and a way to
+[check that it works](aggregator/README.md#check-that-it-works).
 
 ## Configuration
 
