@@ -584,6 +584,28 @@ details.help[open] summary { margin-bottom: 10px; }
 .map-item-dot { flex: none; width: 10px; height: 10px; margin-top: 6px; border-radius: 50%; background: #D92D20; }
 .map-item.cleared .map-item-dot { background: #667085; }
 .map-item.cleared b { color: var(--muted); }
+.map-item.hist .map-item-dot { background: #7F56D9; }
+.map-group {
+    margin: 14px 0 2px; font-size: 12px; font-weight: 600; letter-spacing: .02em;
+    text-transform: uppercase; color: var(--muted);
+}
+.map-group:first-child { margin-top: 0; }
+.map-group + .map-item { border-top: 0; }
+.map-check {
+    display: inline-flex; align-items: center; gap: 8px; align-self: flex-end;
+    font-size: 14px; color: var(--text-2); cursor: pointer; white-space: nowrap; padding-bottom: 2px;
+}
+.map-check input { width: 18px; height: 18px; margin: 0; accent-color: #7F56D9; cursor: pointer; }
+#map-backfill { margin-top: 8px; }
+.map-note.info { background: var(--surface-2); color: var(--text-2); border: 1px solid var(--border); display: flex; gap: 10px; align-items: center; }
+.map-note .spinner {
+    flex: none; width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid var(--border); border-top-color: #7F56D9; animation: map-spin .9s linear infinite;
+}
+@keyframes map-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .map-note .spinner { animation: none; } }
+.lg-dot.hist { background: #7F56D9; box-shadow: 0 0 0 1px #7F56D9; }
+.pill.hist { background: rgba(127, 86, 217, .14); color: #7F56D9; }
 
 .inc-icon { background: none; border: 0; }
 .inc-pin { position: relative; width: 36px; height: 36px; }
@@ -594,6 +616,8 @@ details.help[open] summary { margin-bottom: 10px; }
     background: #D92D20; border: 2.5px solid #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .45);
 }
 .inc-pin.cleared .inc-dot { background: #667085; }
+.inc-pin.hist .inc-arrow { fill: #6941C6; }
+.inc-pin.hist .inc-dot { background: #7F56D9; width: 12px; height: 12px; left: 12px; top: 12px; border-width: 2px; }
 .inc-pop { font: 14px/1.45 var(--font); }
 .inc-pop strong { font-size: 15px; }
 .inc-pop p { margin: 6px 0; }

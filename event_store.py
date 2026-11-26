@@ -772,25 +772,40 @@ def events_for_preview(since):
 # Geolocation: incidents on the map
 # ---------------------------------------------------------------------------
 
-def _iso_hours_ago(hours):
-    return time.strftime("%Y-%m-%dT%H:%M:%S",
-                         time.gmtime(time.time() - hours * 3600))
+_ISO = "%Y-%m-%dT%H:%M:%S"
 
 
-def save_geolocation(event_id, result, status):
+def _iso_hours_ago(hours, at=None):
+    """UTC timestamp hours before at (an ISO timestamp; default now)."""
+    base = _epoch(at) if at else time.time()
+    return time.strftime(_ISO, time.gmtime(base - hours * 3600))
+
+
+def _epoch(iso):
+    import calendar
+    return calendar.timegm(time.strptime(_norm_ts(iso), _ISO))
+
+
+def _norm_ts(ts):
+    """'2026-11-24 08:15:02Z' -> '2026-11-24T08:15:02' (this table's form)."""
+    return str(ts).replace(" ", "T")[:19]
+
+
+def save_geolocation(event_id, result, status, at=None):
     """Store how a message was placed: corrected text and its incidents.
 
     result is a geolocate.GeoResult or None; status is "done", "none" (no
-    place found), "error", "no_location" or "off".
+    place found), "error", "no_location" or "off". at is when the message
+    was broadcast, for older messages placed afterwards (default now).
     """
+    now = _norm_ts(at) if at else time.strftime(_ISO, time.gmtime())
     with _lock:
         conn = _conn()
         ids = []
         if result is not None and result.placements:
             ids = geolocate.merge_placements(
-                conn, result.placements, event_id,
-                time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
-                _iso_hours_ago(geolocate.INCIDENT_HOURS), result.engine)
+                conn, result.placements, event_id, now,
+                _iso_hours_ago(geolocate.INCIDENT_HOURS, now), result.engine)
         conn.execute(
             "UPDATE events SET transcription_corrected = ?, geo_status = ?, "
             "geo_engine = ? WHERE id = ?",
@@ -800,12 +815,46 @@ def save_geolocation(event_id, result, status):
     return ids
 
 
-def open_incidents(hours=geolocate.INCIDENT_HOURS):
-    return geolocate.open_incidents(_conn(), _iso_hours_ago(hours))
+def open_incidents(hours=geolocate.INCIDENT_HOURS, at=None):
+    """Incidents still open (at a past time at, default now)."""
+    return geolocate.open_incidents(
+        _conn(), _iso_hours_ago(hours, at), _norm_ts(at) if at else None)
 
 
 def list_incidents(hours=geolocate.INCIDENT_HOURS):
-    return geolocate.list_incidents(_conn(), _iso_hours_ago(hours))
+    """Incidents of the last hours; hours=None: all that are stored."""
+    return geolocate.list_incidents(
+        _conn(), _iso_hours_ago(hours) if hours else None)
+
+
+_GEO_PENDING_WHERE = (
+    "transcription IS NOT NULL AND TRIM(transcription) != '' "
+    "AND transcription_status = 'done' AND (geo_status IS NULL OR geo_status IN ("
+    + ",".join("'%s'" % s for s in geolocate.PENDING_STATUSES)
+    + "))")
+
+
+def geo_pending():
+    """Transcribed messages never placed on the map, oldest first."""
+    rows = _conn().execute(
+        "SELECT id, transcription, radiotext, "
+        "COALESCE(started_at, created_at) AS at FROM events WHERE "
+        + _GEO_PENDING_WHERE + " ORDER BY COALESCE(started_at, created_at), id"
+    ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["radiotext"] = json.loads(d["radiotext"]) if d["radiotext"] else []
+        except (TypeError, ValueError):
+            d["radiotext"] = []
+        out.append(d)
+    return out
+
+
+def geo_pending_count():
+    return _conn().execute(
+        "SELECT COUNT(*) FROM events WHERE " + _GEO_PENDING_WHERE).fetchone()[0]
 
 
 def incidents_for_events(event_ids):

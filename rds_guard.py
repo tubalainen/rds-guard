@@ -957,6 +957,60 @@ def _geolocate(event_id, text):
             pass
         return None
 
+
+def _place_older(item):
+    """Place one message stored before the map existed (Backfill.place).
+
+    No alert, no WebSocket message: it was broadcast long ago. It is
+    placed as at the time of the broadcast.
+    """
+    if _node_place is None:
+        return None
+    result = geo_service.locate(
+        item["transcription"], _node_place.point, config.NODE_LOCATION,
+        item.get("radiotext"), event_store.open_incidents(at=item["at"]))
+    if result is None:
+        event_store.save_geolocation(item["id"], None, "none", at=item["at"])
+        return False
+    status = "done" if result.placements else "none"
+    event_store.save_geolocation(item["id"], result, status, at=item["at"])
+    return bool(result.placements)
+
+
+_backfill = None
+
+
+def _get_backfill():
+    global _backfill
+    if _backfill is None:
+        import geo_service as geo_service_mod
+        _backfill = geo_service_mod.Backfill(
+            event_store.geo_pending, _place_older, event_store.geo_pending_count)
+    return _backfill
+
+
+def backfill_status():
+    """Placing older messages on the map: whether it can, and how far."""
+    if geo_service is None:
+        reason = "off" if not config.LOCAL_PROCESSING else "none"
+    elif geo_service.engine == "none":
+        reason = "none"
+    elif not _geo_ready.is_set():
+        reason = "starting"
+    elif _node_place is None:
+        reason = "no_location"
+    else:
+        reason = None
+    st = _get_backfill().status(available=reason is None, reason=reason)
+    st["engine"] = geo_service.engine if geo_service is not None else "none"
+    return st
+
+
+def start_backfill():
+    if not backfill_status()["available"]:
+        return False
+    return _get_backfill().start()
+
 # ---------------------------------------------------------------------------
 # Statistics
 # ---------------------------------------------------------------------------

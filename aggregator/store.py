@@ -731,15 +731,30 @@ def events_for_preview(since):
 # Geolocation: incidents on the map
 # ---------------------------------------------------------------------------
 
-def save_geolocation(event_uid, result, status):
-    """Store a message's corrected text and merge its incidents."""
+def _norm_ts(ts):
+    """'2026-11-24T08:15:02' or '... 08:15:02.5Z' -> '2026-11-24T08:15:02Z'."""
+    return str(ts).replace(" ", "T")[:19] + "Z"
+
+
+def _iso_before(at, seconds):
+    import calendar
+    t = calendar.timegm(time.strptime(_norm_ts(at), "%Y-%m-%dT%H:%M:%SZ"))
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t - seconds))
+
+
+def save_geolocation(event_uid, result, status, at=None):
+    """Store a message's corrected text and merge its incidents.
+
+    at: when the message was broadcast, for older messages placed
+    afterwards (default now)."""
+    now = _norm_ts(at) if at else now_iso()
     with _lock:
         conn = _conn()
         ids = []
         if result is not None and result.placements:
             ids = geolocate.merge_placements(
-                conn, result.placements, event_uid, now_iso(),
-                iso_ago(geolocate.INCIDENT_HOURS * 3600), result.engine)
+                conn, result.placements, event_uid, now,
+                _iso_before(now, geolocate.INCIDENT_HOURS * 3600), result.engine)
         conn.execute(
             "UPDATE events SET transcription_corrected = ?, geo_status = ?, "
             "geo_engine = ? WHERE event_uid = ?",
@@ -755,16 +770,23 @@ def _near(rows, center, km):
     return [r for r in rows if gz.km(center, (r["lat"], r["lon"])) <= km]
 
 
-def open_incidents(center=None, km=geolocate.DEFAULT_AREA_KM):
-    rows = geolocate.open_incidents(
-        _conn(), iso_ago(geolocate.INCIDENT_HOURS * 3600))
+def open_incidents(center=None, km=geolocate.DEFAULT_AREA_KM, at=None):
+    """Incidents still open near center (at a past time at, default now)."""
+    if at:
+        rows = geolocate.open_incidents(
+            _conn(), _iso_before(at, geolocate.INCIDENT_HOURS * 3600),
+            _norm_ts(at))
+    else:
+        rows = geolocate.open_incidents(
+            _conn(), iso_ago(geolocate.INCIDENT_HOURS * 3600))
     return _near(rows, center, km)
 
 
 def list_incidents(hours=geolocate.INCIDENT_HOURS):
-    """Incidents for the map, with the nodes whose messages mentioned them."""
+    """Incidents for the map, with the nodes whose messages mentioned them.
+    hours=None: all that are stored."""
     conn = _conn()
-    rows = geolocate.list_incidents(conn, iso_ago(hours * 3600))
+    rows = geolocate.list_incidents(conn, iso_ago(hours * 3600) if hours else None)
     for inc in rows:
         nodes = conn.execute(
             "SELECT DISTINCT n.name FROM incident_events ie "
@@ -777,6 +799,33 @@ def list_incidents(hours=geolocate.INCIDENT_HOURS):
 
 def incidents_for_events(event_uids):
     return geolocate.incidents_for_events(_conn(), event_uids)
+
+
+_GEO_PENDING_WHERE = (
+    " WHERE e.transcription IS NOT NULL AND TRIM(e.transcription) != '' "
+    "AND e.transcription_status = 'done' AND (e.geo_status IS NULL OR "
+    "e.geo_status IN (" + ",".join("'%s'" % s for s in geolocate.PENDING_STATUSES)
+    + "))")
+
+
+def geo_pending():
+    """Transcribed messages never placed on the map, oldest first."""
+    rows = _conn().execute(
+        _EVENT_SELECT + _GEO_PENDING_WHERE
+        + " ORDER BY COALESCE(e.started_at, e.received_at), e.id").fetchall()
+    out = []
+    for r in rows:
+        d = _event_dict(r)
+        d["at"] = d.get("started_at") or d.get("received_at")
+        out.append(d)
+    return out
+
+
+def geo_pending_by_node():
+    """{node_id: number of messages never placed on the map}."""
+    return dict(_conn().execute(
+        "SELECT e.node_id, COUNT(*) FROM events e" + _GEO_PENDING_WHERE
+        + " GROUP BY e.node_id").fetchall())
 
 
 def recent_place_names(center=None, days=90, limit=60):

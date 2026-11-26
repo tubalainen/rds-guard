@@ -85,3 +85,56 @@ async def test_incidents_api(aiohttp_client, agg_store, event, geo, monkeypatch)
     node = (await (await web.get("/api/v1/nodes")).json())["nodes"][0]
     assert node["location"] == "Karlstad, Värmlands län"
     assert node["located"]["name"] == "Karlstad"
+
+
+def _wait(pipe):
+    import time
+    for _ in range(200):
+        if not pipe.backfill_status()["running"]:
+            return
+        time.sleep(0.01)
+    raise AssertionError("backfill did not finish")
+
+
+async def test_older_messages_are_placed_for_the_history(
+        aiohttp_client, agg_store, event, geo, monkeypatch):
+    """Messages stored before the map existed: placed once, as at the time
+    they were broadcast, and only shown with ?history=1."""
+    monkeypatch.setattr(geo_service.Backfill, "PAUSE_SEC", 0)
+    agg_store.set_transcription(UID, TEXT, "done")      # no geo_status yet
+    pipe = Pipeline(transcriber=None, mqtt=None, geo=geo)
+    web = await aiohttp_client(api.create_web_app(pipe))
+
+    data = await (await web.get("/api/v1/incidents?history=1")).json()
+    assert data["hours"] is None and data["incidents"] == []
+    assert data["backfill"]["pending"] == 1 and data["backfill"]["runnable"]
+    resp = await web.post("/api/v1/incidents/backfill", json={})
+    assert resp.status == 202
+    _wait(pipe)
+
+    data = await (await web.get("/api/v1/incidents?history=1")).json()
+    [inc] = data["incidents"]
+    assert inc["label"] == "E18 Bergviksmotet" and inc["nodes"] == ["Kalle"]
+    assert inc["first_seen"] == "2026-11-25T10:00:00Z"
+    assert data["backfill"]["placed"] == 1 and not data["backfill"]["runnable"]
+    assert agg_store.get_event(UID)["geo_status"] == "done"
+    assert (await (await web.get("/api/v1/incidents")).json())["incidents"] == []
+
+
+def test_messages_of_a_node_without_location_wait(agg_store, event, geo, monkeypatch):
+    monkeypatch.setattr(geo_service.Backfill, "PAUSE_SEC", 0)
+    agg_store.record_heartbeat(event["id"], "Kalle", "1.0", {"location": None}, 0)
+    agg_store.set_transcription(UID, TEXT, "done")
+    pipe = Pipeline(transcriber=None, mqtt=None, geo=geo)
+    assert pipe.start_backfill()
+    _wait(pipe)
+    st = pipe.backfill_status()
+    assert st["skipped"] == 1 and st["pending"] == 0 and not st["runnable"]
+    assert agg_store.get_event(UID)["geo_status"] is None
+    # Once the node reports where it is, its messages can be placed
+    agg_store.record_heartbeat(event["id"], "Kalle", "1.0",
+                               {"location": "Karlstad, Värmlands län"}, 0)
+    assert pipe.backfill_status()["runnable"]
+    assert pipe.start_backfill()
+    _wait(pipe)
+    assert agg_store.get_event(UID)["geo_status"] == "done"

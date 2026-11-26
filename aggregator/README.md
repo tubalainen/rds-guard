@@ -330,7 +330,8 @@ other characters into `-`.
 | `GET /api/v1/events/{event_uid}` | One event |
 | `GET /api/v1/audio/{event_uid}.ogg` | Audio |
 | `GET /api/v1/stations` | Stations seen, with the nodes that reported them |
-| `GET /api/v1/incidents` | Incidents for the map, with the nodes that heard them. Param: `hours` (default 12) |
+| `GET /api/v1/incidents` | Incidents for the map, with the nodes that heard them. Params: `hours` (default 12), `history=1` (all stored, plus how far placing the older messages has come) |
+| `POST /api/v1/incidents/backfill` | Place the messages stored before the map existed (once, in the background; JSON body `{}`). Messages from nodes without `NODE_LOCATION` wait until the node reports one |
 | `GET /api/v1/trafikverket` | Trafikverket's deviations near the nodes, with their versions. Param: `hours` (default 12) |
 | `GET /api/v1/nodes` | Nodes with status (needs Admin login, as do all `/api/v1/nodes*`) |
 | `GET /api/v1/status` | Aggregator status |
