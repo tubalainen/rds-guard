@@ -86,6 +86,9 @@ def main(argv=None):
         if args.serial:
             index = dongles.index_of(args.serial, found_dongles)
             print(f"  serial {args.serial} is index {index}")
+        elif index is None and len(found_dongles) > 1:
+            print("Several dongles: say which with --serial <serial number>")
+            return 1
     except ImportError:
         print("(dongles.py is not next to this file: dongles not listed)")
     except Exception as e:                       # noqa: BLE001 - report and go on
