@@ -419,3 +419,36 @@ def test_a_calibration_keeps_the_stages_set_by_hand():
                  quality_fn=lambda pcm, s: (5.0, 0), progress=lambda m: None, radio=radio)
     assert cmds and all(_arg(c, "-l") == "4" and "-g" not in c for c in cmds)
     assert {_arg(c, "-v") for c in cmds} >= {"4", "13"}         # VGA still swept
+
+
+def test_steps_that_give_the_same_stages_are_swept_once():
+    r = _airspy_receiver(lna=4, mixer=3)
+    radio = sdr.Airspy(r.serial, [2_500_000], "Airspy R2", r.stages)
+    swept = []
+
+    def capture(i, c, g, p, s):
+        if s == gt.SWEEP_SEC:
+            swept.append(g)
+        return to_s16(fm_station(int(radio.fs * 0.3), 250_000, radio.fs), 0.3)
+    gt.calibrate(r, None, radio.gains, capture_fn=capture,
+                 quality_fn=lambda pcm, s: (5.0, 0), progress=lambda m: None, radio=radio)
+    # Only VGA moves: 4..13, each once, at its lowest step
+    assert [radio.stage_values(g)[2] for g in swept] == list(range(4, 14))
+    assert len(set(radio.stage_values(g) for g in swept)) == len(swept)
+
+
+def test_changed_stages_calibrate_again(monkeypatch):
+    import event_store
+    store = {}
+    monkeypatch.setattr(event_store, "get_calibration", lambda serial: store.get(serial))
+    r = _airspy_receiver(lna=4)
+    tuner = gt.Tuner(sat=None)
+    store[r.serial] = {"frequencies": ["102.8M"], "gain": 9.0, "ppm": None,
+                       "calibrated_at": "2026-11-27T20:00:00",
+                       "result": {"stations": {}, "stages": {"lna": 4}}}
+    assert tuner._stored(r) is not None
+    assert tuner._stored(_airspy_receiver(lna=8)) is None          # pin changed
+    assert tuner._stored(_airspy_receiver()) is None               # pin removed
+    # A calibration saved before stages existed counts as none by hand
+    store[r.serial]["result"] = {"stations": {}}
+    assert tuner._stored(_airspy_receiver()) is not None

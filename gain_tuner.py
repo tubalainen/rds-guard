@@ -244,6 +244,12 @@ def calibrate(receiver, index, gains, capture_fn=None, quality_fn=redsea_quality
     # gain, and it costs nothing extra.
     sweep_ppm = 0 if want_ppm else (ppm or 0)
     gains = [g for g in gains if g > 0 or not radio.zero_is_auto] or [start_gain]
+    if radio.stages:
+        # With LNA/Mixer/VGA partly by hand, several linearity steps give the
+        # same three values: each is measured once (the lowest step)
+        seen = set()
+        gains = [g for g in sorted(gains)
+                 if not (radio.stage_values(g) in seen or seen.add(radio.stage_values(g)))]
     steps = []
     estimates = []
     for i, g in enumerate(gains, 1):
@@ -341,8 +347,9 @@ class Tuner:
     def _stored(self, r):
         import event_store
         cal = event_store.get_calibration(r.serial)
-        if cal and sorted(cal["frequencies"]) == sorted(r.frequencies):
-            return cal
+        if cal and sorted(cal["frequencies"]) == sorted(r.frequencies) and \
+                ((cal.get("result") or {}).get("stages") or {}) == _stages(r):
+            return cal                 # (an Airspy's stages by hand: the same ones)
         return None
 
     def settings(self, r, radio=None):
@@ -483,6 +490,7 @@ class Tuner:
                 res["gain"] if not _gain_fixed(r) else None,
                 res["ppm"] if r.ppm == "auto" else None,
                 {"stations": res.get("stations") or {}, "steps": res.get("steps") or [],
+                 "stages": _stages(r),
                  "dead": res.get("dead") or []},
                 why, at=self._now())
             log.info("[%s] calibrated: gain %s, ppm %s", r.id, res.get("gain"), res.get("ppm"))
@@ -506,6 +514,10 @@ class Tuner:
         fixed_ppm = r.ppm if r.ppm != "auto" else None
         return calibrate(r, radio.index, gains, want_gain=want_gain, want_ppm=want_ppm,
                          gain=fixed_gain, ppm=fixed_ppm, radio=radio)
+
+
+def _stages(r):
+    return dict(getattr(r, "stages", None) or {})
 
 
 def _gain_fixed(r):
@@ -558,7 +570,8 @@ def main(argv=None):
         import event_store
         event_store.init_db(config.DB_PATH)
         event_store.save_calibration(r.serial, r.frequencies, res["gain"], res["ppm"],
-                                     {"stations": res["stations"], "steps": res["steps"]},
+                                     {"stations": res["stations"], "steps": res["steps"],
+                                      "stages": _stages(r)},
                                      "by hand")
         print("Saved: the satellite uses it from its next start.", file=sys.stderr)
 
