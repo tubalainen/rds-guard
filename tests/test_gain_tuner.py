@@ -329,3 +329,23 @@ def test_a_failed_calibration_waits_hours(setup):
     assert tuner.describe(p)["calibration"].startswith("misslyckades: rtl_sdr")
     clock[0] += gt.RETRY_AFTER_FAIL_SEC + 1
     assert tuner.due(p) == "first start"
+
+
+def test_ppm_comes_from_the_stations_that_are_heard():
+    """A frequency with no station on it (only noise) must not pull the ppm:
+    on docker01 one gave 18.5 next to the real -1.7, and the median of two
+    took it."""
+    r = receivers.parse({"receivers": [{"serial": "1", "frequencies": ["103.5M", "102.8M"]}]})[0]
+    true_ppm = -2
+
+    def capture(index, center, gain, ppm, seconds):
+        n = int(min(seconds, 0.3) * FS)
+        hz = 103_500_000                      # only 103.5M is on the air
+        z = 0.5 * fm_station(n, hz - center - (true_ppm - ppm) * hz / 1e6)
+        return to_u8(z, 0.4, noise=0.05)
+
+    lines = []
+    res = gt.calibrate(r, 0, [8.7, 19.7], capture_fn=capture,
+                       quality_fn=lambda pcm, s: (11.0, 0), progress=lines.append)
+    assert res["ppm"] == pytest.approx(true_ppm, abs=1)
+    assert any("102.8M: pilot" in line and "too weak" in line for line in lines)
