@@ -448,3 +448,14 @@ def test_every_station_with_rds_gets_its_own_best_step_checked():
     best, left_out = gt.pick_steps(steps, ["A", "B"])
     assert left_out == [] and {0, 9} <= {s["gain"] for s in best}
     assert len(best) == gt.VERIFY_STEPS
+
+
+def test_the_node_card_gets_the_radio_s_own_gain_text_and_no_ppm_for_an_airspy(setup):
+    """docker01's node card showed an Airspy with LNA/Mixer/VGA by hand as
+    "gain 8 dB (fast) · 0 ppm": a linearity step read as dB, and a ppm it
+    does not have."""
+    tuner, p, st, clock, runs = setup
+    p.gain_text, p.has_ppm = "LNA 4, Mixer 4, VGA 5 (by hand)", False
+    d = tuner.describe(p)
+    assert d["gain_text"] == "LNA 4, Mixer 4, VGA 5 (by hand)"
+    assert d["ppm"] is None and d["ppm_mode"] is None

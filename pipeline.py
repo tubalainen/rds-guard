@@ -175,6 +175,8 @@ class ReceiverPipeline:
         self.ppm = None
         self.model = None
         self.check = None                      # (level, message) of the dongle check
+        self.gain_text = None                  # the gain as the radio describes it
+        self.has_ppm = True
 
     def _on_check(self, radio, iq, nbytes, elapsed):
         """The dongle check's verdict on this run's first seconds."""
@@ -244,6 +246,9 @@ class ReceiverPipeline:
             self.gain, self.ppm = self._settings(radio)
             if not radio.has_ppm:
                 self.ppm = 0
+            # How the node card shows it: "28 dB", or an Airspy's stages
+            self.gain_text = radio.describe_gain(self.gain)
+            self.has_ppm = radio.has_ppm
             cmd = radio.stream_cmd(self.receiver.center_hz, self.gain, self.ppm)
             radio.prepare()
             log.info("[%s] starting (%s, %g MS/s, gain %s): %s on %s", rid, radio.model,

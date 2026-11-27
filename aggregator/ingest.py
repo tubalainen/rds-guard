@@ -216,6 +216,7 @@ def _clean_receivers(receivers):
             "error": _cap(r.get("error"), 256),
             "gain": _num(r.get("gain")),
             "gain_mode": _cap(r.get("gain_mode"), 16),
+            "gain_text": _cap(r.get("gain_text"), 64),
             "ppm": _num(r.get("ppm")),
             "ppm_mode": _cap(r.get("ppm_mode"), 16),
             "calibrated_at": _cap(r.get("calibrated_at"), 32),
