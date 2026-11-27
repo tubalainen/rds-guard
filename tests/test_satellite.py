@@ -278,3 +278,30 @@ def test_heartbeat_status_lists_receivers_and_stations(store):
     assert rec["stations"][0]["ps"] == "P4 Värml" and rec["stations"][0]["tp"] is True
     assert snap["stations"][0]["pi"] == "0xE824"
     json.dumps(snap)
+
+
+def test_health_needs_rds_from_some_station(tmp_path):
+    """A receiver that runs but hears nothing (antenna, filter, driver) is
+    unhealthy after five minutes; before that, and while calibrating, not."""
+    path = str(tmp_path / "health.json")
+    silent = {"state": "running", "stations": [
+        {"frequency": "103.5M", "groups_per_sec": 0, "last_group_age_sec": None}]}
+    satellite_health.write(path, {"uptime_sec": 60, "receivers": [silent]})
+    assert satellite_health.check(path)[0]                 # still starting
+    satellite_health.write(path, {"uptime_sec": 900, "receivers": [silent]})
+    ok, msg = satellite_health.check(path)
+    assert not ok and "no RDS" in msg
+    heard = dict(silent, stations=[dict(silent["stations"][0], last_group_age_sec=2)])
+    satellite_health.write(path, {"uptime_sec": 900, "receivers": [silent, heard]})
+    assert satellite_health.check(path)[0]                 # one station is enough
+    satellite_health.write(path, {"uptime_sec": 900, "receivers": [
+        silent, {"state": "paused", "stations": []}]})
+    assert satellite_health.check(path)[0]                 # calibrating
+
+
+def test_station_reports_how_long_since_its_last_group():
+    import rds_guard
+    st = rds_guard.Station("r", "103.5M")
+    assert st.snapshot()["last_group_age_sec"] is None
+    st.stats.inc()
+    assert st.snapshot()["last_group_age_sec"] == 0

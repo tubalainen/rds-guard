@@ -11,6 +11,7 @@ import sys
 import time
 
 MAX_AGE_SEC = 60
+NO_RDS_SEC = 300               # running, yet no station decoded for this long
 
 
 def write(path, snapshot):
@@ -42,6 +43,17 @@ def check(path, now=None):
         return False, why
     stations = [s for r in running for s in r.get("stations") or []]
     rate = sum(s.get("groups_per_sec") or 0 for s in stations)
+    # A receiver that runs but hears nothing (antenna, filter, driver) is
+    # not healthy either: some station must have decoded lately. Grace for
+    # the first minutes, and for a receiver paused to calibrate.
+    if (float(snap.get("uptime_sec") or 0) > NO_RDS_SEC
+            and not any(r.get("state") == "paused" for r in running)):
+        def fresh(s):
+            age = s.get("last_group_age_sec")
+            return age is not None and age <= NO_RDS_SEC
+        if stations and not any(fresh(s) for s in stations):
+            return False, (f"no RDS from any station for over {NO_RDS_SEC // 60} minutes "
+                           "(antenna, FM filter or driver?)")
     return True, (f"{len(running)}/{len(recs)} receivers running, "
                   f"{len(stations)} stations, {rate:.1f} grp/s")
 

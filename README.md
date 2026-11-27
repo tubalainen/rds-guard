@@ -228,6 +228,8 @@ connected:
 docker compose exec rds-guard python3 -m dongles
 ```
 
+- Every RTL2832U dongle works, the RTL-SDR Blog V4 included: the image uses
+  the RTL-SDR Blog driver (from v1.0.3).
 - Many dongles come with the same serial number (`00000001`). Two of them
   cannot be told apart, and the satellite stops with a message that shows
   how to give one a new number with `rtl_eeprom -d <index> -s <new>` (run
@@ -887,6 +889,8 @@ text once, when it reaches `master`.
 | `docker compose ps` shows `unhealthy` | No dongle is receiving | `docker compose exec rds-guard python3 -m satellite_health` says why; the log has the details |
 | Low decode rate (< 5 grp/s) | Weak signal, wrong frequency or gain | **Admin → Noder → Kalibrera om**; check the antenna and that the frequency matches a nearby P4 transmitter |
 | Calibration says `no station decoded at any gain` | No antenna or no station on the frequency | Check the antenna and `frequencies` |
+| Calibration says `no FM station heard on this dongle` | No FM on that dongle at any gain: an antenna for another band, an FM band-stop filter (common on airband and ADS-B antennas), or a loose cable | Try an FM antenna or another dongle. The node card shows *ingen FM-signal hörs*, and the satellite tries again in 3 hours |
+| `unhealthy`: `no RDS from any station for over 5 minutes` | The dongle runs but nothing decodes | As above; `python3 -m satellite_health` says the same |
 | Calibration says `<freq>: no RDS at any gain` | That station is too weak on this antenna | The others still get their best gain; remove it, or give it its own dongle and antenna |
 | Log: `Uplink pending: waiting for approval (code …)` | The aggregator has not approved the satellite | Approve it under **Admin → Noder**, or give both the same `JOIN_KEY` |
 | Log: `Uplink rejected` | Rejected in Admin, or `JOIN_KEY` differs | Check that both have the same `JOIN_KEY` |

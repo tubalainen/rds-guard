@@ -1,5 +1,5 @@
 # ================================================================
-#  Stage 1: Build rtl-sdr tools and redsea from source
+#  Stage 1: Build the RTL-SDR driver and redsea from source
 # ================================================================
 FROM debian:bookworm-slim AS builder
 
@@ -11,12 +11,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         meson \
         ninja-build \
         pkg-config \
-        librtlsdr-dev \
         libusb-1.0-0-dev \
         libliquid-dev \
         libsndfile1-dev \
         nlohmann-json3-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# The RTL-SDR Blog driver instead of Debian's rtl-sdr: it supports the
+# RTL-SDR Blog V4 (R828D tuner), which Debian's tunes wrongly, and every
+# older dongle as before. Installed in /usr/local of this stage only.
+RUN git clone --depth 1 --branch v1.3.6 https://github.com/rtlsdrblog/rtl-sdr-blog.git /tmp/rtl-sdr \
+    && cmake -S /tmp/rtl-sdr -B /tmp/rtl-sdr/build -DCMAKE_BUILD_TYPE=Release \
+         -DDETACH_KERNEL_DRIVER=ON -DINSTALL_UDEV_RULES=OFF -DCMAKE_INSTALL_PREFIX=/opt/rtl-sdr \
+    && cmake --build /tmp/rtl-sdr/build -j"$(nproc)" \
+    && cmake --install /tmp/rtl-sdr/build
 
 # Build redsea from source
 RUN git clone --depth 1 https://github.com/windytan/redsea.git /tmp/redsea \
@@ -35,8 +43,6 @@ FROM debian:bookworm-slim
 # than the base image snapshot.
 RUN apt-get update && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
-        rtl-sdr \
-        librtlsdr0 \
         libusb-1.0-0 \
         libliquid1 \
         libsndfile1 \
@@ -45,8 +51,12 @@ RUN apt-get update && apt-get upgrade -y \
         ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy redsea binary from builder
+# Copy redsea and the RTL-SDR driver and tools from the builder
 COPY --from=builder /usr/local/bin/redsea /usr/local/bin/redsea
+COPY --from=builder /opt/rtl-sdr/lib/librtlsdr.so* /usr/local/lib/
+COPY --from=builder /opt/rtl-sdr/bin/rtl_sdr /opt/rtl-sdr/bin/rtl_test \
+     /opt/rtl-sdr/bin/rtl_eeprom /opt/rtl-sdr/bin/rtl_biast /usr/local/bin/
+RUN ldconfig && rtl_test -h 2>&1 | head -1
 
 # Python packages: requests, numpy, PyYAML
 COPY requirements.txt /app/requirements.txt

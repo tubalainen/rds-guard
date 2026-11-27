@@ -349,3 +349,36 @@ def test_ppm_comes_from_the_stations_that_are_heard():
                        quality_fn=lambda pcm, s: (11.0, 0), progress=lines.append)
     assert res["ppm"] == pytest.approx(true_ppm, abs=1)
     assert any("102.8M: pilot" in line and "too weak" in line for line in lines)
+
+
+def test_a_dongle_that_hears_nothing_is_said_so_and_not_checked():
+    r = receivers.parse({"receivers": [{"serial": "1", "frequencies": ["103.5M"]}]})[0]
+    calls = []
+
+    def capture(index, center, gain, ppm, seconds):        # noise only
+        calls.append(seconds)
+        return to_u8(np.zeros(int(min(seconds, 0.3) * FS), complex), 0.0, noise=0.05)
+
+    lines = []
+    res = gt.calibrate(r, 0, [8.7, 19.7, 49.6], capture_fn=capture,
+                       quality_fn=lambda pcm, s: (0.0, None), progress=lines.append)
+    assert res["silent"] and any("no FM station heard" in line for line in lines)
+    assert gt.VERIFY_SEC not in calls                       # no decoding run in vain
+
+
+def test_a_silent_dongle_keeps_its_settings_and_tries_later(setup, store):
+    tuner, p, st, clock, runs = setup
+    tuner._calibrate = lambda r, **kw: {"silent": True, "gain": 49.6, "ppm": 0,
+                                        "stations": {}, "dead": ["103.5M"], "steps": []}
+    tuner.calibrate_pipeline(p, "first start")
+    assert tuner.settings(p.receiver) == (gt.START_GAIN, 0)    # nothing saved
+    assert "ingen FM-signal" in tuner.describe(p)["calibration"]
+    assert p.resumed == 1
+
+
+def test_stations_without_rds_show_on_the_node_card(setup, store):
+    tuner, p, st, clock, runs = setup
+    tuner._calibrate = lambda r, **kw: {"gain": 3.7, "ppm": -2, "stations": {"103.5M": 11.0},
+                                        "dead": ["102.8M"], "steps": []}
+    tuner.calibrate_pipeline(p, "first start")
+    assert tuner.describe(p)["calibration"] == "ingen RDS: 102.8M"
