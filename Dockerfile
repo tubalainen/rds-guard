@@ -96,6 +96,7 @@ COPY trafikverket.py /app/trafikverket.py
 COPY geodata/ /app/geodata/
 COPY tools/measure_geolocation.py /app/tools/measure_geolocation.py
 COPY tools/eval_geolocation.py /app/tools/eval_geolocation.py
+COPY tools/retranscribe.py /app/tools/retranscribe.py
 COPY tools/geo_corpus.json /app/tools/geo_corpus.json
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
