@@ -246,7 +246,18 @@ def calibrate(receiver, index, gains, capture_fn=capture, quality_fn=redsea_qual
     # heard at all (a clear pilot at some step): a station too far away to
     # hear would make every step equally bad
     heard = [f for f, _ in freqs
-             if max(s["snr"][f][0] for s in steps) >= HEARD_PILOT_DB] or [f for f, _ in freqs]
+             if max(s["snr"][f][0] for s in steps) >= HEARD_PILOT_DB]
+    if not heard:
+        # Nothing on the air for this dongle: decoding would find nothing
+        # either. Say so plainly instead of guessing a gain.
+        unclipped = [s["gain"] for s in steps if s["clip"] <= CLIP_LIMIT]
+        chosen = max(unclipped) if unclipped else min(gains)
+        progress(f"[{rid}] no FM station heard on this dongle at any gain (pilot below "
+                 f"{HEARD_PILOT_DB} dB on every frequency): antenna, FM filter or driver? "
+                 f"Using {chosen:g} dB")
+        return {"gain": chosen, "ppm": ppm, "stations": {}, "dead": list(dict(freqs)),
+                "silent": True,
+                "steps": [{"gain": s["gain"], "clip": s["clip"]} for s in steps]}
     for s in steps:
         s["worst_rds"] = min(s["snr"][f][1] for f in heard)
     clean = [s for s in steps if s["clip"] <= CLIP_LIMIT] or steps
@@ -433,11 +444,18 @@ class Tuner:
             if not p.pause("calibrating"):
                 log.warning("[%s] the dongle did not come free; calibrating anyway", r.id)
             res = self._calibrate(r, want_gain=r.gain == "auto", want_ppm=r.ppm == "auto")
+            if res.get("silent"):
+                # Nothing heard: keep what it had, say why, and try again later
+                log.warning("[%s] nothing heard on this dongle: keeping the earlier settings "
+                            "and calibrating again in %d hours", r.id, RETRY_AFTER_FAIL_SEC // 3600)
+                self._failed[r.id] = (self._now(), "ingen FM-signal hörs (antenn, filter, drivrutin?)")
+                return
             event_store.save_calibration(
                 r.serial, r.frequencies,
                 res["gain"] if r.gain == "auto" else None,
                 res["ppm"] if r.ppm == "auto" else None,
-                {"stations": res.get("stations") or {}, "steps": res.get("steps") or []},
+                {"stations": res.get("stations") or {}, "steps": res.get("steps") or [],
+                 "dead": res.get("dead") or []},
                 why, at=self._now())
             log.info("[%s] calibrated: gain %s, ppm %s", r.id, res.get("gain"), res.get("ppm"))
             self._failed.pop(r.id, None)

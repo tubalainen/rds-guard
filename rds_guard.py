@@ -68,12 +68,14 @@ class Stats:
     def __init__(self):
         self.start_time = time.time()
         self.groups_total = 0
+        self.last_at = None        # time of the latest group
         self.lock = threading.Lock()
         self._window = []          # (time, total) for the recent rate
 
     def inc(self):
         with self.lock:
             self.groups_total += 1
+            self.last_at = time.time()
 
     def snapshot(self):
         with self.lock:
@@ -85,7 +87,9 @@ class Stats:
             recent = ((self.groups_total - n0) / (now - t0)) if now - t0 >= 5 else (
                 self.groups_total / elapsed if elapsed > 0 else 0.0)
             return {"uptime_sec": int(elapsed), "groups_total": self.groups_total,
-                    "groups_per_sec": round(recent, 1)}
+                    "groups_per_sec": round(recent, 1),
+                    "last_group_age_sec": (int(now - self.last_at)
+                                           if self.last_at is not None else None)}
 
 
 _INFO_KEYS = ("ps", "long_ps", "prog_type", "tp", "ta", "country", "radiotext")
@@ -139,7 +143,8 @@ class Station:
         return {"frequency": self.frequency, "pi": info.get("pi"),
                 **{k: info.get(k) for k in _INFO_KEYS},
                 "groups_per_sec": snap["groups_per_sec"],
-                "groups_total": snap["groups_total"]}
+                "groups_total": snap["groups_total"],
+                "last_group_age_sec": snap.get("last_group_age_sec")}
 
     def on_line(self, raw_line):
         """One line of redsea JSON (the station's reader thread)."""
