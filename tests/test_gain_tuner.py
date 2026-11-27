@@ -415,3 +415,36 @@ def test_stations_without_rds_show_on_the_node_card(setup, store):
                                         "dead": ["102.8M"], "steps": []}
     tuner.calibrate_pipeline(p, "first start")
     assert tuner.describe(p)["calibration"] == "ingen RDS: 102.8M"
+
+
+def test_a_station_with_a_pilot_but_no_rds_does_not_steer_the_choice():
+    """docker01, v1.0.10: 100.3M had a clear pilot (27 dB) but no RDS at any
+    gain, so the worst RDS SNR was about 0 at every step and the steps to
+    check were picked almost at random; linearity 6, the one step where
+    102.8M decoded, got in by luck. Now that station is left out of the
+    ranking, and every station's own best step is always checked."""
+    def step(g, r1035, r1028, r1003):
+        return {"gain": g, "clip": 0.0,
+                "snr": {"103.5M": (50, r1035), "102.8M": (36, r1028), "100.3M": (27, r1003)}}
+    # 100.3M's RDS SNR is noise around 0, a little higher at the low steps
+    steps = [step(0, 10, 0.2, 0.9), step(1, 11, 0.3, 0.8), step(2, 12, 0.1, 0.7),
+             step(3, 12, 0.4, 0.6), step(4, 13, 0.2, 0.3), step(5, 13, 1.0, 0.2),
+             step(6, 14, 9.0, 0.1), step(7, 14, 0.5, 0.0)]
+    best, left_out = gt.pick_steps(steps, ["103.5M", "102.8M", "100.3M"])
+    gains = sorted(s["gain"] for s in best)
+    assert left_out == ["100.3M"]
+    assert 6 in gains                         # 102.8M's only good step
+    # The old ranking (worst over all heard) would have checked 0-3 only
+    old = sorted(sorted(steps, key=lambda s: (-min(v[1] for v in s["snr"].values()),
+                                              s["gain"]))[:gt.VERIFY_STEPS],
+                 key=lambda s: s["gain"])
+    assert 6 not in [s["gain"] for s in old]
+
+
+def test_every_station_with_rds_gets_its_own_best_step_checked():
+    def step(g, a, b):
+        return {"gain": g, "clip": 0.0, "snr": {"A": (40, a), "B": (40, b)}}
+    steps = [step(g, 20 - g, 2 + (8 if g == 9 else 0)) for g in range(10)]
+    best, left_out = gt.pick_steps(steps, ["A", "B"])
+    assert left_out == [] and {0, 9} <= {s["gain"] for s in best}
+    assert len(best) == gt.VERIFY_STEPS
