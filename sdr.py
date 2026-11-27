@@ -229,7 +229,8 @@ def open(serial, stages=None, rate=None):   # noqa: A001 - sdr.open(serial) read
 
 def for_receiver(r):
     """The radio for a receivers.Receiver, with its settings."""
-    return open(r.serial, getattr(r, "stages", None), getattr(r, "sample_rate", None))
+    rate = getattr(r, "sample_rate", None)
+    return open(r.serial, getattr(r, "stages", None), **({"rate": rate} if rate else {}))
 
 
 def capture(radio, center_hz, gain, ppm, seconds, run=subprocess.run, retries=1):
@@ -250,9 +251,21 @@ def capture(radio, center_hz, gain, ppm, seconds, run=subprocess.run, retries=1)
                        f"{proc.stderr.decode('utf-8', 'replace')[-200:]}")
 
 
-def capture_measure(radio, center_hz, gain, ppm, seconds, offsets, popen=subprocess.Popen):
+def capture_measure(radio, center_hz, gain, ppm, seconds, offsets, popen=subprocess.Popen,
+                    retries=1):
     """A capture decoded while it comes in, for high rates: (clip fraction,
-    level dBFS, [MPX per offset]). Only the MPX at 171 kHz is kept."""
+    level dBFS, [MPX per offset]). Only the MPX at 171 kHz is kept. Tried
+    once more after a second, as capture()."""
+    for attempt in range(retries + 1):
+        try:
+            return _capture_measure(radio, center_hz, gain, ppm, seconds, offsets, popen)
+        except RuntimeError:
+            if attempt == retries:
+                raise
+            time.sleep(1)
+
+
+def _capture_measure(radio, center_hz, gain, ppm, seconds, offsets, popen):
     from channelizer import make_stations
     bps = radio.bytes_per_sample
     settle = int(0.25 * radio.fs)

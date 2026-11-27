@@ -176,7 +176,13 @@ def _num(val):
     return val
 
 
-def _clean_stations(stations, limit=8):
+# Stations per receiver: 4 on a dongle, 8 on an Airspy at a wide sample
+# rate; per node, up to 8 receivers' worth
+STATIONS_PER_RECEIVER = 8
+STATIONS_PER_NODE = 32
+
+
+def _clean_stations(stations, limit=STATIONS_PER_NODE):
     out = []
     for st in (stations if isinstance(stations, list) else [])[:limit]:
         if not isinstance(st, dict):
@@ -196,7 +202,7 @@ def _clean_stations(stations, limit=8):
 
 
 def _clean_receivers(receivers):
-    """The satellite's receivers (one per RTL-SDR, protocol 2, v1.0)."""
+    """The satellite's receivers (one per RTL-SDR or Airspy, protocol 2)."""
     out = []
     for r in (receivers if isinstance(receivers, list) else [])[:8]:
         if not isinstance(r, dict):
@@ -215,7 +221,7 @@ def _clean_receivers(receivers):
             "calibrated_at": _cap(r.get("calibrated_at"), 32),
             "calibration": _cap(r.get("calibration"), 64),
             "quality": {_cap(k, 16): _num(v) for k, v in list(quality.items())[:8]},
-            "stations": _clean_stations(r.get("stations"), 4),
+            "stations": _clean_stations(r.get("stations"), STATIONS_PER_RECEIVER),
         })
     return out
 
@@ -524,7 +530,8 @@ async def handle_join(request):
             "stations": [
                 {"frequency": _cap(st.get("frequency"), 16), "pi": _cap(st.get("pi"), 16),
                  "ps": _cap(st.get("ps"), 64)}
-                for st in (body.get("stations") or [])[:8] if isinstance(st, dict)],
+                for st in (body.get("stations") or [])[:STATIONS_PER_NODE]
+                if isinstance(st, dict)],
         }
         join_key = body.get("join_key")
         if join_key is not None and not isinstance(join_key, str):

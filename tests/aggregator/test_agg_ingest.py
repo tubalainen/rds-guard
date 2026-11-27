@@ -243,7 +243,7 @@ async def test_heartbeat_is_cleaned_and_stored(client, node, agg_store, hooks):
             "pipeline": {"state": "running", "error": None, "evil": "x"},
             "stations": [{"pi": "0x9E04", "ps": "P4", "tp": True,
                           "ta": "yes", "groups_per_sec": 11.2,
-                          "extra": "dropped"}] * 20,
+                          "extra": "dropped"}] * 40,
             "queue_depth": 3, "unknown": "ignored"}
     r = await client.post("/api/v1/ingest/heartbeat", json=body,
                           headers=node["headers"])
@@ -253,7 +253,7 @@ async def test_heartbeat_is_cleaned_and_stored(client, node, agg_store, hooks):
     assert len(n["reported_name"]) == 64
     assert n["version"] == "1.0"
     st = n["status"]
-    assert len(st["stations"]) == 8
+    assert len(st["stations"]) == 32              # 8 receivers' worth
     assert st["stations"][0]["ta"] is None        # not a bool → dropped
     assert "extra" not in st["stations"][0]
     assert "evil" not in st["pipeline"]
@@ -284,3 +284,9 @@ async def test_heartbeat_carries_the_node_location(client, node, agg_store):
     assert st["location"].startswith("Karlstad, Värmlands län")
     assert len(st["location"]) == 80
     assert st["local_processing"] is None          # not a bool → dropped
+
+
+def test_a_receiver_keeps_eight_stations():
+    rec = {"id": "air", "stations": [{"frequency": f"{88 + i}M"} for i in range(10)]}
+    [r] = ingest._clean_receivers([rec])
+    assert [s["frequency"] for s in r["stations"]] == [f"{88 + i}M" for i in range(8)]

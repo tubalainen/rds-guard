@@ -87,7 +87,7 @@ Body (JSON, at most 64 KiB):
 | `node_name` | string or null | ≤ 64 chars, a suggestion for the node's name |
 | `version` | string or null | ≤ 64 chars |
 | `suggested_location` | string or null | ≤ 80 chars, "Ort, Län" |
-| `stations` | array | ≤ 8 items: `frequency`, `pi`, `ps` (shown to the owner) |
+| `stations` | array | ≤ 32 items: `frequency`, `pi`, `ps` (shown to the owner) |
 | `join_key` | string | Optional: approves at once when it equals the aggregator's `JOIN_KEY` |
 
 Responses:
@@ -191,7 +191,7 @@ Body (JSON, at most 64 KiB):
 | `uptime_sec` | integer or null | |
 | `receivers` | array | ≤ 8 items, one per dongle (see below) |
 | `pipeline` | object | `{"state": string, "error": string or null}`, each ≤ 256 chars: the worst of the receivers |
-| `stations` | array | ≤ 8 items: `frequency`, `pi`, `ps`, `long_ps`, `prog_type`, `tp`, `ta`, `groups_per_sec`, `groups_total`, all receivers together |
+| `stations` | array | ≤ 32 items: `frequency`, `pi`, `ps`, `long_ps`, `prog_type`, `tp`, `ta`, `groups_per_sec`, `groups_total`, all receivers together |
 | `queue_depth` | integer or null | Items waiting in the satellite's outbox |
 | `suggested_location` | string or null | ≤ 80 chars, the satellite's `NODE_LOCATION` as "Ort, Län" (e.g. `Karlstad, Värmlands län`). The aggregator places the node's messages there unless its owner set another place in Admin. Optional (`location` is read too) |
 
@@ -209,7 +209,7 @@ Each item of `receivers`:
 | `calibrated_at` | timestamp or null | Last calibration |
 | `calibration` | string or null | ≤ 64 chars: what the calibration is doing, or why it failed |
 | `quality` | object | ≤ 8 entries, frequency → RDS groups per second at calibration |
-| `stations` | array | ≤ 4 items, as `stations` above |
+| `stations` | array | ≤ 8 items (4 on a dongle, 8 on an Airspy at a wide `sample_rate:`), as `stations` above |
 
 `pipeline` and `stations` repeat what `receivers` holds, for node cards that
 read the flat shape. Unknown fields are ignored and the optional ones may be

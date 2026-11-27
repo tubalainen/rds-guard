@@ -357,9 +357,13 @@ class Tuner:
     def _stored(self, r):
         import event_store
         cal = event_store.get_calibration(r.serial)
+        result = (cal or {}).get("result") or {}
         if cal and sorted(cal["frequencies"]) == sorted(r.frequencies) and \
-                ((cal.get("result") or {}).get("stages") or {}) == _stages(r):
-            return cal                 # (an Airspy's stages by hand: the same ones)
+                (result.get("stages") or {}) == _stages(r) and \
+                result.get("sample_rate") == getattr(r, "sample_rate", None):
+            # (an Airspy's stages by hand and sample rate: the same ones; at
+            # 10 MS/s the ADC sees far more of the band than at 2.5)
+            return cal
         return None
 
     def settings(self, r, radio=None):
@@ -500,7 +504,7 @@ class Tuner:
                 res["gain"] if not _gain_fixed(r) else None,
                 res["ppm"] if r.ppm == "auto" else None,
                 {"stations": res.get("stations") or {}, "steps": res.get("steps") or [],
-                 "stages": _stages(r),
+                 "stages": _stages(r), "sample_rate": getattr(r, "sample_rate", None),
                  "dead": res.get("dead") or []},
                 why, at=self._now())
             log.info("[%s] calibrated: gain %s, ppm %s", r.id, res.get("gain"), res.get("ppm"))
@@ -581,7 +585,8 @@ def main(argv=None):
         event_store.init_db(config.DB_PATH)
         event_store.save_calibration(r.serial, r.frequencies, res["gain"], res["ppm"],
                                      {"stations": res["stations"], "steps": res["steps"],
-                                      "stages": _stages(r)},
+                                      "stages": _stages(r),
+                                      "sample_rate": getattr(r, "sample_rate", None)},
                                      "by hand")
         print("Saved: the satellite uses it from its next start.", file=sys.stderr)
 

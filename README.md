@@ -280,9 +280,13 @@ receivers:
       frequencies: [99.5M, 102.8M, 106.9M]
   ```
 
-  At these rates one FFT is shared by all stations, so 10 MS/s with four
-  stations costs about half the CPU of an RTL-SDR at 2.4 MS/s; the USB link
-  carries 40 MB/s. The calibration decodes each capture as it comes in.
+  At these rates one FFT is shared by all stations: on a test machine the
+  satellite's own processing of 10 MS/s with four stations took about half
+  as long as an RTL-SDR's 2.4 MS/s, not counting `airspy_rx` itself and
+  the 40 MB/s it passes over USB and the pipe. If the host cannot keep up,
+  the log says so (`Streaming at … MSPS, not 10: samples are lost`). The
+  calibration decodes each capture as it comes in. Changing
+  `sample_rate:` calibrates the receiver again.
 - **LNA, Mixer and VGA by hand (optional).** Each linearity step is a
   fixed set of the three (with both AGCs off), e.g. step 8 is LNA 3,
   Mixer 0, VGA 10. To set them yourself, add any of `lna:` (0–14),

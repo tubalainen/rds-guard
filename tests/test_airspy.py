@@ -599,3 +599,63 @@ def test_the_calibration_streams_at_wide_rates(monkeypatch):
     res = gt.calibrate(r, None, radio.gains, quality_fn=lambda pcm, s: (5.0, 0),
                        progress=lambda m: None, radio=radio)
     assert len(calls) >= 22 and res["gain"] in radio.gains
+
+
+@pytest.mark.parametrize("fs", [10_000_000, 6_000_000])
+def test_a_strong_neighbour_300_khz_away_does_not_spoil_the_station(fs):
+    """The real FM band: the wanted station with one 35 dB stronger 300 kHz
+    away."""
+    n = int(fs * 0.5)
+    weak = fm_station(n, 500_000, fs, seed=1)
+    strong = fm_station(n, 800_000, fs, rds=False, seed=2) * 10 ** (35 / 20)
+    z = iq_from_s16(to_s16((weak + strong) / 10 ** (35 / 20) / 1.2, 0.8, noise=0.0005))
+    alone = iq_from_s16(to_s16(weak / 10 ** (35 / 20) / 1.2, 0.8, noise=0.0005))
+    p, r = gt.tone_snr_db(demod_all(z, 500_000, fs)[500:])
+    p0, r0 = gt.tone_snr_db(demod_all(alone, 500_000, fs)[500:])
+    assert p > 15 and r > 6
+    assert r > r0 - 3                                  # at most 3 dB lost to it
+
+
+def test_a_new_sample_rate_calibrates_again(monkeypatch):
+    import event_store
+    store = {}
+    monkeypatch.setattr(event_store, "get_calibration", lambda serial: store.get(serial))
+    tuner = gt.Tuner(sat=None)
+    r = _airspy_receiver()
+    store[r.serial] = {"frequencies": ["102.8M"], "gain": 9.0, "ppm": None,
+                       "calibrated_at": "2026-11-27T20:00:00", "result": {"stations": {}}}
+    assert tuner._stored(r) is not None                         # saved before rates
+    assert tuner._stored(_airspy_receiver(sample_rate="10M")) is None
+    store[r.serial]["result"]["sample_rate"] = 10_000_000
+    assert tuner._stored(_airspy_receiver(sample_rate="10M")) is not None
+    assert tuner._stored(r) is None
+
+
+def test_lost_samples_are_logged_as_a_warning(caplog):
+    import io
+    import logging
+    import pipeline
+    err = io.BytesIO(b"Streaming at 10.001 MSPS\nStreaming at  8.200 MSPS\n"
+                     b"Streaming at  8.100 MSPS\nairspy_open() failed\n")
+    with caplog.at_level(logging.DEBUG, logger="rds-guard"):
+        pipeline._stderr_reader(err, "airspy_rx air", 10_000_000)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "8.200" in warnings[0] and "samples are lost" in warnings[0]
+    assert any("airspy_open() failed" in r.getMessage() for r in caplog.records
+               if r.levelno == logging.INFO)
+
+
+def test_a_wide_capture_is_tried_once_more(monkeypatch):
+    import io
+    import types
+    monkeypatch.setattr(sdr.time, "sleep", lambda s: None)
+    radio = sdr.Airspy("0x1", [2_500_000, 10_000_000], "Airspy R2", rate=10_000_000)
+    good = to_s16(fm_station(int(radio.fs * 0.75), 300_000, radio.fs), 0.3)
+    answers = [b"", good]
+
+    def popen(cmd, **kw):
+        return types.SimpleNamespace(stdout=io.BytesIO(answers.pop(0)), kill=lambda: None,
+                                     wait=lambda: 0)
+    clip, level, [mpx] = sdr.capture_measure(radio, 103_000_000, 8, 0, 0.5, [300_000],
+                                             popen=popen)
+    assert len(mpx) > 0 and answers == []
