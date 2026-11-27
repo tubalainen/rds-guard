@@ -92,7 +92,9 @@ def public_node(node, pipeline=None):
         "pipeline": status.get("pipeline"),
         "stations": status.get("stations") or [],
         "queue_depth": status.get("queue_depth"),
-        "location": status.get("location"),
+        "location": store.node_location(node),
+        "location_set": node.get("location"),
+        "location_reported": status.get("location"),
         "located": _located(node, pipeline),
         "local_processing": status.get("local_processing"),
     }
@@ -528,10 +530,26 @@ async def handle_rotate_node(request):
 async def handle_update_node(request):
     node_id = _node_id(request)
     body = await _json_body(request)
-    if body is None or not isinstance(body.get("enabled"), bool):
-        return _error(422, "invalid", "expected {\"enabled\": true|false}")
-    if not node_id or not await _run(store.set_node_enabled, node_id, body["enabled"]):
+    enabled = body.get("enabled") if body else None
+    has_location = bool(body) and "location" in body
+    location = body.get("location") if has_location else None
+    if (body is None or (enabled is None and not has_location)
+            or (enabled is not None and not isinstance(enabled, bool))
+            or (location is not None and not isinstance(location, str))):
+        return _error(422, "invalid",
+                      "expected {\"enabled\": true|false} and/or "
+                      "{\"location\": \"Ort, Län\"|null}")
+    if location is not None:
+        location = " ".join(location.split())
+        if len(location) > 80:
+            return _error(422, "invalid", "location is at most 80 characters")
+    node = await _run(store.get_node, node_id) if node_id else None
+    if node is None:
         return _error(404, "not_found")
+    if enabled is not None:
+        await _run(store.set_node_enabled, node_id, enabled)
+    if has_location:
+        await _run(store.set_node_location, node_id, location)
     node = await _run(store.get_node, node_id)
     return web.json_response({"node": public_node(node, request.app[PIPELINE])})
 

@@ -154,6 +154,13 @@ def init_db(db_path):
         except sqlite3.OperationalError as e:
             if "duplicate column" not in str(e).lower():
                 raise
+    # Where a node is, set by the aggregator's owner in Admin (overrides the
+    # location the node reports in its heartbeat)
+    try:
+        conn.execute("ALTER TABLE nodes ADD COLUMN location TEXT")
+    except sqlite3.OperationalError as e:
+        if "duplicate column" not in str(e).lower():
+            raise
     geolocate.init_tables(conn)
     trafikverket.init_tables(conn)
     conn.commit()
@@ -254,6 +261,24 @@ def delete_node(node_id):
         return None
     log.info("Node #%d deleted", node_id)
     return [r["audio_path"] for r in rows]
+
+
+def set_node_location(node_id, location):
+    """Set (or with None/'' clear) the location the owner gave a node."""
+    with _lock:
+        conn = _conn()
+        cur = conn.execute("UPDATE nodes SET location = ? WHERE id = ?",
+                           (location or None, node_id))
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def node_location(node):
+    """Where a node is ("Ort, Län"): the location set in Admin, else the
+    one the node reports in its heartbeat, else None."""
+    if not node:
+        return None
+    return node.get("location") or (node.get("status") or {}).get("location") or None
 
 
 def get_node(node_id):

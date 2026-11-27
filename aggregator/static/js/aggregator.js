@@ -59,11 +59,23 @@ const Aggregator = (() => {
 
     // -------------------------------------------------------------- nodes
 
+    function uptime(sec) {
+        const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
+        return d ? `${d} d ${h} h` : (h ? `${h} h ${m} min` : `${m} min`);
+    }
+
     function nodeCard(n) {
         const state = !n.enabled ? ['', 'Inaktiverad'] : (n.online ? ['ok', 'Online'] : ['warn', 'Offline']);
         const stations = (n.stations || []).map((s) => [s.ps || s.pi || 'ingen station än',
-            RDSUI.fmtFreq(s.frequency), s.groups_per_sec != null ? `${s.groups_per_sec} grp/s` : '']
+            RDSUI.fmtFreq(s.frequency), s.pi && s.ps ? `PI ${s.pi}` : '',
+            s.groups_per_sec != null ? `${s.groups_per_sec} grp/s` : '',
+            s.ta ? 'TA pågår' : (s.tp ? 'TP' : '')]
             .filter(Boolean).join(' · '));
+        const located = n.located ? `${n.located.name} (${n.located.lat.toFixed(3)}, ${n.located.lon.toFixed(3)})` : '';
+        const place = n.location
+            ? (located ? `Plats: ${n.location} → ${located}` : `Plats: ${n.location} – hittades inte i ortregistret`)
+            : 'Ingen plats: nodens meddelanden placeras inte på kartan';
+        const placeFrom = n.location_set ? 'satt här' : (n.location_reported ? 'från noden' : '');
         const warn = [];
         if (n.queue_depth) warn.push(`${n.queue_depth} händelser i kö`);
         if (n.clock_offset_sec != null && Math.abs(n.clock_offset_sec) > 30) {
@@ -71,6 +83,8 @@ const Aggregator = (() => {
         }
         if (n.pipeline && n.pipeline.error) warn.push(n.pipeline.error);
         const meta = [`senast sedd ${ago(n.last_heartbeat_at || n.last_seen_at)}`];
+        if (n.uptime_sec != null) meta.push(`igång ${uptime(n.uptime_sec)}`);
+        if (n.pipeline && n.pipeline.state) meta.push(`mottagare ${n.pipeline.state}`);
         if (n.version) meta.push(n.version);
         meta.push(`token ${n.token_prefix}…`);
         return `<article class="card" data-id="${n.id}" data-name="${esc(n.name)}" style="display:flex;flex-direction:column;gap:8px">
@@ -81,10 +95,12 @@ const Aggregator = (() => {
                 <span class="pill ${state[0]}">${state[1]}</span>
             </div>
             <div class="small">${stations.length ? stations.map((s) => `<div>${esc(s)}</div>`).join('') : '<span class="muted">Inga stationer rapporterade än</span>'}</div>
+            <div class="small">${esc(place)}${placeFrom ? ` <span class="muted">(${placeFrom})</span>` : ''}</div>
             <div class="small muted">${esc(meta.join(' · '))}</div>
             ${warn.length ? `<div class="small" style="color:var(--warn)">${esc(warn.join(' · '))}</div>` : ''}
             <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:4px">
                 <a class="btn small" href="#/sok?nod=${encodeURIComponent(n.name)}">Händelser</a>
+                <button class="btn small" type="button" data-action="location" data-location="${esc(n.location_set || n.location || '')}">Ändra plats</button>
                 <button class="btn small" type="button" data-action="rotate">Ny token</button>
                 <button class="btn small" type="button" data-action="toggle" data-enabled="${n.enabled}">${n.enabled ? 'Inaktivera' : 'Aktivera'}</button>
                 <button class="btn small danger" type="button" data-action="remove">Ta bort</button>
@@ -159,6 +175,12 @@ const Aggregator = (() => {
                 if (btn.dataset.action === 'rotate') {
                     if (!window.confirm(`Skapa en ny token för ”${name}”? Den gamla slutar fungera direkt.`)) return;
                     showToken(root, (await api('POST', `/nodes/${id}/rotate`, {})).snippet);
+                } else if (btn.dataset.action === 'location') {
+                    const value = window.prompt(`Var står ”${name}”? Skriv ”Ort, Län”, t.ex. ”Karlstad, Värmlands län”. Lämna tomt för att använda platsen noden själv rapporterar.`,
+                        btn.dataset.location || '');
+                    if (value === null) return;
+                    await api('PATCH', `/nodes/${id}`, { location: value.trim() || null });
+                    toast('Platsen är sparad');
                 } else if (btn.dataset.action === 'toggle') {
                     await api('PATCH', `/nodes/${id}`, { enabled: btn.dataset.enabled !== 'true' });
                 } else if (btn.dataset.action === 'remove') {
