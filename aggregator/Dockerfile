@@ -36,7 +36,7 @@ COPY transcriber.py /app/transcriber.py
 COPY notify_rules.py /app/notify_rules.py
 COPY admin_auth.py /app/admin_auth.py
 # Map: geolocation of traffic messages and the bundled place-name registry
-COPY gazetteer.py geolocate.py geo_service.py trafikverket.py /app/
+COPY gazetteer.py roads.py geolocate.py geo_service.py trafikverket.py /app/
 COPY geodata/ /app/geodata/
 COPY static/shared/ /app/static/shared/
 # Code and UI only — never .env, compose files or local data

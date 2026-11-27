@@ -34,6 +34,10 @@ DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # the same name that traffic messages mean. Plain text, edited in the repo.
 LOCAL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "geodata", "places-local.tsv")
+# Interchanges (trafikplatser, NVDB), camera and road weather station names
+# from Trafikverket, built by tools/build_roads_trafikverket.py; optional
+JUNCTIONS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "geodata", "places-trafikverket.tsv.gz")
 LOCAL_REPLACES_KM = 5     # an OSM name this close to a local one is the same place
 LOCAL_BONUS = 3           # a local name wins over others with the same name
 
@@ -233,6 +237,7 @@ def county_code(region):
 @dataclass
 class Gazetteer:
     places: list = field(default_factory=list)
+    roads: object = None            # roads.Roads, where the numbered roads run
 
     def __post_init__(self):
         self._by_name = {}
@@ -251,14 +256,17 @@ class Gazetteer:
         return len(self.places)
 
     @classmethod
-    def load(cls, path=None, centers=None, radius_km=250, local_path=None):
+    def load(cls, path=None, centers=None, radius_km=250, local_path=None,
+             roads_path=None, junctions_path=None):
         """Read the registry, keeping names within radius_km of any center.
 
         centers=None keeps the whole country. The hand-made places
         (places-local.tsv) are added when the bundled registry is read, or
         from local_path; an OSM name next to a local one with the same name
-        is dropped.
+        is dropped. The road registry (roads.py) comes along the same way:
+        the bundled one with the bundled registry, or from roads_path.
         """
+        bundled = not (path or os.environ.get("GAZETTEER_PATH"))
         if local_path is None and not (path or os.environ.get("GAZETTEER_PATH")):
             local_path = os.environ.get("GAZETTEER_LOCAL_PATH") or LOCAL_PATH
         path = path or os.environ.get("GAZETTEER_PATH") or DEFAULT_PATH
@@ -289,9 +297,20 @@ class Gazetteer:
                 places.append(Place(parts[0], parts[1], lat, lon, parts[4],
                                     parts[5] if len(parts) > 5 else ""))
         places += local
+        if junctions_path or bundled:
+            added = read_junctions(junctions_path or JUNCTIONS_PATH, places, keep)
+            places += added
+            if added:
+                log.info("Gazetteer: %d interchange and junction names from "
+                         "Trafikverket", len(added))
         log.info("Gazetteer: %d place names loaded from %s (%d added by hand)",
                  len(places), path, len(local))
-        return cls(places)
+        road_reg = None
+        if roads_path or bundled:
+            import roads as roads_mod
+            road_reg = roads_mod.Roads.load(roads_path, centers=centers,
+                                            radius_km=radius_km)
+        return cls(places, roads=road_reg or None)
 
     # -- lookups ------------------------------------------------------------
 
@@ -421,6 +440,50 @@ class Gazetteer:
             if len(names) >= limit:
                 break
         return names[:limit]
+
+
+_MOTET_END = re.compile(r"(?i)(motet|korsningen|rondellen|trafikplats|tpl)$")
+
+
+def junction_aliases(name):
+    """'Bergvik' -> ['Bergvik', 'Bergviksmotet']: how the radio says an
+    interchange that Trafikverket names after the place."""
+    if _MOTET_END.search(name) or " " in name:
+        return [name]
+    tail = "motet" if re.search(r"(?i)[aeiouyåäös]$", name) else "smotet"
+    return [name, name + tail]
+
+
+def read_junctions(path, existing, keep=lambda lat, lon: True):
+    """Trafikverket's interchanges (kind junction) and camera and weather
+    station names (kind landmark, ref the road), less
+    the names an existing place already has within LOCAL_REPLACES_KM."""
+    if not path or not os.path.exists(path):
+        return []
+    by_name = {}
+    for p in existing:
+        by_name.setdefault(_norm(p.name), []).append(p)
+    out = []
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("#"):
+                continue
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 4:
+                continue
+            lat, lon = float(parts[2]), float(parts[3])
+            if not keep(lat, lon):
+                continue
+            ref = parts[5] if len(parts) > 5 else ""
+            names = junction_aliases(parts[0]) if parts[1] == "junction" else [parts[0]]
+            for name in names:
+                if any(km((lat, lon), q.point) <= LOCAL_REPLACES_KM
+                       for q in by_name.get(_norm(name), ())):
+                    continue
+                p = Place(name, parts[1], lat, lon, parts[4] if len(parts) > 4 else "", ref)
+                out.append(p)
+                by_name.setdefault(_norm(name), []).append(p)
+    return out
 
 
 def read_local(path):

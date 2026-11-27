@@ -89,6 +89,7 @@ COPY notifier.py /app/notifier.py
 COPY admin_auth.py /app/admin_auth.py
 # Map: geolocation of traffic messages and the bundled place-name registry
 COPY gazetteer.py /app/gazetteer.py
+COPY roads.py /app/roads.py
 COPY geolocate.py /app/geolocate.py
 COPY geo_service.py /app/geo_service.py
 COPY trafikverket.py /app/trafikverket.py
