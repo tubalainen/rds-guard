@@ -3,4 +3,4 @@
 requests>=2.34.2
 numpy>=2.4.6
 # receivers.yml
-PyYAML>=6.0.2
+PyYAML>=6.0.4
