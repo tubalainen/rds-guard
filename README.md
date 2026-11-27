@@ -785,15 +785,66 @@ Claude place each message, Claude's corrected text and its token cost. The
 second also transcribes the clips again with ElevenLabs with and without
 the place names, to see whether they help.
 
+### Transcribe the stored messages again
+
+After a better transcription engine, more place names or a new version,
+the stored recordings can be transcribed again, oldest first, with the
+receiver's own settings. It shows the count and the cost first and changes
+nothing without `--yes`:
+
+```bash
+docker compose exec rds-guard python3 /app/tools/retranscribe.py
+docker compose exec rds-guard python3 /app/tools/retranscribe.py --yes
+docker compose exec rds-guard python3 /app/tools/retranscribe.py --yes --limit 5      # try a few
+docker compose exec rds-guard python3 /app/tools/retranscribe.py --yes --engine local # free, on the CPU
+```
+
+ElevenLabs costs about 2–3 öre per message (from the plan's credits);
+local is free. It prints a line per message. The map is not touched: then
+**Admin → Karta → Bygg om kartan** places every message again from the new
+texts.
+
 Places missing from OpenStreetMap, or the one of several same-named places
 that the traffic desk means, are added by hand in
 `geodata/places-local.tsv` (name, kind, lat, lon, county; one per line). A
 name there replaces OpenStreetMap entries of the same name within 5 km and
 wins over the others.
 
+### Roads
+
+A **road registry** is bundled too (`geodata/roads-se.tsv.gz`): where
+Sweden's numbered roads run (E-roads, riksvägar and länsvägar, simplified
+to within 20 m), from Trafikverket. When a message names a road ("riksväg
+61 vid Kärr") it is used to:
+
+- pick the place next to that road when several have the name
+- put the pin on the road, not beside it (it moves at most as far as the
+  circle reaches)
+- point the direction arrow along the road, the way that leads toward the
+  place the announcer names ("i riktning mot Grums")
+
+It is all local and free. A road number the registry does not know near
+the receiver (a misheard one) changes nothing.
+
+The registry is built from Trafikverket's road database (NVDB, the official
+road numbers of all E-roads, riksvägar and länsvägar, about 1.3 MB) with
+`tools/build_roads_trafikverket.py`. It also writes
+`geodata/places-trafikverket.tsv.gz`, which is added to the place names:
+
+- Trafikverket's interchanges (trafikplatser, "Bergviksmotet"; one named
+  after a place, "Hynboholm", is also found as "Hynboholmsmotet")
+- the names of its traffic cameras, speed cameras and road weather stations
+  ("Stolpen västergående" on E18 becomes Stolpen, by E18)
+
+A name OpenStreetMap already has at that place is not added twice. Building
+needs a free `TRAFIKVERKET_API_KEY`; running does not. `tools/build_roads.py`
+builds the roads from OpenStreetMap instead.
+
 The map tiles come from `tile.openstreetmap.org`, loaded by your browser.
-Refresh the place-name registry now and then with
-`python3 tools/build_gazetteer.py` (needs the Overpass API).
+Refresh the registries now and then with `python3 tools/build_gazetteer.py`
+and `python3 tools/build_roads.py` (both need the Overpass API, set
+`OVERPASS_URL` for another server; the roads take a while, about an hour,
+and continue where they stopped if interrupted).
 
 ## REST API
 
@@ -984,13 +1035,19 @@ rds-guard/
 ├── audio_recorder.py     # Recording lifecycle, ffmpeg conversion
 ├── transcriber.py        # Speech-to-text: ElevenLabs Scribe, local faster-whisper or remote ASR
 ├── gazetteer.py          # Place-name registry: lookup, sound-alike correction (shared)
+├── roads.py              # Road registry: where the numbered roads run (shared)
 ├── geolocate.py          # Map engines (rules, Claude), placement, incidents (shared)
 ├── geo_service.py        # Registry per node area + engine (shared with the aggregator)
 ├── trafikverket.py       # Trafikverket's deviations: feed and storage (shared with the aggregator)
 ├── geodata/gazetteer-se.tsv.gz # Swedish place names from OpenStreetMap (ODbL)
+├── geodata/roads-se.tsv.gz     # Swedish numbered roads from Trafikverket (NVDB)
+├── geodata/places-trafikverket.tsv.gz # Interchanges, camera and weather station names (Trafikverket)
 ├── tools/convert_kb_whisper.py # Build step: converts KB-Whisper strict for faster-whisper
-├── tools/build_gazetteer.py    # Rebuilds geodata/ from OpenStreetMap
+├── tools/build_gazetteer.py    # Rebuilds the place names in geodata/ from OpenStreetMap
+├── tools/build_roads.py        # Rebuilds the roads in geodata/ from OpenStreetMap
+├── tools/build_roads_trafikverket.py # Rebuilds roads and Trafikverket's places in geodata/
 ├── tools/measure_geolocation.py # Measures the map engines on your own messages
+├── tools/retranscribe.py      # Transcribes the stored recordings again
 ├── status.py             # Status snapshot (/api/status + uplink heartbeat)
 ├── uplink.py             # Satellite → aggregator sender (outbox + heartbeat)
 ├── docs/

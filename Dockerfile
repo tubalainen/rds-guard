@@ -89,12 +89,14 @@ COPY notifier.py /app/notifier.py
 COPY admin_auth.py /app/admin_auth.py
 # Map: geolocation of traffic messages and the bundled place-name registry
 COPY gazetteer.py /app/gazetteer.py
+COPY roads.py /app/roads.py
 COPY geolocate.py /app/geolocate.py
 COPY geo_service.py /app/geo_service.py
 COPY trafikverket.py /app/trafikverket.py
 COPY geodata/ /app/geodata/
 COPY tools/measure_geolocation.py /app/tools/measure_geolocation.py
 COPY tools/eval_geolocation.py /app/tools/eval_geolocation.py
+COPY tools/retranscribe.py /app/tools/retranscribe.py
 COPY tools/geo_corpus.json /app/tools/geo_corpus.json
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
