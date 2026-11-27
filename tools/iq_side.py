@@ -3,9 +3,11 @@
 Run it with the satellite stopped (it needs the dongle). It tunes 250 kHz
 above and 250 kHz below the station, captures one second each with
 rtl_sdr at a fixed gain, and prints where the station's power is and how
-far its carrier is off. It changes nothing.
+far its carrier is off. A third capture with that correction (rtl_sdr -p)
+checks the ppm sign. It also lists the dongles the way the satellite reads
+them (dongles.py, next to this file). It changes nothing.
 
-    python3 iq_side.py 103.5M [--gain 20] [--serial 00000001]
+    python3 iq_side.py 103.5M [--gain 20] [--serial 00000001 | --index 0]
 """
 
 import argparse
@@ -24,10 +26,10 @@ def hz(text):
     return int(round(float(t.rstrip("MK")) * mult))
 
 
-def capture(center, gain, index, seconds=1.0):
+def capture(center, gain, index, seconds=1.0, ppm=0):
     n = int(FS * seconds) * 2
     cmd = ["rtl_sdr", "-f", str(center), "-s", str(FS), "-g", str(gain),
-           "-n", str(n // 2), "-d", str(index), "-"]
+           "-n", str(n // 2), "-d", str(index)] + (["-p", str(ppm)] if ppm else []) + ["-"]
     print(f"  capturing: {' '.join(cmd)}", flush=True)
     out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                          timeout=30, check=False).stdout
@@ -67,15 +69,36 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("frequency", help="a station you receive well, e.g. 103.5M")
     ap.add_argument("--gain", type=float, default=20.0)
-    ap.add_argument("--index", type=int, default=0, help="rtl_sdr device index")
+    ap.add_argument("--index", type=int, default=None, help="rtl_sdr device index")
+    ap.add_argument("--serial", help="the dongle's serial number (looked up as the satellite does)")
     args = ap.parse_args(argv)
     f = hz(args.frequency)
+    index = args.index
+    try:
+        import dongles
+        found_dongles = dongles.find_all(with_gains=True)
+        print("Dongles, as the satellite reads them:")
+        for d in found_dongles:
+            print(f"  index {d.index}  serial {d.serial}  {d.vendor}, {d.product}  "
+                  f"tuner {d.tuner or '?'}  gains {' '.join(f'{g:g}' for g in d.gains) or '?'}")
+        for serial in dongles.duplicates(found_dongles):
+            print("  WARNING: " + dongles.duplicate_help(found_dongles, serial))
+        if args.serial:
+            index = dongles.index_of(args.serial, found_dongles)
+            print(f"  serial {args.serial} is index {index}")
+    except ImportError:
+        print("(dongles.py is not next to this file: dongles not listed)")
+    except Exception as e:                       # noqa: BLE001 - report and go on
+        print(f"Reading the dongles failed: {type(e).__name__}: {e}")
+        if args.serial:
+            return 1
+    index = 0 if index is None else index
     print(f"Station {f / 1e6:.3f} MHz, gain {args.gain} dB", flush=True)
     results = {}
     for label, center in (("tuned 250 kHz ABOVE the station", f + OFFSET),
                           ("tuned 250 kHz BELOW the station", f - OFFSET)):
         print(f"{label} ({center / 1e6:.3f} MHz):", flush=True)
-        z = capture(center, args.gain, args.index)
+        z = capture(center, args.gain, index)
         if len(z) < FS // 2:
             print("  rtl_sdr gave too little data: is the satellite stopped?")
             return 1
@@ -93,8 +116,26 @@ def main(argv=None):
         print("RESULT: MIRRORED I/Q - the station is at (centre - station)")
     else:
         print("RESULT: unclear (the two captures disagree) - try a stronger station or another gain")
-    ppms = [-off / f * 1e6 for _, off, _ in results.values()]
-    print(f"ppm estimate: {np.median(ppms):+.1f} (from {', '.join(f'{p:+.1f}' for p in ppms)})")
+    sign = -1 if mirrored else 1                 # a mirror also flips the offset
+    ppms = [-sign * off / f * 1e6 for _, off, _ in results.values()]
+    ppm = float(np.median(ppms))
+    print(f"ppm estimate: {ppm:+.1f} (from {', '.join(f'{p:+.1f}' for p in ppms)})")
+    p = int(round(ppm))
+    if p and (normal or mirrored):
+        center = f + OFFSET
+        print(f"check: tuned 250 kHz above again, with rtl_sdr -p {p}:", flush=True)
+        z = capture(center, args.gain, index, ppm=p)
+        rest = carrier_offset(z, (f - center) * sign)
+        before = abs(ppm) * f / 1e6
+        print(f"  carrier now {rest:+.0f} Hz off (was about {before:.0f} Hz)")
+        if abs(rest) < 0.3 * before:
+            print("RESULT ppm: the sign is right (the correction removes the offset)")
+        elif abs(rest) > 1.5 * before:
+            print("RESULT ppm: the sign is WRONG (the correction doubles the offset)")
+        else:
+            print("RESULT ppm: unclear")
+    elif not p:
+        print("RESULT ppm: the dongle is within 0.5 ppm; the sign cannot be checked with it")
     return 0
 
 

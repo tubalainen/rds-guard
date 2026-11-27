@@ -35,7 +35,7 @@ def setup_snippet(node_name, token):
     """The .env lines to send to the person running the satellite."""
     url = config.PUBLIC_URL or "https://<your-aggregator-address>"
     return (
-        f"UPLINK_URL={url}\n"
+        f"AGGREGATOR_URL={url}\n"
         f"UPLINK_TOKEN={token}\n"
         f"NODE_NAME={node_name}\n"
     )

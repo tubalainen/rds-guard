@@ -36,7 +36,7 @@ def test_clean_name_rejects(bad):
 def test_snippet_uses_public_url(monkeypatch):
     monkeypatch.setattr(config, "PUBLIC_URL", "https://rds.example.com")
     s = nodes.setup_snippet("Kalle", "tok")
-    assert "UPLINK_URL=https://rds.example.com\n" in s
+    assert "AGGREGATOR_URL=https://rds.example.com\n" in s
     assert "UPLINK_TOKEN=tok\n" in s
     assert "NODE_NAME=Kalle\n" in s
 
