@@ -61,6 +61,12 @@ class GeoService:
             self._located[key] = place
         return place
 
+    def locate_area(self, text):
+        """A station's area ('Örebro län' or 'Ort, Län') -> Place, or None.
+        A county alone is read from its seat."""
+        query = gz.area_query(text)
+        return self.locate_node(query) if query else None
+
     def area(self, center):
         """Registry for names within AREA_KM of center (loaded once)."""
         key = (round(center[0], 1), round(center[1], 1))

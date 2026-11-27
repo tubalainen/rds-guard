@@ -58,7 +58,7 @@ def dispatch(row, publish):
                                title=payload["title"])
         statuses.append(status)
         log.info("Push '%s' for %s from %s: %s", rule["name"],
-                 row.get("station_ps") or row.get("pi"), row.get("node_name"),
+                 row.get("station_name") or row.get("pi"), row.get("node_name"),
                  status)
     return statuses
 

@@ -29,6 +29,7 @@ SHARED_DIR = pathlib.Path(__file__).resolve().parent.parent / "static" / "shared
 
 ADMIN = admin_auth.AdminAuth(lambda: config.ADMIN_PASSWORD,
                              protected=("/api/v1/notify", "/api/v1/nodes",
+                                        "/api/v1/station-settings",
                                         "/api/v1/incidents/rebuild"),
                              cookie_name="rdsguard_agg_admin")
 
@@ -37,6 +38,7 @@ MQTT = web.AppKey("mqtt", object)
 
 _PUBLIC_EVENT_FIELDS = (
     "event_uid", "node_name", "type", "state", "pi", "station_ps", "long_ps",
+    "station_key", "station_name", "station_area",
     "frequency", "prog_type", "radiotext", "started_at", "ended_at",
     "duration_sec", "received_at", "transcription", "transcription_status",
     "transcription_duration_sec", "alert_status", "transcription_corrected",
@@ -107,8 +109,10 @@ def public_node(node, pipeline=None):
         "clock_offset_sec": node.get("clock_offset_sec"),
         "uptime_sec": status.get("uptime_sec"),
         "pipeline": status.get("pipeline"),
-        "stations": status.get("stations") or [],
-        "receivers": status.get("receivers") or [],
+        "stations": store.name_stations(status.get("stations")),
+        "receivers": [dict(r, stations=store.name_stations(r.get("stations")))
+                      if isinstance(r, dict) else r
+                      for r in status.get("receivers") or []],
         "queue_depth": status.get("queue_depth"),
         "location": store.node_location(node),
         "location_set": node.get("location"),
@@ -203,6 +207,7 @@ async def handle_events(request):
     def work():
         rows, total = store.query_events(
             event_type=q.get("type") or None, pi=q.get("pi") or None,
+            station=q.get("station") or None,
             node=q.get("node") or None, since=q.get("since") or None,
             active=active,
             limit=_int_param(request, "limit", 50, 1, 200),
@@ -320,7 +325,8 @@ async def handle_preview_rule(request):
             store.iso_ago((config.EVENT_RETENTION_DAYS + 1) * 86400))
         res = notify_rules.preview(rule, events, notifier.zone())
         res["samples"] = [{k: e.get(k) for k in (
-            "event_uid", "type", "pi", "station_ps", "radiotext", "started_at",
+            "event_uid", "type", "pi", "station_ps", "station_key", "station_name",
+            "radiotext", "started_at",
             "duration_sec", "node_name")} for e in res["samples"]]
         return res
 
@@ -387,6 +393,8 @@ def _decorate_incidents(rows):
             "id": ev["event_uid"],
             "started_at": ev.get("started_at"),
             "station_ps": ev.get("station_ps"),
+            "station_name": ev.get("station_name"),
+            "station_key": ev.get("station_key"),
             "node_name": ev.get("node_name"),
             "transcription": ev.get("transcription_corrected")
             or ev.get("transcription"),
@@ -398,9 +406,19 @@ def _decorate_incidents(rows):
             t["event_id"] = b["event_uid"] if b else None
             t["started_at"] = b.get("started_at") if b else None
             t["station_ps"] = b.get("station_ps") if b else None
+            t["station_name"] = b.get("station_name") if b else None
+            t["station_key"] = b.get("station_key") if b else None
             t["node_name"] = b.get("node_name") if b else None
             t["audio_url"] = (f"/api/v1/audio/{b['event_uid']}.ogg"
                               if b and b.get("audio_path") else None)
+        # The stations whose messages named it, for the map's station filter
+        seen = {}
+        for t in inc.get("timeline", []):
+            if t.get("station_key"):
+                seen.setdefault(t["station_key"], t.get("station_name"))
+        if inc["latest"] and inc["latest"].get("station_key"):
+            seen.setdefault(inc["latest"]["station_key"], inc["latest"].get("station_name"))
+        inc["stations"] = [{"key": k, "name": v} for k, v in seen.items()]
     return rows
 
 
@@ -492,6 +510,33 @@ async def handle_incidents_rebuild(request):
 
 async def handle_stations(request):
     return web.json_response({"stations": await _run(store.list_stations)})
+
+
+async def handle_update_station(request):
+    """PATCH /api/v1/station-settings (admin) — {"key": "102800/E224",
+    "name": "P4 Örebro"|null, "area": "Örebro län"|null}: the station's name
+    and the area its messages are placed in."""
+    body = await _json_body(request)
+    if (not body or not isinstance(body.get("key"), str)
+            or any(body.get(k) is not None and not isinstance(body.get(k), str)
+                   for k in ("name", "area"))):
+        return _error(422, "invalid", "expected {\"key\": \"102800/E224\", "
+                      "\"name\": str|null, \"area\": str|null}")
+    name = " ".join((body.get("name") or "").split())
+    area = " ".join((body.get("area") or "").split())
+    if len(name) > 64 or len(area) > 80:
+        return _error(422, "invalid", "name is at most 64, area at most 80 characters")
+    pipeline = request.app[PIPELINE]
+    if area and pipeline is not None and hasattr(pipeline, "locate_area"):
+        if await _run(pipeline.locate_area, area) is None:
+            return _error(422, "invalid",
+                          f"'{area}' hittades inte: skriv ett län (\"Örebro län\") "
+                          "eller \"Ort, Län\"")
+    if not await _run(store.set_station, body["key"], name, area):
+        return _error(404, "not_found")
+    st = next((s for s in await _run(store.list_stations)
+               if s["station_key"] == body["key"]), None)
+    return web.json_response({"station": st})
 
 
 # ---------------------------------------------------------------------------
@@ -711,6 +756,7 @@ def create_web_app(pipeline=None, mqtt=None):
     r.add_get("/api/v1/audio/{uid}.ogg", handle_audio)
     r.add_get("/api/v1/audio/{kind:reception}/{uid}.ogg", handle_audio)
     r.add_get("/api/v1/stations", handle_stations)
+    r.add_patch("/api/v1/station-settings", handle_update_station)
     r.add_get("/api/v1/incidents", handle_incidents)
     r.add_post("/api/v1/incidents/backfill", handle_incidents_backfill)
     r.add_get("/api/v1/incidents/rebuild", handle_incidents_rebuild_info)
