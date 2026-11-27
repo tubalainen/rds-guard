@@ -494,13 +494,15 @@ queue, and the satellites waiting to be approved. **Admin → Karta** rebuilds
 the map.
 
 **Admin → Stationer** lists every station heard. A station is a frequency
-and a PI code together: P4 regions can share a PI (P4 Örebro on 102.8 and
-P4 Värmland on 103.5 both send 0xE224), so their messages are never merged.
+and a PI code together, so two stations reported with the same PI (seen
+for P4 Örebro on 102.8 and P4 Värmland on 103.5, both 0xE224) are never
+merged.
 Each station has:
 
 - a **name**, shown on the map, in the messages and in the pushes. It comes
-  from RDS when RDS says more than PS ("P4 SR"): Long PS, or "P4 Örebro" in
-  the RadioText. *Ändra namn* sets it by hand.
+  from RDS when RDS says more than PS ("P4 SR"): Long PS, or one of the 25
+  P4 regions named in the RadioText ("P4 Örebro"), learnt the first time.
+  *Ändra namn* sets it by hand.
 - an **area**, where its traffic messages are placed on the map: a county
   ("Örebro län", read from its seat) or "Ort, Län". It is suggested from the
   name. Without an area, the messages are placed around the node's location

@@ -233,6 +233,7 @@ def init_db(db_path):
             first_seen_at   TEXT NOT NULL,
             last_seen_at    TEXT NOT NULL
         )""")
+    _stations_changed()
     _backfill_station_keys(conn)
     ensure_receptions(conn)
     geolocate.init_tables(conn)
@@ -296,27 +297,52 @@ def _backfill_station_keys(conn):
         log.info("Gave %d events their station (frequency + PI)", len(rows))
 
 
-# P4 is followed by its region in RadioText ("Du lyssnar på P4 Örebro");
-# these words after P4 are programmes, not regions
-_P4_NAME = re.compile(r"\bP4\s+([A-ZÅÄÖ][a-zåäöé]+(?:[ -][A-ZÅÄÖ][a-zåäöé]+)?)")
-_NOT_REGION = {"extra", "dokumentär", "morgon", "eftermiddag", "kväll", "natt",
-               "nyheter", "sport", "musik", "live", "plus", "play", "direkt",
-               "sr", "radio", "med", "och", "i", "på"}
+# The 25 P4 regions (lower case) and where their messages are read from.
+# RadioText often names the station ("Du lyssnar på P4 Örebro"); only these
+# names are taken, so a programme ("P4 Extra") never becomes a station name.
+P4_REGIONS = {
+    "blekinge": ("P4 Blekinge", "Blekinge län"),
+    "dalarna": ("P4 Dalarna", "Dalarnas län"),
+    "gotland": ("P4 Gotland", "Gotlands län"),
+    "gävleborg": ("P4 Gävleborg", "Gävleborgs län"),
+    "göteborg": ("P4 Göteborg", "Göteborg, Västra Götalands län"),
+    "halland": ("P4 Halland", "Hallands län"),
+    "jämtland": ("P4 Jämtland", "Jämtlands län"),
+    "jönköping": ("P4 Jönköping", "Jönköpings län"),
+    "kalmar": ("P4 Kalmar", "Kalmar län"),
+    "kristianstad": ("P4 Kristianstad", "Kristianstad, Skåne län"),
+    "kronoberg": ("P4 Kronoberg", "Kronobergs län"),
+    "malmöhus": ("P4 Malmöhus", "Malmö, Skåne län"),
+    "norrbotten": ("P4 Norrbotten", "Norrbottens län"),
+    "sjuhärad": ("P4 Sjuhärad", "Borås, Västra Götalands län"),
+    "skaraborg": ("P4 Skaraborg", "Skövde, Västra Götalands län"),
+    "stockholm": ("P4 Stockholm", "Stockholms län"),
+    "sörmland": ("P4 Sörmland", "Södermanlands län"),
+    "uppland": ("P4 Uppland", "Uppsala län"),
+    "värmland": ("P4 Värmland", "Värmlands län"),
+    "väst": ("P4 Väst", "Uddevalla, Västra Götalands län"),
+    "västerbotten": ("P4 Västerbotten", "Västerbottens län"),
+    "västernorrland": ("P4 Västernorrland", "Västernorrlands län"),
+    "västmanland": ("P4 Västmanland", "Västmanlands län"),
+    "örebro": ("P4 Örebro", "Örebro län"),
+    "östergötland": ("P4 Östergötland", "Östergötlands län"),
+}
+_P4_NAME = re.compile(r"\bP4\s+(" + "|".join(sorted(P4_REGIONS, key=len, reverse=True))
+                      + r")(?![\wåäöé])", re.IGNORECASE)
 
 
 def rds_station_name(ps=None, long_ps=None, radiotext=()):
     """The station's name as RDS gives it: Long PS when it says more than PS,
-    else "P4 <Region>" found in RadioText, else None."""
+    else "P4 <Region>" (one of the 25) in RadioText, else None."""
     lps = (long_ps or "").strip()
     if lps and lps.casefold() != (ps or "").strip().casefold():
         return lps[:64]
     if isinstance(radiotext, str):
         radiotext = [radiotext]
     for text in radiotext or ():
-        for m in _P4_NAME.finditer(str(text)):
-            region = m.group(1)
-            if region.split()[0].casefold() not in _NOT_REGION:
-                return f"P4 {region}"
+        m = _P4_NAME.search(str(text))
+        if m:
+            return P4_REGIONS[m.group(1).casefold()][0]
     return None
 
 
@@ -382,7 +408,7 @@ def note_station(conn, frequency, pi, ps=None, long_ps=None, radiotext=(),
     rds = rds_station_name(ps, long_ps, radiotext)
     cur = conn.execute(
         "UPDATE stations SET last_seen_at = ?, ps = COALESCE(?, ps), "
-        "rds_name = COALESCE(?, rds_name) WHERE station_key = ?",
+        "rds_name = COALESCE(rds_name, ?) WHERE station_key = ?",
         (ts, ps or None, rds, key))
     if cur.rowcount == 0:
         conn.execute(
@@ -392,24 +418,22 @@ def note_station(conn, frequency, pi, ps=None, long_ps=None, radiotext=(),
         _stations_changed()
     else:
         cached = _station_rows().get(key)
-        if cached is None or (rds and cached.get("rds_name") != rds) or (
+        if cached is None or (rds and not cached.get("rds_name")) or (
                 ps and cached.get("ps") != ps):
             _stations_changed()
     return key
 
 
 def suggest_area(name):
-    """'P4 Örebro' -> 'Örebro län' (the county the name points at), or None."""
+    """'P4 Örebro' -> 'Örebro län', 'P4 Skaraborg' -> 'Skövde, Västra
+    Götalands län', a county name -> that county; None otherwise."""
     text = re.sub(r"(?i)^\s*(sr\s+)?p4\s+", "", name or "").strip()
     if not text:
         return None
+    region = P4_REGIONS.get(text.casefold())
+    if region:
+        return region[1]
     code = gz.county_code(text)
-    if code is None:
-        try:
-            place = gz.locate_in_file(text)
-        except OSError:
-            place = None
-        code = place.county if place else None
     return gz.COUNTIES.get(code) if code else None
 
 

@@ -148,3 +148,63 @@ def test_payloads_carry_the_name(node):
     assert payload["station"]["name"] == "P4 Örebro"
     assert payload["station"]["key"] == "102800/E224"
     assert headline(dict(row, radiotext=[])) == "Trafikmeddelande på P4 Örebro"
+
+
+def test_rds_name_only_from_the_p4_regions():
+    assert store.rds_station_name("P4 SR", None, ["DU LYSSNAR PÅ P4 ÖREBRO"]) == "P4 Örebro"
+    assert store.rds_station_name("P4 SR", None, ["P4 Granskar: ny vecka"]) is None
+    assert store.rds_station_name("P4 SR", None, ["P4 Västerås"]) is None
+    assert store.rds_station_name("P4 SR", None, ["Nu P4 Västmanland"]) == "P4 Västmanland"
+
+
+def test_rds_name_is_learned_once(node):
+    put(node, ev("102.8M", radiotext=["Du lyssnar på P4 Örebro"]))
+    put(node, ev("102.8M", start=T + 3600, radiotext=["Nu sänder P4 Värmland och P4 Örebro"]))
+    assert store.get_station("102800/E224")["rds_name"] == "P4 Örebro"
+
+
+def test_suggest_area_without_a_region_is_none_and_fast():
+    t = time.time()
+    assert store.suggest_area("P4 SR") is None
+    assert store.suggest_area("P4 Skaraborg") == "Skövde, Västra Götalands län"
+    assert time.time() - t < 0.05
+
+
+def test_older_events_get_their_station(agg_store, node, tmp_path):
+    put(node, ev("102.8M"))
+    put(node, ev("103.5M", start=T + 2))
+    conn = store._conn()
+    conn.execute("UPDATE events SET station_key = NULL")
+    conn.execute("DELETE FROM stations")
+    conn.commit()
+    store.init_db(store._DB_PATH)
+    keys = sorted(r[0] for r in conn.execute("SELECT station_key FROM events"))
+    assert keys == ["102800/E224", "103500/E224"]
+    assert sorted(s["station_key"] for s in store.list_stations()) == keys
+
+
+@pytest.fixture
+async def web(aiohttp_client, agg_store, monkeypatch):
+    from aggregator import api
+    monkeypatch.setattr(config, "ADMIN_PASSWORD", "hemligt")
+    client = await aiohttp_client(api.create_web_app())
+    return client
+
+
+async def test_station_settings_api(web, node):
+    put(node, ev("102.8M"))
+    put(node, ev("103.5M", start=T + 2))
+    body = {"key": "102800/E224", "name": "P4 Örebro", "area": "Örebro län"}
+    assert (await web.patch("/api/v1/station-settings", json=body)).status == 401
+    await web.post("/api/v1/admin/login", json={"password": "hemligt"})
+    resp = await web.patch("/api/v1/station-settings", json=body)
+    assert resp.status == 200
+    st = (await resp.json())["station"]
+    assert st["display_name"] == "P4 Örebro" and st["area"] == "Örebro län"
+    resp = await web.patch("/api/v1/station-settings", json=dict(body, key="1/X"))
+    assert resp.status == 404
+    data = await (await web.get("/api/v1/events?station=102800/E224")).json()
+    assert [e["station_name"] for e in data["events"]] == ["P4 Örebro"]
+    data = await (await web.get("/api/v1/stations")).json()
+    assert {s["station_key"]: s["display_name"] for s in data["stations"]} == {
+        "102800/E224": "P4 Örebro", "103500/E224": "P4 SR"}
