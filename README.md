@@ -716,6 +716,13 @@ to within 20 m), from OpenStreetMap. When a message names a road ("riksväg
 It is all local and free. A road number the registry does not know near
 the receiver (a misheard one) changes nothing.
 
+The registry is built from Trafikverket's road database (NVDB, the official
+road numbers) with `tools/build_roads_trafikverket.py`, which also writes
+`geodata/junctions-se.tsv.gz`: Trafikverket's named interchanges
+(trafikplatser) and junctions, added to the place names ("Bergvik" is also
+heard as "Bergviksmotet"). It needs a free `TRAFIKVERKET_API_KEY`, only when
+building; `tools/build_roads.py` builds the roads from OpenStreetMap instead.
+
 The map tiles come from `tile.openstreetmap.org`, loaded by your browser.
 Refresh the registries now and then with `python3 tools/build_gazetteer.py`
 and `python3 tools/build_roads.py` (both need the Overpass API, set
@@ -919,6 +926,7 @@ rds-guard/
 ├── tools/convert_kb_whisper.py # Build step: converts KB-Whisper strict for faster-whisper
 ├── tools/build_gazetteer.py    # Rebuilds the place names in geodata/ from OpenStreetMap
 ├── tools/build_roads.py        # Rebuilds the roads in geodata/ from OpenStreetMap
+├── tools/build_roads_trafikverket.py # Rebuilds roads and interchanges in geodata/ from Trafikverket
 ├── tools/measure_geolocation.py # Measures the map engines on your own messages
 ├── status.py             # Status snapshot (/api/status + uplink heartbeat)
 ├── uplink.py             # Satellite → aggregator sender (outbox + heartbeat)

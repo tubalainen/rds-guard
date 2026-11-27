@@ -130,3 +130,54 @@ def test_a_road_not_in_the_registry_changes_nothing(reg):
 def test_along_picks_the_direction_toward_the_place():
     assert roads.along(90, 80) == 90
     assert roads.along(90, 250) == 270
+
+
+# ---------------------------------------------------- Trafikverket (NVDB)
+
+import build_roads_trafikverket as tv  # noqa: E402
+
+
+def test_wkt_lines_and_points():
+    assert tv.wkt_lines("LINESTRING (13.1 59.3, 13.2 59.4)") == [[(59.3, 13.1), (59.4, 13.2)]]
+    assert tv.wkt_lines("MULTILINESTRING Z ((13.1 59.3 10, 13.2 59.4 11), (14 60, 14.1 60))") == [
+        [(59.3, 13.1), (59.4, 13.2)], [(60.0, 14.0), (60.0, 14.1)]]
+    assert tv.wkt_point("POINT (13.43 59.37)") == (59.37, 13.43)
+
+
+def test_nvdb_road_keys():
+    assert tv.road_key({"Huvudnummer": 18, "Europaväg": True}) == "E18"
+    assert tv.road_key({"Huvudnummer": 61, "Europaväg": False}) == "61"
+    assert tv.road_key({}) is None
+
+
+def test_old_and_deleted_rows_are_left_out():
+    assert tv.still_valid({"Valid_To": "2030-01-01T00:00:00"}, "2026-11-27")
+    assert not tv.still_valid({"Valid_To": "2020-01-01"}, "2026-11-27")
+    assert not tv.still_valid({"Deleted": True}, "2026-11-27")
+
+
+@pytest.mark.parametrize("name,aliases", [
+    ("Bergvik", ["Bergvik", "Bergviksmotet"]), ("Våxnäs", ["Våxnäs", "Våxnäsmotet"]),
+    ("Klara", ["Klara", "Klaramotet"]), ("Bergviksmotet", ["Bergviksmotet"]),
+    ("Karlstad västra", ["Karlstad västra"]),
+])
+def test_junction_aliases(name, aliases):
+    assert gz.junction_aliases(name) == aliases
+
+
+def test_trafikverket_junctions_join_the_registry(tmp_path):
+    jpath = tmp_path / "junctions.tsv.gz"
+    with gzip.open(jpath, "wt", encoding="utf-8") as f:
+        f.write("# test\n")
+        f.write("Bergvik\tjunction\t59.37900\t13.43247\t\t31\n")    # OSM has Bergviksmotet
+        f.write("Skutberget\tjunction\t59.36000\t13.40000\t\t30\n")
+        f.write("Karlstad\tjunction\t59.38000\t13.50000\t\t\n")       # the city is there
+    gpath = tmp_path / "gaz.tsv.gz"
+    with gzip.open(gpath, "wt", encoding="utf-8") as f:
+        for name, kind, lat, lon, county in PLACES:
+            f.write(f"{name}\t{kind}\t{lat}\t{lon}\t{county}\t\n")
+    reg = gz.Gazetteer.load(str(gpath), junctions_path=str(jpath))
+    names = [p.name for p in reg.places if p.kind == "junction"]
+    assert names.count("Bergviksmotet") == 1
+    assert "Bergvik" in names and "Skutberget" in names and "Skutbergetsmotet" in names
+    assert "Karlstad" not in names
