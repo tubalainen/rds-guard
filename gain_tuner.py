@@ -53,6 +53,7 @@ SWEEP_SEC = 1.0
 PPM_SEC = 3.0
 PPM_LIMIT = 150
 HEARD_PILOT_DB = 20           # a station counts as heard with a pilot this clear
+RDS_SEEN_DB = 6               # its RDS subcarrier this clear at some step: RDS to rank by
 TIE = 0.05                    # within 5 %: the lower gain
 LOW_QUALITY = 0.6             # of the calibrated rate …
 LOW_FOR_SEC = 15 * 60         # … for this long: calibrate again
@@ -143,6 +144,35 @@ def redsea_quality(pcm, seconds, run=None):
         if isinstance(d.get("bler"), (int, float)):
             bler = d["bler"]
     return round(groups / seconds, 2), bler
+
+
+def pick_steps(steps, heard):
+    """The sweep steps to check with real decoding, and the heard stations
+    left out of the ranking. steps: [{"gain", "clip", "snr": {freq: (pilot,
+    rds)}}].
+
+    Ranked by the stations whose RDS shows at some step: one with a pilot but
+    no RDS anywhere has an RDS SNR of about 0 at every step, which would make
+    the ranking close to random (docker01: 100.3M). Every station's own best
+    step is always checked, so a weak station that decodes at one gain only
+    is never left out by chance; the rest by the worst station."""
+    rds_seen = [f for f in heard if max(s["snr"][f][1] for s in steps) >= RDS_SEEN_DB]
+    left_out = [f for f in heard if f not in rds_seen]
+    rank_by = rds_seen or heard
+    for s in steps:
+        s["worst_rds"] = min(s["snr"][f][1] for f in rank_by)
+    clean = [s for s in steps if s["clip"] <= CLIP_LIMIT] or steps
+    best = []
+    for f in rank_by:
+        own = max(clean, key=lambda s: (s["snr"][f][1], -s["gain"]))
+        if own not in best:
+            best.append(own)
+    for s in sorted(clean, key=lambda s: (-s["worst_rds"], s["gain"])):
+        if len(best) >= VERIFY_STEPS:
+            break
+        if s not in best:
+            best.append(s)
+    return best, left_out
 
 
 def choose(results):
@@ -297,10 +327,10 @@ def calibrate(receiver, index, gains, capture_fn=None, quality_fn=redsea_quality
         return {"gain": chosen, "ppm": ppm, "stations": {}, "dead": list(dict(freqs)),
                 "silent": True,
                 "steps": [{"gain": s["gain"], "clip": s["clip"]} for s in steps]}
-    for s in steps:
-        s["worst_rds"] = min(s["snr"][f][1] for f in heard)
-    clean = [s for s in steps if s["clip"] <= CLIP_LIMIT] or steps
-    best = sorted(clean, key=lambda s: (-s["worst_rds"], s["gain"]))[:VERIFY_STEPS]
+    best, left_out = pick_steps(steps, heard)
+    for f in left_out:
+        progress(f"[{rid}] {f}: pilot heard but no RDS signal at any gain - "
+                 "left out of the ranking")
     results = []
     for s in sorted(best, key=lambda s: s["gain"]):
         from channelizer import to_pcm
