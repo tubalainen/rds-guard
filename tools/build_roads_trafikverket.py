@@ -184,7 +184,7 @@ JUNCTION_FILTER = '<EXISTS name="Trafikplatsnamn" value="true"/>'
 ROAD_FILTER = '<GT name="Huvudnummer" value="0"/>'
 
 
-_HEADING = re.compile(r"(?i)[,\s]*\b(?:(?:söder|norr|öster|väster)gående|riktning\s+\S+|"
+_HEADING = re.compile(r"(?i)[,\s]*\b(?:(?:söder|norr|öster|väster|syd|nord|öst|väst)(?:gående|ut)|riktning\s+\S+|"
                       r"mot\s+.+|norra|södra|östra|västra|[nsöv])\s*$")
 ROAD_IN_TEXT = re.compile(r"\b(?:E\s?(\d{1,2})|(?:väg|riksväg|rv)\s+(\d{1,3}))\b", re.I)
 

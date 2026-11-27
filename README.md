@@ -717,11 +717,18 @@ It is all local and free. A road number the registry does not know near
 the receiver (a misheard one) changes nothing.
 
 The registry is built from Trafikverket's road database (NVDB, the official
-road numbers) with `tools/build_roads_trafikverket.py`, which also writes
-`geodata/junctions-se.tsv.gz`: Trafikverket's named interchanges
-(trafikplatser) and junctions, added to the place names ("Bergvik" is also
-heard as "Bergviksmotet"). It needs a free `TRAFIKVERKET_API_KEY`, only when
-building; `tools/build_roads.py` builds the roads from OpenStreetMap instead.
+road numbers of all E-roads, riksvägar and länsvägar, about 1.3 MB) with
+`tools/build_roads_trafikverket.py`. It also writes
+`geodata/places-trafikverket.tsv.gz`, which is added to the place names:
+
+- Trafikverket's interchanges (trafikplatser, "Bergviksmotet"; one named
+  after a place, "Hynboholm", is also found as "Hynboholmsmotet")
+- the names of its traffic cameras, speed cameras and road weather stations
+  ("Stolpen västergående" on E18 becomes Stolpen, by E18)
+
+A name OpenStreetMap already has at that place is not added twice. Building
+needs a free `TRAFIKVERKET_API_KEY`; running does not. `tools/build_roads.py`
+builds the roads from OpenStreetMap instead.
 
 The map tiles come from `tile.openstreetmap.org`, loaded by your browser.
 Refresh the registries now and then with `python3 tools/build_gazetteer.py`
@@ -922,11 +929,12 @@ rds-guard/
 ├── geo_service.py        # Registry per node area + engine (shared with the aggregator)
 ├── trafikverket.py       # Trafikverket's deviations: feed and storage (shared with the aggregator)
 ├── geodata/gazetteer-se.tsv.gz # Swedish place names from OpenStreetMap (ODbL)
-├── geodata/roads-se.tsv.gz     # Swedish numbered roads from OpenStreetMap (ODbL)
+├── geodata/roads-se.tsv.gz     # Swedish numbered roads from Trafikverket (NVDB)
+├── geodata/places-trafikverket.tsv.gz # Interchanges, camera and weather station names (Trafikverket)
 ├── tools/convert_kb_whisper.py # Build step: converts KB-Whisper strict for faster-whisper
 ├── tools/build_gazetteer.py    # Rebuilds the place names in geodata/ from OpenStreetMap
 ├── tools/build_roads.py        # Rebuilds the roads in geodata/ from OpenStreetMap
-├── tools/build_roads_trafikverket.py # Rebuilds roads and interchanges in geodata/ from Trafikverket
+├── tools/build_roads_trafikverket.py # Rebuilds roads and Trafikverket's places in geodata/
 ├── tools/measure_geolocation.py # Measures the map engines on your own messages
 ├── status.py             # Status snapshot (/api/status + uplink heartbeat)
 ├── uplink.py             # Satellite → aggregator sender (outbox + heartbeat)

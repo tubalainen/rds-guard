@@ -193,7 +193,8 @@ def test_trafikverket_junctions_join_the_registry(tmp_path):
 @pytest.mark.parametrize("raw,name", [
     ("Kroksvik, östergående ", "Kroksvik"), ("Stolpen västergående", "Stolpen"),
     ("Nikkalakorsning mot Kalix", "Nikkalakorsning"), ("Falutorget Norra", "Falutorget"),
-    ("Bodetta", "Bodetta"), ("Nyeds kyrka, södergående", "Nyeds kyrka"),
+    ("Bodetta", "Bodetta"), ("Klaramotet västerut", "Klaramotet"),
+    ("Baggetorp, västgående", "Baggetorp"), ("Nyeds kyrka, södergående", "Nyeds kyrka"),
 ])
 def test_camera_names(raw, name):
     assert tv.spot_name(raw) == name
