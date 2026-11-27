@@ -19,6 +19,15 @@ An Airspy gives signed 16-bit IQ at 3 MS/s (Mini) or 2.5 MS/s (R2), which
 171 kHz does not divide: it is decimated to 250 kHz (12 or 10), demodulated
 there and the MPX resampled 171/250 (polyphase), scaled to the same
 radians per 171 kHz sample as the RTL path. The RTL path has no resampler.
+
+At 6 MS/s and more (Airspy Mini 6 MS/s, R2 10 MS/s: stations up to ~8 MHz
+apart) shifting and filtering every station at the full rate would cost too
+much. There one FFT per block is shared by all stations (overlap-save): each
+takes the bins around its own frequency, applies the low-pass there and
+returns to the time domain with a small inverse FFT, already at 250 kHz.
+The bin's whole-block phase and the part of the offset finer than a bin are
+corrected at 250 kHz, so blocks join without a click and the carrier
+offset (ppm) reads as with the other paths.
 """
 
 import logging
@@ -42,6 +51,9 @@ _LPF_CUTOFF = 80_000      # LPF cutoff in Hz
 _MID_RATE = 250_000       # where a non-RTL rate is decimated to
 _RS_TAPS = 32             # resampler taps per phase (at the 250 kHz rate)
 _RS_CUTOFF = 80_000       # resampler low-pass (MPX ends at 60 kHz)
+# From this rate on, the shared-FFT front end (_WideFront)
+WIDE_FROM = 4_000_000
+_WIDE_TRANSITION = 40_000  # filter taps: about 6 * fs / this (Blackman)
 
 
 def plan(fs):
@@ -127,6 +139,9 @@ class _StationDSP:
         self._prev_z = np.complex64(0)
 
         # Output pipe (none when used offline, e.g. by the gain calibration)
+        self._open_pipe(pipe)
+
+    def _open_pipe(self, pipe):
         self._dead = False
         if pipe:
             r, w = os.pipe()
@@ -202,6 +217,97 @@ class _StationDSP:
             pass
 
 
+class _WideFront:
+    """The shared part at a high rate: one overlap-save FFT per block."""
+
+    def __init__(self, fs):
+        self.fs = int(fs)
+        self.decim, rs = plan(self.fs)
+        self.resampler = rs
+        ntaps = int(6 * self.fs / _WIDE_TRANSITION) | 1
+        # FFT size: a multiple of the decimation, about 8 filter lengths
+        size = self.decim
+        while size < 8 * (ntaps - 1):
+            size *= 2
+        self.size = size
+        self.bins = size // self.decim              # per station, at 250 kHz
+        self.block = (size - (ntaps - 1)) // self.decim * self.decim
+        self.overlap = size - self.block            # >= ntaps - 1, a multiple of decim
+        h = np.zeros(size, dtype=np.complex64)
+        h[:ntaps] = _make_lpf(_LPF_CUTOFF, self.fs, ntaps)
+        self.H = np.fft.fft(h)
+        self._hist = np.zeros(self.overlap, dtype=np.complex64)
+        self._last = None
+        self._X = None
+        self.start = -self.overlap                  # absolute index of the FFT input's [0]
+
+    def spectrum(self, z):
+        """The FFT of this block with the end of the previous one (computed
+        once per block, whatever the number of stations)."""
+        if z is not self._last:
+            if self._last is not None:
+                self.start += len(self._last)
+            ext = np.concatenate([self._hist, z])
+            self._hist = ext[-self.overlap:]
+            self._X = np.fft.fft(ext)
+            self._last = z
+        return self._X
+
+
+class _WideStation(_StationDSP):
+    """One station from a _WideFront's spectrum: its bins, the low-pass, a
+    small inverse FFT to 250 kHz, then as _StationDSP (FM, 171 kHz)."""
+
+    def __init__(self, front, delta_f, pipe=True):
+        self._front = front
+        fs, size, m = front.fs, front.size, front.bins
+        self._k0 = int(round(delta_f * size / fs))
+        self._resid = delta_f - self._k0 * fs / size      # finer than a bin
+        offs = (np.fft.fftfreq(m) * m).astype(int)
+        self._sel = (self._k0 + offs) % size
+        self._Hsel = front.H[offs % size] * np.float32(m / size)
+        self._first = front.overlap // front.decim        # first valid output
+        self._decim = front.decim
+        self._rs = Resampler(*front.resampler, fs_in=fs / front.decim) \
+            if front.resampler else None
+        self._rs_scale = (fs / front.decim) / _OUTPUT_RATE
+        self._prev_z = np.complex64(0)
+        self._open_pipe(pipe)
+
+    def demod(self, z):
+        front = self._front
+        X = front.spectrum(z)
+        y = np.fft.ifft(X[self._sel] * self._Hsel)[self._first:]
+        # Output n is absolute input sample t = start + (first + n) * decim.
+        # Taking the bins around k0 shifted each sample by k0 / size cycles
+        # per sample of its index within this FFT (t - start), not of t: the
+        # difference is k0 * start / size cycles, the same for the block. The
+        # part of the offset finer than a bin is shifted here as well.
+        t = front.start + (self._first + np.arange(len(y))) * self._decim
+        block_cycles = (self._k0 * front.start) % front.size / front.size
+        ph = -2.0 * np.pi * (block_cycles + np.mod(self._resid * t / front.fs, 1.0))
+        decimated = (y * np.exp(1j * np.mod(ph, 2 * np.pi))).astype(np.complex64)
+        if len(decimated) == 0:
+            return None
+        z_ext = np.concatenate([[self._prev_z], decimated])
+        disc = np.angle(z_ext[1:] * np.conj(z_ext[:-1])).astype(np.float32)
+        self._prev_z = decimated[-1]
+        if self._rs is not None:
+            disc = self._rs.process(disc) * np.float32(self._rs_scale)
+            if len(disc) == 0:
+                return None
+        return disc
+
+
+def make_stations(offsets, fs, pipe=True):
+    """The per-station DSP for these offsets (Hz from the centre), and the
+    block length (complex samples) they take."""
+    if fs >= WIDE_FROM:
+        front = _WideFront(fs)
+        return [_WideStation(front, df, pipe) for df in offsets], front.block
+    return [_StationDSP(df, fs, pipe) for df in offsets], _BLOCK
+
+
 def to_pcm(discriminated):
     """MPX (radians per sample) -> s16 samples for redsea."""
     return (discriminated * (32767.0 / np.pi)).clip(-32768, 32767).astype(np.int16)
@@ -224,13 +330,21 @@ _FORMATS = {"u8": (2, iq_from_u8), "s16": (4, iq_from_s16)}
 
 def demod_all(z, delta_f, fs=_FS):
     """A whole IQ capture -> one station's MPX at 171 kHz (offline)."""
-    dsp = _StationDSP(delta_f, fs, pipe=False)
-    parts = []
-    for i in range(0, len(z) - _BLOCK + 1, _BLOCK):
-        out = dsp.demod(z[i:i + _BLOCK])
-        if out is not None:
-            parts.append(out)
-    return np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
+    return demod_many(z, [delta_f], fs)[0]
+
+
+def demod_many(z, offsets, fs=_FS):
+    """A whole IQ capture -> each station's MPX at 171 kHz (offline; at a
+    high rate the FFT is shared, as in the Channelizer)."""
+    stations, block = make_stations(offsets, fs, pipe=False)
+    parts = [[] for _ in stations]
+    for i in range(0, len(z) - block + 1, block):
+        zb = z[i:i + block]
+        for st, out in zip(stations, parts):
+            m = st.demod(zb)
+            if m is not None:
+                out.append(m)
+    return [np.concatenate(p) if p else np.zeros(0, dtype=np.float32) for p in parts]
 
 
 class Channelizer(threading.Thread):
@@ -249,10 +363,8 @@ class Channelizer(threading.Thread):
         self._src = rtl_sdr_stdout
         self._probe = probe          # dongle_check.Probe: sees the first seconds
         self._bytes_per_sample, self._to_iq = _FORMATS[fmt]
-        self._stations = [
-            _StationDSP(freq_hz - center_freq_hz, fs)
-            for freq_hz in frequencies_hz
-        ]
+        self._stations, self._block = make_stations(
+            [freq_hz - center_freq_hz for freq_hz in frequencies_hz], fs)
 
     @property
     def pipe_read_fds(self) -> list:
@@ -261,7 +373,7 @@ class Channelizer(threading.Thread):
 
     def run(self) -> None:
         log.info("Channelizer started (%d station(s))", len(self._stations))
-        bytes_per_block = _BLOCK * self._bytes_per_sample
+        bytes_per_block = self._block * self._bytes_per_sample
         try:
             while True:
                 raw = self._src.read(bytes_per_block)

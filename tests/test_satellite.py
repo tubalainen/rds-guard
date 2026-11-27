@@ -150,7 +150,9 @@ def test_receivers_yml():
     tak, other = rs
     assert tak.id == "tak" and tak.frequencies == ["103.5M", "102.9M"]
     assert tak.gain == "auto" and tak.ppm == "auto"
-    assert tak.center_hz == 103_200_000
+    # Not the midpoint (103.2): there 102.9 and 103.5 would sit on each
+    # other's mirror
+    assert tak.center_hz == 103_075_000
     assert other.id == "102" and other.gain == 19.7 and other.ppm == 12
     assert other.center_hz == 99_100_000 + receivers.SINGLE_OFFSET_HZ
 

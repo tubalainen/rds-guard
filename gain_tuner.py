@@ -181,9 +181,12 @@ def calibrate(receiver, index, gains, capture_fn=None, quality_fn=redsea_quality
     """Measure ppm and gain for one receiver. Returns a dict: gain, ppm,
     stations ({freq: groups/s at the chosen gain}), steps (the sweep).
     radio: sdr.RtlSdr (default, at index) or sdr.Airspy (no ppm)."""
-    from channelizer import demod_all
+    from channelizer import WIDE_FROM, demod_many
 
     radio = radio or sdr.RtlSdr(index)
+    # At 6 MS/s and more a capture is decoded while it comes in (8 s at
+    # 10 MS/s would be 320 MB of IQ)
+    streaming = capture_fn is None and radio.fs >= WIDE_FROM
     if capture_fn is None:
         capture_fn = (lambda i, c, g, p, s: sdr.capture(radio, c, g, p, s,
                                                         run=subprocess.run))
@@ -196,7 +199,18 @@ def calibrate(receiver, index, gains, capture_fn=None, quality_fn=redsea_quality
 
     def mpx_of(raw):
         z = radio.iq(raw)
-        return {f: demod_all(z, hz - center, radio.fs) for f, hz in freqs}
+        return dict(zip(dict(freqs), demod_many(z, [hz - center for _, hz in freqs],
+                                                 radio.fs)))
+
+    def measure(g, p, seconds):
+        """(clip fraction, level dBFS, {freq: MPX}) of a capture."""
+        if streaming:
+            clip, level, mpxs = sdr.capture_measure(radio, center, g, p, seconds,
+                                                     [hz - center for _, hz in freqs])
+            return clip, level, dict(zip(dict(freqs), mpxs))
+        raw = capture_fn(index, center, g, p, seconds)
+        return (radio.clip_fraction(raw), round(level_dbfs(radio.iq(raw)), 1),
+                mpx_of(raw))
 
     def ppm_estimates(mpx, label):
         """(freq, ppm) for every station clear enough to measure on."""
@@ -233,8 +247,8 @@ def calibrate(receiver, index, gains, capture_fn=None, quality_fn=redsea_quality
     # Gain fixed, ppm automatic: measure ppm at that gain, and stop
     if not want_gain:
         if want_ppm:
-            raw = capture_fn(index, center, gain or start_gain, 0, PPM_SEC)
-            ppm = settle_ppm(ppm_estimates(mpx_of(raw), "fixed gain"))
+            ppm = settle_ppm(ppm_estimates(measure(gain or start_gain, 0, PPM_SEC)[2],
+                                           "fixed gain"))
         return {"gain": gain, "ppm": ppm or 0, "stations": {}, "steps": []}
 
     # 1. sweep, without ppm correction unless ppm is fixed (rtl_sdr takes
@@ -253,14 +267,11 @@ def calibrate(receiver, index, gains, capture_fn=None, quality_fn=redsea_quality
     steps = []
     estimates = []
     for i, g in enumerate(gains, 1):
-        raw = capture_fn(index, center, g, sweep_ppm, SWEEP_SEC)
-        clip = radio.clip_fraction(raw)
-        mpx = mpx_of(raw)
+        clip, level, mpx = measure(g, sweep_ppm, SWEEP_SEC)
         snrs = {f: tone_snr_db(m) for f, m in mpx.items()}
         if want_ppm and clip <= CLIP_LIMIT:
             estimates += ppm_estimates(mpx, g)
-        steps.append({"gain": g, "clip": clip, "snr": snrs,
-                      "level": round(level_dbfs(radio.iq(raw)), 1)})
+        steps.append({"gain": g, "clip": clip, "snr": snrs, "level": level})
         progress(f"[{rid}] {i}/{len(gains)} gain {g:4.1f} dB: clip {clip * 100:.3f} %, "
                  + ", ".join(f"{f} pilot {s[0]:.0f} dB RDS {s[1]:.0f} dB"
                              for f, s in snrs.items()))
@@ -292,10 +303,9 @@ def calibrate(receiver, index, gains, capture_fn=None, quality_fn=redsea_quality
     best = sorted(clean, key=lambda s: (-s["worst_rds"], s["gain"]))[:VERIFY_STEPS]
     results = []
     for s in sorted(best, key=lambda s: s["gain"]):
-        raw = capture_fn(index, center, s["gain"], ppm, VERIFY_SEC)
         from channelizer import to_pcm
         stations = {}
-        for f, m in mpx_of(raw).items():
+        for f, m in measure(s["gain"], ppm, VERIFY_SEC)[2].items():
             gps, bler = quality_fn(to_pcm(m), VERIFY_SEC)
             stations[f] = gps
         results.append({"gain": s["gain"], "stations": stations})
@@ -347,9 +357,13 @@ class Tuner:
     def _stored(self, r):
         import event_store
         cal = event_store.get_calibration(r.serial)
+        result = (cal or {}).get("result") or {}
         if cal and sorted(cal["frequencies"]) == sorted(r.frequencies) and \
-                ((cal.get("result") or {}).get("stages") or {}) == _stages(r):
-            return cal                 # (an Airspy's stages by hand: the same ones)
+                (result.get("stages") or {}) == _stages(r) and \
+                result.get("sample_rate") == getattr(r, "sample_rate", None):
+            # (an Airspy's stages by hand and sample rate: the same ones; at
+            # 10 MS/s the ADC sees far more of the band than at 2.5)
+            return cal
         return None
 
     def settings(self, r, radio=None):
@@ -490,7 +504,7 @@ class Tuner:
                 res["gain"] if not _gain_fixed(r) else None,
                 res["ppm"] if r.ppm == "auto" else None,
                 {"stations": res.get("stations") or {}, "steps": res.get("steps") or [],
-                 "stages": _stages(r),
+                 "stages": _stages(r), "sample_rate": getattr(r, "sample_rate", None),
                  "dead": res.get("dead") or []},
                 why, at=self._now())
             log.info("[%s] calibrated: gain %s, ppm %s", r.id, res.get("gain"), res.get("ppm"))
@@ -507,7 +521,7 @@ class Tuner:
             p.resume()
 
     def _calibrate_dongle(self, r, want_gain=True, want_ppm=True):
-        radio = sdr.open(r.serial, getattr(r, "stages", None))
+        radio = sdr.for_receiver(r)
         radio.prepare()
         gains = radio.gains or FALLBACK_GAINS
         fixed_gain = r.gain if r.gain != "auto" else None
@@ -557,7 +571,7 @@ def main(argv=None):
     else:
         sys.exit(f"Serial {args.serial} is not in receivers.yml: give --frequencies")
     try:
-        radio = sdr.open(r.serial, r.stages)
+        radio = sdr.for_receiver(r)
         radio.prepare()
         gains = radio.gains or FALLBACK_GAINS
     except dongles.DongleError as e:
@@ -571,7 +585,8 @@ def main(argv=None):
         event_store.init_db(config.DB_PATH)
         event_store.save_calibration(r.serial, r.frequencies, res["gain"], res["ppm"],
                                      {"stations": res["stations"], "steps": res["steps"],
-                                      "stages": _stages(r)},
+                                      "stages": _stages(r),
+                                      "sample_rate": getattr(r, "sample_rate", None)},
                                      "by hand")
         print("Saved: the satellite uses it from its next start.", file=sys.stderr)
 
