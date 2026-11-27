@@ -86,3 +86,54 @@ def test_the_same_radiotext_in_the_next_announcement_is_kept(store, engine):
     import json
     rows, _ = store.query_events()
     assert [json.loads(r["radiotext"]) for r in rows] == [["Olycka E18"], ["Olycka E18"]]
+
+
+# P4 switches PI between the shared national programme (0xE224) and its
+# regional PI (0xE824), also in the middle of an announcement.
+
+def flip(station, pi, ts, **fields):
+    rg.process_group(station, {"pi": pi, "timestamp": ts, **fields})
+
+
+def test_an_announcement_that_ends_on_the_other_pi_ends(store, engine):
+    flip(engine, "0xE824", "2026-11-27T10:00:00", ta=False)
+    flip(engine, "0xE224", "2026-11-27T19:00:00", ta=False)
+    flip(engine, "0xE824", "2026-11-27T22:00:00", ta=True)     # regional break-in
+    flip(engine, "0xE224", "2026-11-27T22:02:00", ta=False)    # back to national
+    [ev] = store.query_events()[0]
+    assert ev["state"] == "end" and ev["pi"] == "0xE824" and ev["duration_sec"] == 120
+    assert not engine.engine.busy()
+
+    flip(engine, "0xE824", "2026-11-28T01:00:00", ta=True)     # the next one is seen
+    flip(engine, "0xE224", "2026-11-28T01:01:00", ta=False)
+    evs = store.query_events()[0]
+    assert len(evs) == 2 and all(e["state"] == "end" for e in evs)
+
+
+def test_a_pi_switch_mid_announcement_keeps_the_event_and_its_text(store, engine):
+    flip(engine, "0xE224", "2026-11-27T22:00:00", ta=False)
+    flip(engine, "0xE224", "2026-11-27T22:00:05", ta=True)
+    flip(engine, "0xE824", "2026-11-27T22:00:10", ta=True)     # same announcement
+    flip(engine, "0xE824", "2026-11-27T22:00:20", group="2A", radiotext="Olycka på E18")
+    flip(engine, "0xE824", "2026-11-27T22:01:05", ta=False)
+    [ev] = store.query_events()[0]
+    import json
+    assert ev["state"] == "end" and ev["pi"] == "0xE224" and ev["duration_sec"] == 60
+    assert json.loads(ev["radiotext"]) == ["Olycka på E18"]
+
+
+def test_an_emergency_that_ends_on_the_other_pi_ends(store, engine):
+    flip(engine, "0xE824", "2026-11-27T10:00:00", prog_type="News")
+    flip(engine, "0xE824", "2026-11-27T10:00:05", prog_type="Alarm")
+    flip(engine, "0xE224", "2026-11-27T10:01:05", prog_type="Pop music")
+    [ev] = store.query_events()[0]
+    assert ev["type"] == "emergency" and ev["state"] == "end"
+
+
+def test_a_station_gone_silent_ends_its_announcement(store, engine):
+    flip(engine, "0xE824", "2026-11-27T10:00:00", ta=False)
+    flip(engine, "0xE824", "2026-11-27T10:00:05", ta=True)
+    assert engine.engine.end_silent(200)
+    [ev] = store.query_events()[0]
+    assert ev["state"] == "end"
+    assert not engine.engine.busy()
