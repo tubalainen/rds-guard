@@ -108,6 +108,7 @@ def public_node(node, pipeline=None):
         "uptime_sec": status.get("uptime_sec"),
         "pipeline": status.get("pipeline"),
         "stations": status.get("stations") or [],
+        "receivers": status.get("receivers") or [],
         "queue_depth": status.get("queue_depth"),
         "location": store.node_location(node),
         "location_set": node.get("location"),

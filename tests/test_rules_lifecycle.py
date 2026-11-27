@@ -8,18 +8,16 @@ import rds_guard as rg
 
 
 @pytest.fixture
-def engine(store, monkeypatch):
+def engine(store):
     store.enable_outbox()
-    monkeypatch.setattr(rg, "state", rg.StationState())
-    monkeypatch.setattr(rg, "broadcast_ws", lambda msg: None)
-    return rg.RulesEngine(recorder=None, frequency="103.5M")
+    return rg.Station("tak", "103.5M")
 
 
 PI = "0xE824"
 
 
-def group(engine, ts, **fields):
-    rg.process_group(None, {"pi": PI, "timestamp": ts, **fields}, _rules_engine=engine)
+def group(station, ts, **fields):
+    rg.process_group(station, {"pi": PI, "timestamp": ts, **fields})
 
 
 def outbox(store):
@@ -36,6 +34,7 @@ def test_traffic_announcement(store, engine):
     [ev] = store.query_events()[0]
     assert ev["type"] == "traffic" and ev["state"] == "start"
     assert ev["frequency"] == "103.5M" and ev["event_uid"]
+    assert ev["receiver"] == "tak"
     eid = ev["id"]
     assert outbox(store) == [("event", eid)]                # sent at once
 

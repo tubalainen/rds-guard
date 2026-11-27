@@ -4,7 +4,6 @@ import json
 
 import pytest
 
-import event_store
 import geolocate
 import notify_rules
 from aggregator import import_satellite as imp
@@ -24,8 +23,9 @@ def _area():
 
 
 @pytest.fixture
-def satellite(store, tmp_path):
-    """A satellite database the way the satellite itself writes it."""
+def satellite(legacy_db, tmp_path):
+    """A satellite database as a satellite before v1.0 wrote it."""
+    store = legacy_db
     audio = tmp_path / "sat-audio"
     audio.mkdir()
     # 1: traffic with audio, transcription, a map incident and an area warning
@@ -59,8 +59,7 @@ def satellite(store, tmp_path):
     store.create_rule(notify_rules.validate(
         {"name": "Nattlarm", "enabled": True, "event_types": ["emergency"],
          "priority": "critical", "topic": "natt"}))
-    conn = event_store._conn()
-    conn.commit()
+    conn = store._conn()
     uids = {r["id"]: r["event_uid"] for r in conn.execute("SELECT id, event_uid FROM events")}
     return {"db": str(tmp_path / "events.db"), "audio": audio, "ids": (a, b, c), "uids": uids}
 
@@ -134,8 +133,8 @@ def test_events_the_uplink_delivered_are_skipped_with_their_map(agg_store, satel
     assert agg_store.get_event(satellite["uids"][a])["rev"] == 3
 
 
-def test_events_without_uid_get_a_stable_one(agg_store, satellite):
-    conn = event_store._conn()
+def test_events_without_uid_get_a_stable_one(agg_store, satellite, legacy_db):
+    conn = legacy_db._conn()
     conn.execute("UPDATE events SET event_uid = NULL")
     conn.commit()
     node, _ = agg_store.create_node("docker01")
@@ -178,9 +177,10 @@ def test_command_line(agg_store, satellite, monkeypatch, capsys):
     json.dumps(agg_store.list_nodes())          # serialisable as before
 
 
-def test_events_older_than_the_retention_are_skipped(agg_store, satellite, monkeypatch):
+def test_events_older_than_the_retention_are_skipped(agg_store, satellite, monkeypatch,
+                                                     legacy_db):
     from aggregator import config
-    conn = event_store._conn()
+    conn = legacy_db._conn()
     a = satellite["ids"][0]
     conn.execute("UPDATE events SET created_at = '2020-01-01T00:00:00' WHERE id = ?", (a,))
     conn.commit()

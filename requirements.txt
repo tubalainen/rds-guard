@@ -1,12 +1,6 @@
-paho-mqtt>=2.2.0,<3.0.0
-aiohttp>=3.14.5,<4.0.0
-faster-whisper>=1.2.1
-# PyAV 19 removed av.open(metadata_errors=...), which faster-whisper 1.2.1
-# still passes when decoding audio: local transcription fails on every clip.
-av>=18.0.0,<19
+# The satellite: radio, recording and the uplink to the aggregator.
+# (The aggregator's own packages are in aggregator/requirements.txt.)
 requests>=2.34.2
 numpy>=2.4.6
-# Time zone data for push rule times (zoneinfo), in case the image has none
-tzdata>=2026.6
-# Claude API for the optional map engine (GEO_ENGINE=claude)
-anthropic>=2.14.0,<3
+# receivers.yml
+PyYAML>=6.0.2

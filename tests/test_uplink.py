@@ -63,7 +63,6 @@ def _traffic_event(store, tmp_path):
     store.end_event(event_id, "2026-11-25T10:01:00", 60, ["Olycka på E4"])
     (tmp_path / f"{event_id}.ogg").write_bytes(b"OggS" + b"\0" * 100)
     store.update_event_audio(event_id, f"{event_id}.ogg")
-    store.update_event_transcription(event_id, "secret text", status="done")
     return event_id
 
 
@@ -85,8 +84,6 @@ def test_full_event_is_sent_once_then_audio(store, link, tmp_path):
     assert body["long_ps"] == "P4 Test Long"
     assert body["prog_type"] == "Information"
     assert body["rev"] > 0
-    # Raw data only — never the transcription
-    assert "secret text" not in repr(body)
     assert not any("transcri" in k for k in body)
 
     hdrs = calls[0]["headers"]
@@ -96,6 +93,8 @@ def test_full_event_is_sent_once_then_audio(store, link, tmp_path):
     assert calls[1]["data"].startswith(b"OggS")
     assert calls[1]["headers"]["Content-Type"] == "audio/ogg"
     assert store.outbox_depth() == 0
+    # Delivered: kept SATELLITE_KEEP_DAYS, then removed by the purge
+    assert store.get_event(event_id)["audio_delivered_at"]
 
 
 def test_network_error_keeps_queue(store, link, tmp_path):

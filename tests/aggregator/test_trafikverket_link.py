@@ -6,7 +6,7 @@ import time
 import pytest
 
 import geolocate as geo
-import notifier
+from aggregator import notifier
 import notify_rules
 import trafikverket as trv
 
@@ -273,26 +273,6 @@ def test_newly_linked_incident_gets_no_update(store, pushed_incident):
 
 
 # ---------------------------------------------------------------- API
-
-async def test_incidents_api_carries_trafikverket(aiohttp_client, store):
-    import web_server
-    store.trv.apply([situation(devs=[
-        deviation("D1"),
-        deviation("ALG", MessageType="Hinder", MessageCode="Djur på vägen",
-                  Message="Älg på vägen.", Geometry={"Point": {"WGS84": "POINT (13.9 59.6 0)"}})])])
-    eid = radio_event(store)
-    place(store, eid)
-    client = await aiohttp_client(web_server.create_app())
-    data = await (await client.get("/api/incidents")).json()
-    [inc] = data["incidents"]
-    assert inc["trafikverket"]["id"] == "D1" and inc["mentions"]
-    assert inc["trafikverket"]["versions"]
-    layer = await (await client.get("/api/trafikverket?layer=1")).json()
-    assert [d["id"] for d in layer["deviations"]] == ["ALG"]
-    assert layer["deviations"][0]["kinds"] == ["obstacle"]
-    ev = await (await client.get(f"/api/events/{eid}")).json()
-    assert ev["incidents"][0]["trafikverket"]["id"] == "D1"
-
 
 def test_current_deviation_keeps_the_incident_on_the_map(store):
     store.trv.apply([situation()])

@@ -152,6 +152,9 @@ class Uplink:
         self._last_error = None
         self._verify = verify_code(self._join_id) if self._join_id else None
         self._threads = []
+        # Called with the aggregator's commands[] from a heartbeat answer
+        # (e.g. recalibrate a receiver); set by the satellite
+        self.on_commands = None
 
     @staticmethod
     def _own_identity():
@@ -292,6 +295,9 @@ class Uplink:
 
         if outcome in (OK, DROP) and kind != event_store.OUTBOX_EVENT:
             event_store.outbox_ack(item["id"])
+            if outcome == OK and kind == event_store.OUTBOX_AUDIO and item.get("event_id"):
+                # Kept SATELLITE_KEEP_DAYS, then removed
+                event_store.mark_audio_delivered(item["event_id"])
         return outcome
 
     def _send_event(self, item):
@@ -350,8 +356,22 @@ class Uplink:
             body["queue_depth"] = event_store.outbox_depth()
         except Exception:
             pass
-        return self._request("POST", "/heartbeat", json_body=body,
-                             timeout=(10, 15))
+        resp, outcome = self._send("POST", "/heartbeat", json_body=body,
+                                   timeout=(10, 15))
+        if resp is None:
+            return outcome
+        outcome = self._classify(resp, "POST", "/heartbeat")
+        if outcome == OK and self.on_commands is not None:
+            try:
+                commands = (resp.json() or {}).get("commands") or []
+            except Exception:
+                commands = []
+            if commands:
+                try:
+                    self.on_commands(commands)
+                except Exception:
+                    log.exception("Uplink: could not run the aggregator's commands")
+        return outcome
 
     def _send(self, method, path, json_body=None, data=None,
               content_type=None, timeout=(10, 30)):

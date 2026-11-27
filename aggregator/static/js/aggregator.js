@@ -66,11 +66,29 @@ const Aggregator = (() => {
 
     function nodeCard(n) {
         const state = !n.enabled ? ['', 'Inaktiverad'] : (n.online ? ['ok', 'Online'] : ['warn', 'Offline']);
-        const stations = (n.stations || []).map((s) => [s.ps || s.pi || 'ingen station än',
+        const stationLine = (s) => [s.ps || s.pi || 'ingen station än',
             RDSUI.fmtFreq(s.frequency), s.pi && s.ps ? `PI ${s.pi}` : '',
             s.groups_per_sec != null ? `${s.groups_per_sec} grp/s` : '',
             s.ta ? 'TA pågår' : (s.tp ? 'TP' : '')]
-            .filter(Boolean).join(' · '));
+            .filter(Boolean).join(' · ');
+        const stations = (n.stations || []).map(stationLine);
+        const recState = { running: ['ok', 'kör'], starting: ['warn', 'startar'], paused: ['warn', 'kalibreras'],
+            error: ['bad', 'fel'], stopped: ['warn', 'stoppad'] };
+        const receivers = (n.receivers || []).map((r) => {
+            const [cls, label] = recState[r.state] || ['warn', r.state || '?'];
+            const tune = [r.gain != null ? `gain ${r.gain} dB${r.gain_mode === 'manual' ? ' (fast)' : ''}` : '',
+                r.ppm != null ? `${r.ppm} ppm${r.ppm_mode === 'manual' ? ' (fast)' : ''}` : '',
+                r.calibrated_at ? `kalibrerad ${ago(r.calibrated_at)}` : (r.calibration ? r.calibration : '')]
+                .filter(Boolean).join(' · ');
+            return `<div class="small" style="border-left:2px solid var(--border-strong);padding-left:8px;display:flex;flex-direction:column;gap:2px">
+                <div><span class="dot ${cls}"></span> <b>${esc(r.name || r.id || r.serial || 'mottagare')}</b>
+                    <span class="muted">${esc(r.serial ? `SN ${r.serial}` : '')} · ${esc(label)}</span></div>
+                ${tune ? `<div class="muted">${esc(tune)}</div>` : ''}
+                ${(r.stations || []).map((s) => `<div>${esc(stationLine(s))}</div>`).join('')}
+                ${r.error ? `<div style="color:var(--warn)">${esc(r.error)}</div>` : ''}
+                ${r.gain_mode !== 'manual' && r.serial ? `<div><button class="btn small" type="button" data-action="recalibrate" data-receiver="${esc(r.id || r.serial)}">Kalibrera om</button></div>` : ''}
+            </div>`;
+        });
         const located = n.located ? `${n.located.name} (${n.located.lat.toFixed(3)}, ${n.located.lon.toFixed(3)})` : '';
         const place = n.location
             ? (located ? `Plats: ${n.location} → ${located}` : `Plats: ${n.location} – hittades inte i ortregistret`)
@@ -94,7 +112,8 @@ const Aggregator = (() => {
             ? ` <span class="small muted">(${esc(n.reported_name)})</span>` : ''}</h2>
                 <span class="pill ${state[0]}">${state[1]}</span>
             </div>
-            <div class="small">${stations.length ? stations.map((s) => `<div>${esc(s)}</div>`).join('') : '<span class="muted">Inga stationer rapporterade än</span>'}</div>
+            ${receivers.length ? `<div style="display:flex;flex-direction:column;gap:8px">${receivers.join('')}</div>`
+        : `<div class="small">${stations.length ? stations.map((s) => `<div>${esc(s)}</div>`).join('') : '<span class="muted">Inga stationer rapporterade än</span>'}</div>`}
             <div class="small">${esc(place)}${placeFrom ? ` <span class="muted">(${placeFrom})</span>` : ''}</div>
             <div class="small muted">${esc(meta.join(' · '))}</div>
             ${warn.length ? `<div class="small" style="color:var(--warn)">${esc(warn.join(' · '))}</div>` : ''}
@@ -252,6 +271,10 @@ const Aggregator = (() => {
                     if (value === null) return;
                     await api('PATCH', `/nodes/${id}`, { location: value.trim() || null });
                     toast('Platsen är sparad');
+                } else if (btn.dataset.action === 'recalibrate') {
+                    if (!window.confirm(`Kalibrera om gain och ppm för mottagaren ”${btn.dataset.receiver}”? Den är ur drift i ungefär en och en halv minut (aldrig mitt i en sändning).`)) return;
+                    await api('POST', `/nodes/${id}/recalibrate`, { receiver: btn.dataset.receiver });
+                    toast('Kalibreringen startar vid nodens nästa hjärtslag');
                 } else if (btn.dataset.action === 'toggle') {
                     await api('PATCH', `/nodes/${id}`, { enabled: btn.dataset.enabled !== 'true' });
                 } else if (btn.dataset.action === 'remove') {

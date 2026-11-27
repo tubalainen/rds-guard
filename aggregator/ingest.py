@@ -176,17 +176,12 @@ def _num(val):
     return val
 
 
-def clean_heartbeat(body):
-    """Reduce a heartbeat body to known, length-capped fields."""
-    if not isinstance(body, dict):
-        raise ValidationError("body must be a JSON object")
-    pipe = body.get("pipeline") if isinstance(body.get("pipeline"), dict) else {}
-    stations = body.get("stations") if isinstance(body.get("stations"), list) else []
-    clean_stations = []
-    for st in stations[:8]:
+def _clean_stations(stations, limit=8):
+    out = []
+    for st in (stations if isinstance(stations, list) else [])[:limit]:
         if not isinstance(st, dict):
             continue
-        clean_stations.append({
+        out.append({
             "frequency": _cap(st.get("frequency"), 16),
             "pi": _cap(st.get("pi"), 16),
             "ps": _cap(st.get("ps"), 64),
@@ -197,6 +192,40 @@ def clean_heartbeat(body):
             "groups_per_sec": _num(st.get("groups_per_sec")),
             "groups_total": _num(st.get("groups_total")),
         })
+    return out
+
+
+def _clean_receivers(receivers):
+    """The satellite's receivers (one per RTL-SDR, protocol 2, v1.0)."""
+    out = []
+    for r in (receivers if isinstance(receivers, list) else [])[:8]:
+        if not isinstance(r, dict):
+            continue
+        quality = r.get("quality") if isinstance(r.get("quality"), dict) else {}
+        out.append({
+            "id": _cap(r.get("id"), 32),
+            "serial": _cap(r.get("serial"), 32),
+            "name": _cap(r.get("name"), 32),
+            "state": _cap(r.get("state"), 32),
+            "error": _cap(r.get("error"), 256),
+            "gain": _num(r.get("gain")),
+            "gain_mode": _cap(r.get("gain_mode"), 16),
+            "ppm": _num(r.get("ppm")),
+            "ppm_mode": _cap(r.get("ppm_mode"), 16),
+            "calibrated_at": _cap(r.get("calibrated_at"), 32),
+            "calibration": _cap(r.get("calibration"), 64),
+            "quality": {_cap(k, 16): _num(v) for k, v in list(quality.items())[:8]},
+            "stations": _clean_stations(r.get("stations"), 4),
+        })
+    return out
+
+
+def clean_heartbeat(body):
+    """Reduce a heartbeat body to known, length-capped fields."""
+    if not isinstance(body, dict):
+        raise ValidationError("body must be a JSON object")
+    pipe = body.get("pipeline") if isinstance(body.get("pipeline"), dict) else {}
+    clean_stations = _clean_stations(body.get("stations"))
     sent_at = body.get("sent_at")
     if not isinstance(sent_at, str) or not _TS_RE.match(sent_at):
         sent_at = None
@@ -213,6 +242,7 @@ def clean_heartbeat(body):
                 "error": _cap(pipe.get("error"), 256),
             },
             "stations": clean_stations,
+            "receivers": _clean_receivers(body.get("receivers")),
             "queue_depth": _num(body.get("queue_depth")),
             # "Ort, Län" the satellite owner gave (NODE_LOCATION); the
             # owner of the aggregator can set another under Admin -> Noder

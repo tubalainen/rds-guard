@@ -26,14 +26,10 @@ import urllib.request
 sys.path.insert(0, "/app")
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-try:   # the satellite's settings (repository or satellite image) …
-    import config  # noqa: E402
-    _HOST = f"http://127.0.0.1:{config.WEB_UI_PORT}"
-    _EVENTS = "/api/events"
-except ImportError:   # … or the aggregator's (aggregator image)
-    from aggregator import config  # noqa: E402
-    _HOST = f"http://127.0.0.1:{config.WEB_PORT}"
-    _EVENTS = "/api/v1/events"
+from aggregator import config  # noqa: E402  (the aggregator's settings)
+
+_HOST = f"http://127.0.0.1:{config.WEB_PORT}"
+_EVENTS = "/api/v1/events"
 import geo_service  # noqa: E402
 import geolocate  # noqa: E402
 
@@ -60,7 +56,7 @@ def describe(placements):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--limit", type=int, default=40)
-    ap.add_argument("--location", default=getattr(config, "NODE_LOCATION", ""),
+    ap.add_argument("--location", default=os.environ.get("NODE_LOCATION", ""),
                     help="'Ort, Län' (default: NODE_LOCATION)")
     ap.add_argument("--api", default=_HOST,
                     help="the installation's web address (default: this container)")

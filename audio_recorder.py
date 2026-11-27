@@ -1,13 +1,13 @@
-"""Audio Recorder — captures FM audio during RDS events.
+"""Audio recorder: captures a station's FM audio during a broadcast.
 
-Records raw PCM from the AudioTee, then saves to WAV + OGG via ffmpeg
-and enqueues transcription.  Thread-safe: feed() is called from the
-AudioTee thread, start/stop from the pipeline callback thread.
+Collects raw PCM from the AudioTee and, when the broadcast ends, encodes it
+to OGG/Opus in the spool folder and queues it for the aggregator, which
+transcribes it. feed() is called from the AudioTee thread, start/stop from
+the station's redsea reader thread.
 """
 
 import io
 import logging
-import os
 import subprocess
 import threading
 import time
@@ -17,25 +17,24 @@ import event_store
 
 log = logging.getLogger("rds-guard")
 
+# The longest recording; an Opus clip of this length stays well under the
+# aggregator's 8 MiB limit
+MAX_RECORDING_SEC = 1200
+
 
 class AudioRecorder:
-    """Records FM audio during active RDS events."""
+    """Records one station's audio during its broadcasts."""
 
-    # Raw PCM parameters (must match rtl_fm output)
-    SAMPLE_RATE = 171_000   # Hz (from rtl_fm -s 171k)
+    SAMPLE_RATE = 171_000   # Hz (the channelizer's PCM rate)
     SAMPLE_WIDTH = 2        # bytes (signed 16-bit)
-    CHANNELS = 1            # mono
+    CHANNELS = 1
 
-    # Recording limits
-    MIN_DURATION_SEC = 10   # discard recordings shorter than 10s
+    MIN_DURATION_SEC = 10   # shorter recordings are discarded
 
-    def __init__(self, audio_dir, transcriber, on_transcription_complete,
-                 max_duration_sec=600):
-        self._audio_dir = Path(audio_dir)
-        self._audio_dir.mkdir(parents=True, exist_ok=True)
-        self._transcriber = transcriber
-        self._on_transcription_complete = on_transcription_complete
-        self._max_duration_sec = max_duration_sec
+    def __init__(self, spool_dir, max_duration_sec=600):
+        self._dir = Path(spool_dir)
+        self._dir.mkdir(parents=True, exist_ok=True)
+        self._max_duration_sec = min(max_duration_sec, MAX_RECORDING_SEC)
         self._lock = threading.Lock()
         self._recording = False
         self._buffer = None
@@ -49,11 +48,9 @@ class AudioRecorder:
     def start(self, event_id):
         """Begin recording for the given event."""
         with self._lock:
-            # If already recording (shouldn't happen), finalize the old one
             if self._recording:
-                log.warning("Recording already active for event %s, "
-                            "finalizing before starting event %s",
-                            self._event_id, event_id)
+                log.warning("Recording already active for event %s, finalizing "
+                            "before starting event %s", self._event_id, event_id)
                 self._finalize()
             self._recording = True
             self._buffer = io.BytesIO()
@@ -62,13 +59,11 @@ class AudioRecorder:
             log.info("Recording started for event %d", event_id)
 
     def feed(self, chunk):
-        """Append a PCM chunk (called from AudioTee thread)."""
+        """Append a PCM chunk (AudioTee thread)."""
         with self._lock:
             if not self._recording or self._buffer is None:
                 return
-            # Safety: enforce max duration
-            elapsed = time.time() - self._started_at
-            if elapsed > self._max_duration_sec:
+            if time.time() - self._started_at > self._max_duration_sec:
                 log.warning("Recording hit max duration (%ds), finalizing",
                             self._max_duration_sec)
                 self._finalize()
@@ -76,106 +71,53 @@ class AudioRecorder:
             self._buffer.write(chunk)
 
     def stop(self):
-        """Stop recording and finalize.
-
-        Returns True if a valid recording was captured (will be saved
-        and transcribed), False if recording was discarded (too short
-        or not active).
-        """
+        """Stop and save. True if a recording will be saved."""
         with self._lock:
             if not self._recording:
                 return False
             return self._finalize()
 
     def _finalize(self):
-        """Write WAV, enqueue transcription.  Must hold self._lock.
-
-        Returns True if recording is valid and will be saved, False
-        if discarded.
-        """
+        """Must hold self._lock."""
         self._recording = False
         raw_pcm = self._buffer.getvalue()
         self._buffer = None
         event_id = self._event_id
         self._event_id = None
         elapsed = time.time() - self._started_at
-
-        if elapsed < self.MIN_DURATION_SEC or len(raw_pcm) == 0:
+        if elapsed < self.MIN_DURATION_SEC or not raw_pcm:
             log.info("Recording too short (%.1fs), discarding", elapsed)
             return False
-
         log.info("Recording stopped for event %d (%.1fs, %d bytes)",
                  event_id, elapsed, len(raw_pcm))
-
-        # Save in background thread to avoid blocking the tee
-        threading.Thread(
-            target=self._save_and_transcribe,
-            args=(event_id, raw_pcm, elapsed),
-            daemon=True,
-        ).start()
+        threading.Thread(target=self._save, args=(event_id, raw_pcm),
+                         daemon=True).start()
         return True
 
-    def _save_and_transcribe(self, event_id, raw_pcm, duration):
-        """Downsample, save WAV + OGG, run transcription."""
+    def _save(self, event_id, raw_pcm):
         try:
-            wav_path = self._audio_dir / f"{event_id}.wav"
-            ogg_path = self._audio_dir / f"{event_id}.ogg"
-
-            # 1. Convert raw PCM to 16 kHz WAV via ffmpeg
-            self._ffmpeg_convert(raw_pcm, wav_path, output_format="wav")
-
-            # 2. Convert raw PCM to OGG/Opus via ffmpeg
-            self._ffmpeg_convert(raw_pcm, ogg_path, output_format="ogg")
-
-            # 3. Update event with audio path
-            audio_rel = f"{event_id}.ogg"
-            event_store.update_event_audio(event_id, audio_rel)
-
-            log.info("Audio saved for event %d: %s + %s",
-                     event_id, wav_path.name, ogg_path.name)
-
-            # 4. Enqueue transcription (if transcriber is available)
-            if self._transcriber is not None:
-                event_store.update_event_transcription_status(
-                    event_id, "transcribing")
-                self._transcriber.enqueue(
-                    wav_path, event_id, self._on_transcription_complete)
-            else:
-                # Transcription disabled
-                event_store.update_event_transcription_status(
-                    event_id, None)
-
+            name = f"{event_id}.ogg"
+            encode_ogg(raw_pcm, self._dir / name, self.SAMPLE_RATE)
+            event_store.update_event_audio(event_id, name)
+            log.info("Audio saved for event %d: %s", event_id, name)
         except Exception:
             log.exception("Failed to save audio for event %d", event_id)
-            event_store.update_event_transcription_status(event_id, "error")
 
-    def _ffmpeg_convert(self, raw_pcm, output_path, output_format):
-        """Convert raw PCM to a file via ffmpeg subprocess."""
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "s16le",
-            "-ar", str(self.SAMPLE_RATE),
-            "-ac", str(self.CHANNELS),
-            "-i", "pipe:0",
-            # The PCM is the raw FM multiplex: undo the 50 µs pre-emphasis
-            # used in Europe (it boosts treble/hiss) and keep only the speech
-            # band, dropping hum and the 19 kHz pilot before downsampling.
-            # Clearer audio for both playback and Whisper.
-            "-af", "aemphasis=type=50fm:mode=reproduction,"
-                   "highpass=f=80,lowpass=f=7000",
-            "-ar", "16000",
-        ]
-        if output_format == "ogg":
-            cmd.extend(["-c:a", "libopus", "-b:a", "48k"])
-        cmd.append(str(output_path))
 
-        proc = subprocess.run(
-            cmd,
-            input=raw_pcm,
-            capture_output=True,
-            timeout=60,
-        )
-        if proc.returncode != 0:
-            stderr = proc.stderr.decode("utf-8", errors="replace")[:500]
-            raise RuntimeError(
-                f"ffmpeg failed (rc={proc.returncode}): {stderr}")
+def encode_ogg(raw_pcm, output_path, sample_rate):
+    """Raw FM multiplex PCM -> speech-band OGG/Opus via ffmpeg."""
+    tmp = Path(str(output_path) + ".tmp")
+    cmd = [
+        "ffmpeg", "-y", "-f", "s16le", "-ar", str(sample_rate), "-ac", "1",
+        "-i", "pipe:0",
+        # Undo the 50 µs pre-emphasis used in Europe and keep the speech
+        # band, dropping hum and the 19 kHz pilot before downsampling
+        "-af", "aemphasis=type=50fm:mode=reproduction,highpass=f=80,lowpass=f=7000",
+        "-ar", "16000", "-c:a", "libopus", "-b:a", "48k", "-f", "ogg", str(tmp),
+    ]
+    proc = subprocess.run(cmd, input=raw_pcm, capture_output=True, timeout=120)
+    if proc.returncode != 0:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"ffmpeg failed (rc={proc.returncode}): "
+                           f"{proc.stderr.decode('utf-8', 'replace')[:500]}")
+    tmp.replace(output_path)

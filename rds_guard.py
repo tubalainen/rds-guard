@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
-"""RDS Guard — RDS decoder bridge with event store and web UI.
+"""RDS Guard satellite: receives, records and reports.
 
-Supervisor process that manages:
-  1. Web server (aiohttp) — REST API + WebSocket + static files
-  2. MQTT client (optional, non-blocking background connection)
-  3. Radio pipeline (rtl_fm | redsea as subprocesses via pipeline.py)
+For each receiver (RTL-SDR dongle, receivers.yml) a pipeline decodes RDS on
+its stations. The rules below turn each station's RDS into events: a traffic
+announcement while the TA flag is on, an emergency broadcast while the
+programme type is Alarm. Each event and its recording go to the aggregator
+at once (uplink.py), which transcribes, maps, alerts and archives them.
 
-Each component starts independently — the web UI is available immediately,
-regardless of whether the radio pipeline or MQTT broker are working.
+No web UI, no MQTT: the aggregator shows this satellite's state from its
+heartbeat. A health file (satellite_health.py) is Docker's health check.
 """
 
-import asyncio
 import json
 import logging
 import signal
+import sys
 import threading
 import time
 
 import config
 import event_store
-import notifier
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,1060 +28,45 @@ logging.basicConfig(
 )
 log = logging.getLogger("rds-guard")
 
-# ---------------------------------------------------------------------------
-# WebSocket broadcast hub — all connected console clients
-# ---------------------------------------------------------------------------
-
-_ws_clients = set()
-_ws_lock = threading.Lock()
-_event_loop = None  # set by web server on start
-_ws_msg_count = 0
-_ws_last_broadcast = {}  # deduplication: pi/group → content hash
+ALERT_PTY = {"Alarm", "Alarm - Loss of radio"}
+MIN_EVENT_SEC = 10          # shorter "events" are RDS noise
 
 
-def register_ws(ws):
-    with _ws_lock:
-        _ws_clients.add(ws)
+def now_iso():
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
 
 
-def unregister_ws(ws):
-    with _ws_lock:
-        _ws_clients.discard(ws)
-
-
-def broadcast_ws(message):
-    """Send a message dict to all WebSocket console clients (non-blocking)."""
-    global _ws_msg_count
-    if not _ws_clients or _event_loop is None:
-        return
-    text = json.dumps(message)
-    with _ws_lock:
-        clients = set(_ws_clients)
-    for ws in clients:
-        try:
-            asyncio.run_coroutine_threadsafe(ws.send_str(text), _event_loop)
-        except Exception:
-            log.debug("Failed to send WS message to client: %s", ws)
-    _ws_msg_count += 1
-    if _ws_msg_count == 1:
-        log.info("WebSocket: first message sent to %d client(s)", len(clients))
-    elif _ws_msg_count % 500 == 0:
-        log.info("WebSocket: %d messages sent so far to %d client(s)",
-                 _ws_msg_count, len(clients))
-
-
-def _ws_should_broadcast(pi, group, data):
-    """Decide whether to broadcast this RDS group to WebSocket console.
-
-    Filters out noise:
-    - Skip partial-only RadioText/PS (wait for complete decode).
-    - Skip empty PTYN.
-    - Deduplicate: suppress groups identical to the last broadcast.
-      For 1A (PIN/Slow), dedup on core fields only since slow labeling
-      codes (country/language/ews) rotate across successive groups.
-    """
-    gl = group.lower() if group else ""
-
-    # Skip RadioText groups that only have partial text
-    if gl in ("2a", "2b"):
-        if "radiotext" not in data:
-            return False
-
-    # Skip PS groups that only have partial name
-    if gl in ("0a", "0b"):
-        if "ps" not in data and "partial_ps" in data:
-            return False
-
-    # Skip PTYN groups with empty/whitespace-only name
-    if gl == "10a":
-        name = data.get("pty_name", data.get("ptyn", ""))
-        if not name or not name.strip():
-            return False
-
-    # --- Deduplication ---
-    key = f"{pi}/{gl}"
-
-    # 1A/1B: deduplicate on core fields only (PIN + start time)
-    # because slow labeling codes rotate across groups
-    if gl in ("1a", "1b"):
-        core = (data.get("prog_item_number"),
-                json.dumps(data.get("prog_item_started"), sort_keys=True))
-        if _ws_last_broadcast.get(key) == core:
-            return False
-        _ws_last_broadcast[key] = core
-        return True
-
-    # General: compare full payload (minus timing/quality fields)
-    relevant = {k: v for k, v in data.items()
-                if k not in ("rx_time", "timestamp", "bler")}
-    content = json.dumps(relevant, sort_keys=True)
-    if _ws_last_broadcast.get(key) == content:
-        return False
-    _ws_last_broadcast[key] = content
-    return True
+def msg_ts(data):
+    return data.get("timestamp") or now_iso()
 
 
 # ---------------------------------------------------------------------------
-# State tracking for deduplication
+# Per station: last values, decoded fields, decode rate
 # ---------------------------------------------------------------------------
 
 class StationState:
-    """Tracks last-published values per PI code to suppress duplicates."""
+    """Last value of each tracked field (per PI), to see changes."""
 
     def __init__(self):
         self._state = {}
 
     def changed(self, pi, key, value):
-        full_key = f"{pi}/{key}"
-        if self._state.get(full_key) == value:
+        full = f"{pi}/{key}"
+        if self._state.get(full) == value:
             return False
-        self._state[full_key] = value
+        self._state[full] = value
         return True
 
     def is_known(self, pi, key):
-        """Return True if a value has been recorded for this key before."""
         return f"{pi}/{key}" in self._state
 
-
-state = StationState()
-
-# ---------------------------------------------------------------------------
-# Station info accumulator — latest decoded values for status messages
-# ---------------------------------------------------------------------------
-
-class StationInfo:
-    """Accumulates the latest decoded RDS fields from the stream."""
-
-    def __init__(self):
-        self.lock = threading.Lock()
-        self._info = {}
-        self._identified = set()   # PI codes we've already logged as "locked on"
-        self._ps_logged = set()    # PI codes whose PS name we've logged
-
-    def update(self, pi, data, frequency=None):
-        with self.lock:
-            new_pi = pi not in self._info
-            if new_pi:
-                self._info[pi] = {}
-            info = self._info[pi]
-            info["pi"] = pi
-
-            had_ps = "ps" in info
-            if "ps" in data:
-                info["ps"] = data["ps"].strip()
-            elif "partial_ps" in data and "ps" not in info:
-                info["ps"] = data["partial_ps"].strip()
-            if "long_ps" in data:
-                info["long_ps"] = data["long_ps"].strip()
-            if "prog_type" in data:
-                info["prog_type"] = data["prog_type"]
-            if "tp" in data:
-                info["tp"] = data["tp"]
-            if "ta" in data:
-                info["ta"] = data["ta"]
-            if "is_music" in data:
-                info["is_music"] = data["is_music"]
-            if "di" in data:
-                info["di"] = data["di"]
-            if "country" in data:
-                info["country"] = data["country"]
-            if "language" in data:
-                info["language"] = data["language"]
-            if "radiotext" in data:
-                info["radiotext"] = data["radiotext"].strip()
-            for af_key in ("alt_frequencies_a", "alt_frequencies_b"):
-                if af_key in data:
-                    info["alt_frequencies"] = data[af_key]
-            if "radiotext_plus" in data:
-                rtp = data["radiotext_plus"]
-                for tag in rtp.get("tags", []):
-                    ct = tag.get("content-type", "")
-                    if ct == "item.title":
-                        info["now_title"] = tag["data"]
-                    elif ct == "item.artist":
-                        info["now_artist"] = tag["data"]
-
-            # --- Station identification logging ---
-            if new_pi and pi not in self._identified:
-                self._identified.add(pi)
-                freq_str = frequency if frequency else config.FM_FREQUENCY
-                log.info("╔══ New PI code detected: %s on %s", pi, freq_str)
-
-            # Log when PS (station name) first resolves for this PI
-            if not had_ps and "ps" in info and pi not in self._ps_logged:
-                self._ps_logged.add(pi)
-                ps_name = info["ps"]
-                parts = [f"Station: {ps_name} (PI: {pi})"]
-                if "prog_type" in info:
-                    parts.append(f"PTY: {info['prog_type']}")
-                if "tp" in info:
-                    parts.append(f"TP: {'yes' if info['tp'] else 'no'}")
-                if "country" in info:
-                    parts.append(f"Country: {info['country']}")
-                log.info("╔══════════════════════════════════════════")
-                log.info("║ Locked on to: %s", " | ".join(parts))
-                log.info("╚══════════════════════════════════════════")
-
-    def snapshot(self):
-        with self.lock:
-            return {pi: dict(info) for pi, info in self._info.items()}
-
-    def primary_summary(self):
-        """Return a short summary string of the primary station for log messages."""
-        with self.lock:
-            if not self._info:
-                return None
-            primary = next(iter(self._info.values()))
-            parts = []
-            ps = primary.get("ps")
-            if ps:
-                parts.append(ps)
-            else:
-                parts.append(f"PI:{primary.get('pi', '?')}")
-            pty = primary.get("prog_type")
-            if pty:
-                parts.append(pty)
-            rt = primary.get("radiotext")
-            if rt:
-                parts.append(f'RT: "{rt[:60]}"')
-            elif primary.get("now_artist") and primary.get("now_title"):
-                parts.append(f'Now: {primary["now_artist"]} - {primary["now_title"]}')
-            return " | ".join(parts)
-
-
-station_info = StationInfo()
-
-# ---------------------------------------------------------------------------
-# Rules Engine — replaces AlertTracker, writes to SQLite + MQTT + WebSocket
-# ---------------------------------------------------------------------------
-
-ALERT_PTY = {"Alarm", "Alarm - Loss of radio"}
-
-
-class RulesEngine:
-    """Evaluates RDS data against event rules and writes to all outputs.
-
-    Outputs: SQLite (event_store), MQTT (if connected), WebSocket broadcast.
-
-    Rules (hardcoded — defined by RDS standard):
-      1. TA flag → true:  traffic event (start)
-      2. TA flag → false: traffic event (end, with collected RT + duration)
-      3. RT change during active TA: update existing traffic event
-      4. PTY → Alarm type: emergency event
-      5. EON TA (group 14A): eon_traffic event
-    """
-
-    def __init__(self, recorder=None, record_event_types=None, frequency=None):
-        self.lock = threading.Lock()
-        # Per-PI active traffic announcement: pi -> {event_id, since, radiotext, prog_type}
-        self._active = {}
-        # Per-PI active emergency: pi -> {event_id, since}
-        self._active_emergency = {}
-        # Audio recorder (may be None if not initialized yet)
-        self._recorder = recorder
-        self._record_types = set(
-            t.strip() for t in (record_event_types or "traffic,emergency").split(",")
-        )
-        # Frequency this engine is responsible for (used in event payloads)
-        self.frequency = frequency or config.FM_FREQUENCY
-
-    def _station_context(self, pi):
-        si = station_info.snapshot()
-        info = si.get(pi, {})
-        ctx = {"pi": pi}
-        for key in ("ps", "long_ps", "prog_type", "country"):
-            if key in info:
-                ctx[key] = info[key]
-        return ctx
-
-    def on_ta_change(self, mqtt_client, pi, ta, data):
-        """TA flag changed state."""
-        ts = msg_ts(data)
-        ctx = self._station_context(pi)
-        ps = ctx.get("ps")
-        freq = self.frequency
-
-        with self.lock:
-            if ta:
-                # --- Traffic announcement START ---
-                payload = {
-                    "event_type": "traffic_announcement",
-                    "state": "start",
-                    "station": ctx,
-                    "frequency": freq,
-                    "prog_type": data.get("prog_type", ""),
-                    "transcribed_text": None,
-                    "timestamp": ts,
-                }
-                event_id = event_store.insert_event(
-                    event_type="traffic",
-                    severity="warning",
-                    state="start",
-                    pi=pi,
-                    data_payload=payload,
-                    station_ps=ps,
-                    frequency=freq,
-                    started_at=ts,
-                )
-                payload["event_id"] = event_id
-                self._active[pi] = {
-                    "event_id": event_id,
-                    "since": ts,
-                    "radiotext": [],
-                    "prog_type": data.get("prog_type", ""),
-                }
-
-                # Start audio recording
-                if self._recorder and "traffic" in self._record_types:
-                    self._recorder.start(event_id)
-                    event_store.update_event_transcription_status(
-                        event_id, "recording")
-
-                log.info("EVENT traffic start on %s (event #%d)", pi, event_id)
-                # Alert is deferred until event ends + transcription completes
-                broadcast_ws({"topic": "alert", "payload": payload, "timestamp": ts})
-
-            else:
-                # --- Traffic announcement END ---
-                ann = self._active.pop(pi, {})
-                event_id = ann.get("event_id")
-
-                # Stop audio recording
-                has_audio = False
-                if self._recorder and event_id:
-                    has_audio = self._recorder.stop()
-                    if has_audio:
-                        event_store.update_event_transcription_status(
-                            event_id, "saving")
-
-                duration = self._duration(ann.get("since"), ts)
-
-                # Discard very short events (<10s) — likely RDS noise
-                if duration < 10 and event_id:
-                    event_store.delete_event(event_id)
-                    log.info("Discarded short traffic event #%d on %s "
-                             "(%ds < 10s minimum)", event_id, pi, duration)
-                    return
-
-                payload = {
-                    "event_type": "traffic_announcement",
-                    "state": "end",
-                    "station": ctx,
-                    "frequency": freq,
-                    "started": ann.get("since", ""),
-                    "ended": ts,
-                    "duration_sec": duration,
-                    "radiotext": ann.get("radiotext", []),
-                    "prog_type": data.get("prog_type", ""),
-                    "audio_available": has_audio,
-                    "transcribed_text": None,
-                    "transcription_status": "saving" if has_audio else "none",
-                    "event_id": event_id,
-                    "timestamp": ts,
-                }
-                if event_id:
-                    event_store.end_event(
-                        event_id=event_id,
-                        ended_at=ts,
-                        duration_sec=duration,
-                        radiotext_list=ann.get("radiotext", []),
-                        data_payload=payload,
-                    )
-                log.info("EVENT traffic end on %s (%d RT messages)",
-                         pi, len(payload["radiotext"]))
-                # Defer alert until transcription completes (or timeout)
-                if has_audio and event_id:
-                    _defer_alert(event_id, payload)
-                else:
-                    # No audio → send alert immediately
-                    _mqtt_pub(mqtt_client, "alert", payload)
-                    _notify(event_id)
-                broadcast_ws({"topic": "alert", "payload": payload, "timestamp": ts})
-
-    def on_radiotext(self, mqtt_client, pi, rt, data):
-        """RadioText changed during active TA — update event."""
-        ts = msg_ts(data)
-        with self.lock:
-            if pi not in self._active:
-                return
-            collected = self._active[pi]["radiotext"]
-            if not collected or collected[-1] != rt:
-                collected.append(rt)
-            event_id = self._active[pi]["event_id"]
-            event_store.update_event_radiotext(event_id, list(collected))
-            payload = {
-                "event_type": "traffic_announcement",
-                "state": "update",
-                "station": self._station_context(pi),
-                "frequency": self.frequency,
-                "radiotext": rt,
-                "all_radiotext": list(collected),
-                "started": self._active[pi]["since"],
-                "transcribed_text": None,
-                "timestamp": ts,
-            }
-            log.info("EVENT traffic update on %s: %s", pi, rt[:80])
-            # Alert is deferred until event ends + transcription completes
-            broadcast_ws({"topic": "alert", "payload": payload, "timestamp": ts})
-
-    def on_pty_alert(self, mqtt_client, pi, pty, data):
-        """PTY changed to an alarm type."""
-        ts = msg_ts(data)
-        ctx = self._station_context(pi)
-        payload = {
-            "event_type": "emergency_broadcast",
-            "state": "active",
-            "station": ctx,
-            "frequency": self.frequency,
-            "prog_type": pty,
-            "transcribed_text": None,
-            "timestamp": ts,
-        }
-        event_id = event_store.insert_event(
-            event_type="emergency",
-            severity="critical",
-            state="active",
-            pi=pi,
-            data_payload=payload,
-            station_ps=ctx.get("ps"),
-            frequency=self.frequency,
-            started_at=ts,
-        )
-        payload["event_id"] = event_id
-
-        # Track active emergency for end detection
-        with self.lock:
-            self._active_emergency[pi] = {
-                "event_id": event_id,
-                "since": ts,
-            }
-
-        # Start audio recording
-        if self._recorder and "emergency" in self._record_types:
-            self._recorder.start(event_id)
-            event_store.update_event_transcription_status(
-                event_id, "recording")
-
-        log.warning("EVENT emergency PTY alarm on %s: %s", pi, pty)
-        # VMA push goes out at once, not after the broadcast
-        _notify(event_id)
-        # Alert is deferred until event ends + transcription completes
-        broadcast_ws({"topic": "alert", "payload": payload, "timestamp": ts})
-
-    def on_pty_normal(self, mqtt_client, pi, pty, data):
-        """PTY changed away from alarm — end emergency recording."""
-        ts = msg_ts(data)
-        with self.lock:
-            em = self._active_emergency.pop(pi, None)
-        if not em:
-            return
-
-        event_id = em["event_id"]
-
-        # Stop audio recording
-        has_audio = False
-        if self._recorder:
-            has_audio = self._recorder.stop()
-            if has_audio:
-                event_store.update_event_transcription_status(
-                    event_id, "saving")
-
-        duration = self._duration(em.get("since"), ts)
-
-        # Discard very short events (<10s) — likely RDS noise
-        if duration < 10:
-            event_store.delete_event(event_id)
-            log.info("Discarded short emergency event #%d on %s "
-                     "(%ds < 10s minimum)", event_id, pi, duration)
-            return
-
-        event_store.end_event(
-            event_id=event_id,
-            ended_at=ts,
-            duration_sec=duration,
-        )
-
-        ctx = self._station_context(pi)
-        payload = {
-            "event_type": "emergency_broadcast",
-            "state": "end",
-            "station": ctx,
-            "frequency": self.frequency,
-            "started": em.get("since", ""),
-            "ended": ts,
-            "duration_sec": duration,
-            "audio_available": has_audio,
-            "transcribed_text": None,
-            "transcription_status": "saving" if has_audio else "none",
-            "event_id": event_id,
-            "timestamp": ts,
-        }
-        log.info("EVENT emergency end on %s (PTY → %s)", pi, pty)
-        # Defer alert until transcription completes (or timeout)
-        if has_audio and event_id:
-            _defer_alert(event_id, payload)
-        else:
-            # No audio → send alert immediately
-            _mqtt_pub(mqtt_client, "alert", payload)
-        broadcast_ws({"topic": "alert", "payload": payload, "timestamp": ts})
-
-    def is_emergency_active(self, pi):
-        """Check if an emergency broadcast is active for the given PI."""
-        with self.lock:
-            return pi in self._active_emergency
-
-    def on_eon_ta(self, mqtt_client, pi, other_pi, ta, data):
-        """Linked station TA via EON.
-
-        EON TA is informational only — indicates a linked station on a
-        different frequency has an active TA.  Published to MQTT / WS for
-        Home Assistant but NOT stored in the database (no audio or
-        transcription is available for another frequency).
-
-        In "essential" PUBLISH_MODE, EON events are NOT published to the
-        alert topic — only traffic announcements and emergencies are.
-        In "all" mode, EON events are included.
-        """
-        ts = msg_ts(data)
-        on = data.get("other_network", {})
-        ctx = self._station_context(pi)
-        payload = {
-            "event_type": "eon_traffic",
-            "state": "received",
-            "ta_active": ta,
-            "station": ctx,
-            "linked_station": {
-                "pi": other_pi,
-                "ps": (on.get("ps") or "").strip(),
-                "kilohertz": on.get("kilohertz"),
-            },
-            "frequency": self.frequency,
-            "timestamp": ts,
-        }
-        label = "active" if ta else "ended"
-        log.info("EON traffic %s on linked %s via %s", label, other_pi, pi)
-        # Only publish EON to alert topic in "all" mode
-        if config.PUBLISH_MODE == "all":
-            _mqtt_pub(mqtt_client, "alert", payload)
-        broadcast_ws({"topic": "alert", "payload": payload, "timestamp": ts})
-
-    def is_active(self, pi):
-        with self.lock:
-            return pi in self._active
-
-    @staticmethod
-    def _duration(start, end):
-        try:
-            fmt = "%Y-%m-%dT%H:%M:%S"
-            s = time.strptime(start[:19], fmt)
-            e = time.strptime(end[:19], fmt)
-            return max(0, int(time.mktime(e) - time.mktime(s)))
-        except Exception:
-            return 0
-
-
-rules_engine = RulesEngine()
-
-
-# ---------------------------------------------------------------------------
-# Multi-station: per-station stats and PI→frequency mapping
-# ---------------------------------------------------------------------------
-
-# Populated by main() in multi-station mode:
-#   _station_stats[freq_str] = Stats()  — per-station decode rate
-#   _pi_to_freq[pi]         = freq_str  — reverse lookup (PI → frequency)
-#   _freq_to_pi[freq_str]   = pi        — forward lookup (frequency → PI)
-_station_stats: dict = {}
-_pi_to_freq: dict = {}
-_freq_to_pi: dict = {}
-
-
-def _make_station_callback(freq: str, station_rules_engine, station_stats_obj):
-    """Create a per-station _on_pipeline_line callback for multi-station mode.
-
-    Captures freq, station_rules_engine, and station_stats_obj so each
-    redsea reader thread independently processes its own station.
-    """
-    line_count = [0]
-    error_count = [0]
-    first_group = [True]
-    last_stats_log = [0.0]
-
-    def callback(raw_line):
-        line = raw_line.decode("utf-8", errors="replace").strip()
-        if not line:
-            return
-        try:
-            data = json.loads(line)
-            pi = data.get("pi")
-            if pi:
-                pi = str(pi)
-                # Update PI↔frequency mapping
-                if pi not in _pi_to_freq:
-                    _pi_to_freq[pi] = freq
-                    _freq_to_pi[freq] = pi
-                # Per-station decode counter
-                station_stats_obj.inc()
-                # Accumulate station info (shared, PI-keyed)
-                station_info.update(pi, data, frequency=freq)
-            # Log notable field changes
-            if pi:
-                _log_field_changes(pi, data)
-            # Route through rules engine and MQTT (using per-station engine)
-            process_group(mqtt_client, data, _rules_engine=station_rules_engine)
-            line_count[0] += 1
-
-            if first_group[0] and pi:
-                log.info("════════════════════════════════════════════")
-                log.info("  First RDS group on %s — decoder running", freq)
-                log.info("  PI: %s  Frequency: %s", pi, freq)
-                log.info("════════════════════════════════════════════")
-                first_group[0] = False
-
-            now = time.time()
-            if now - last_stats_log[0] >= 60:
-                snap = station_stats_obj.snapshot()
-                log.info("[%s] %d groups, %.1f grp/s, uptime %ds",
-                         freq, snap["groups_total"], snap["groups_per_sec"],
-                         snap["uptime_sec"])
-                last_stats_log[0] = now
-
-        except json.JSONDecodeError:
-            error_count[0] += 1
-            if error_count[0] <= 5:
-                log.warning("[%s] Invalid JSON: %s", freq, line[:100])
-        except Exception:
-            log.exception("[%s] Error processing group", freq)
-
-    return callback
-
-
-# ---------------------------------------------------------------------------
-# Deferred alert publishing — holds alert until transcription completes
-# ---------------------------------------------------------------------------
-
-# Maximum time (seconds) to wait for transcription before sending alert without it
-ALERT_TRANSCRIPTION_TIMEOUT = 120
-
-_pending_alerts = {}        # event_id → payload dict
-_pending_alerts_lock = threading.Lock()
-_pending_alert_timers = {}  # event_id → Timer
-
-
-def _defer_alert(event_id, payload):
-    """Hold an alert payload, waiting for transcription to complete.
-
-    Starts a timeout timer — if transcription hasn't finished within
-    ALERT_TRANSCRIPTION_TIMEOUT seconds, the alert is sent without it.
-    """
-    with _pending_alerts_lock:
-        _pending_alerts[event_id] = payload
-        # Cancel any existing timer for this event (shouldn't happen)
-        old_timer = _pending_alert_timers.pop(event_id, None)
-        if old_timer:
-            old_timer.cancel()
-        timer = threading.Timer(
-            ALERT_TRANSCRIPTION_TIMEOUT,
-            _fire_deferred_alert_timeout,
-            args=(event_id,),
-        )
-        timer.daemon = True
-        timer.start()
-        _pending_alert_timers[event_id] = timer
-    log.info("Alert deferred for event #%d (waiting for transcription, "
-             "timeout %ds)", event_id, ALERT_TRANSCRIPTION_TIMEOUT)
-
-
-def _fire_deferred_alert_timeout(event_id):
-    """Timer callback — send alert without transcription text."""
-    with _pending_alerts_lock:
-        payload = _pending_alerts.pop(event_id, None)
-        _pending_alert_timers.pop(event_id, None)
-    if payload:
-        payload["transcription_status"] = "timeout"
-        log.warning("Alert timeout for event #%d — sending without "
-                    "transcription", event_id)
-        _mqtt_pub(mqtt_client, "alert", payload)
-        if payload.get("event_type") == "traffic_announcement":
-            _notify(event_id)
-
-
-def _fire_deferred_alert(event_id, transcribed_text, error=False, geo=None):
-    """Fire a deferred alert with transcription result (or error).
-
-    geo is the geolocation result: it adds the corrected text and the
-    places to the alert. Returns True if a pending alert was found and
-    published.
-    """
-    with _pending_alerts_lock:
-        payload = _pending_alerts.pop(event_id, None)
-        timer = _pending_alert_timers.pop(event_id, None)
-        if timer:
-            timer.cancel()
-    if payload:
-        if error:
-            payload["transcribed_text"] = None
-            payload["transcription_status"] = "error"
-        else:
-            payload["transcribed_text"] = transcribed_text
-            payload["transcription_status"] = "done"
-        if geo is not None:
-            payload["transcribed_text_corrected"] = geo.corrected_text
-            payload["locations"] = [_location_payload(p) for p in geo.placements]
-            payload["trafikverket"] = _trv_for_incidents(
-                getattr(geo, "incident_ids", None) or [])
-        _mqtt_pub(mqtt_client, "alert", payload)
-        if payload.get("event_type") == "traffic_announcement":
-            _notify(event_id)
-        return True
-    return False
-
-
-# ---------------------------------------------------------------------------
-# Transcription completion callback — called from transcriber thread
-# ---------------------------------------------------------------------------
-
-def _on_transcription_complete(event_id, text, error, duration_sec=None):
-    """Handle transcription result — update DB, fire deferred alert, publish WS."""
-    if error:
-        event_store.update_event_transcription(event_id, None, status="error")
-        # Fire deferred alert without transcription text
-        _fire_deferred_alert(event_id, None, error=True)
-        broadcast_ws({"topic": "transcription_error", "event_id": event_id,
-                       "error": str(error), "timestamp": now_iso()})
-        return
-
-    event_store.update_event_transcription(event_id, text, status="done",
-                                           duration_sec=duration_sec)
-
-    # Place the message on the map (and correct misheard words) before the
-    # alert goes out, so the alert carries the places too
-    geo = _geolocate(event_id, text)
-
-    # Fire deferred alert with transcription text
-    _fire_deferred_alert(event_id, text, geo=geo)
-
-    # Fetch event context for the retained per-station transcription topic
-    try:
-        event = event_store.get_event(event_id) or {}
-    except Exception:
-        event = {}
-
-    ts = now_iso()
-    pi = event.get("pi", "")
-    evt_type = event.get("type", "traffic")
-
-    # Parse station context from stored data
-    station = {"pi": pi}
-    if event.get("station_ps"):
-        station["ps"] = event["station_ps"]
-
-    import json as _json
-    radiotext = event.get("radiotext", "[]")
-    if isinstance(radiotext, str):
-        try:
-            radiotext = _json.loads(radiotext)
-        except Exception:
-            radiotext = []
-
-    # Publish to rds/{pi}/{type}/transcription (retained)
-    if pi:
-        transcription_payload = {
-            "event_id": event_id,
-            "station": station,
-            "transcription": text,
-            "language": config.TRANSCRIPTION_LANGUAGE,
-            "duration_sec": event.get("duration_sec"),
-            "radiotext": radiotext,
-            "timestamp": ts,
-        }
-        pub(mqtt_client, f"{pi}/{evt_type}/transcription",
-            transcription_payload, qos=1, retain=True)
-
-    # WebSocket broadcast
-    broadcast_ws({
-        "topic": "transcription",
-        "event_id": event_id,
-        "transcription": text,
-        "transcription_status": "done",
-        "transcription_duration_sec": duration_sec,
-        "timestamp": ts,
-    })
-
-
-# ---------------------------------------------------------------------------
-# Geolocation — places a transcribed message on the map
-# ---------------------------------------------------------------------------
-
-geo_service = None       # GeoService, set by main() when processing is on
-_node_place = None       # this receiver's location (gazetteer.Place)
-_geo_ready = threading.Event()
-
-
-def _init_geo():
-    """Load the place-name registry and find NODE_LOCATION (background)."""
-    global _node_place
-    try:
-        if config.NODE_LOCATION:
-            _node_place = geo_service.locate_node(config.NODE_LOCATION)
-            if _node_place:
-                geo_service.area(_node_place.point)
-        else:
-            log.warning("NODE_LOCATION is not set: traffic messages are not "
-                        "placed on the map. Set it to 'Ort, Län', e.g. "
-                        "'Örebro, Örebro län'.")
-    except Exception:
-        log.exception("Could not load the place-name registry")
-    _geo_ready.set()
-
-
-def geo_snapshot():
-    """Map settings for /api/status."""
-    if geo_service is None:
-        return {"enabled": False,
-                "reason": "off" if not config.LOCAL_PROCESSING else "none"}
-    out = {"enabled": geo_service.engine != "none", "engine": geo_service.engine,
-           "location": config.NODE_LOCATION or None, "located": None,
-           "ready": _geo_ready.is_set()}
-    if geo_service.engine == "none":
-        out["reason"] = "none"
-    if _node_place:
-        out["located"] = {"name": _node_place.name, "lat": _node_place.lat,
-                          "lon": _node_place.lon}
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Trafikverket — exact places and updates for traffic incidents (optional)
-# ---------------------------------------------------------------------------
-
-trv_feed = None          # trafikverket.TrafikverketFeed, with TRAFIKVERKET_API_KEY
-
-
-def _trv_centers():
-    """Where to watch: around this receiver, once NODE_LOCATION is found."""
-    return [_node_place.point] if _node_place else []
-
-
-def _trv_changed(ids, after_vid):
-    """New or changed deviations: link them to the radio's incidents, push
-    updates of linked ones, tell the web UI."""
-    try:
-        new_links, updated = event_store.trv_relink(ids)
-        if new_links:
-            log.info("Trafikverket: %d radio incidents linked", len(new_links))
-        for dev_id in {d for d in ids}:
-            incs = event_store.incidents_for_deviation(dev_id)
-            if incs and _notify_publish("trafikverket/update", {
-                    "deviation": event_store.trv.get(dev_id, versions=False),
-                    "incidents": [i["id"] for i in incs],
-                    "timestamp": now_iso()}) is False:
-                log.debug("Trafikverket: MQTT update for %s not sent", dev_id)
-        notifier.trv_updates(ids, after_vid, _notify_publish,
-                             skip_incidents=set(new_links))
-    except Exception:
-        log.exception("Trafikverket: could not process the changes")
-    broadcast_ws({"topic": "trafikverket", "deviations": ids,
-                  "timestamp": now_iso()})
-
-
-def _start_trafikverket():
-    """Start the Trafikverket feed when there is a key and the map is on."""
-    global trv_feed
-    if not config.TRAFIKVERKET_API_KEY or geo_service is None:
-        return
-    import trafikverket
-    trv_feed = trafikverket.create_feed(
-        config.TRAFIKVERKET_API_KEY, event_store.trv, _trv_centers,
-        radius_km=config.TRAFIKVERKET_RADIUS_KM,
-        poll_sec=config.TRAFIKVERKET_POLL_SEC, on_change=_trv_changed)
-
-
-def _trv_for_incidents(incident_ids):
-    """Trafikverket's deviations linked to these incidents, for the alert."""
-    import trafikverket
-    out = []
-    for inc_id in incident_ids:
-        inc = event_store.incident(inc_id)
-        dev = (event_store.trv.get(inc["trv_id"], versions=False)
-               if inc and inc.get("trv_id") else None)
-        if dev:
-            s = trafikverket.summary(dev)
-            s.pop("line", None)
-            s["incident_id"] = inc_id
-            out.append(s)
-    return out
-
-
-def trv_snapshot():
-    """Trafikverket feed for /api/status."""
-    if trv_feed is None:
-        reason = ("no_key" if not config.TRAFIKVERKET_API_KEY else
-                  "no_processing" if geo_service is None else "off")
-        return {"enabled": False, "reason": reason}
-    return trv_feed.snapshot()
-
-
-def _transcription_hints():
-    """Local place names for the transcriber (ElevenLabs keyterms, prompt)."""
-    if (geo_service is None or _node_place is None
-            or not config.TRANSCRIPTION_PLACE_NAMES):
-        return None
-    try:
-        history = event_store.recent_place_names()
-        return geo_service.hints(_node_place.point, history)
-    except Exception:
-        log.exception("Could not build place-name hints")
-        return None
-
-
-class _HintingTranscriber:
-    """Passes this receiver's place names along with every clip."""
-
-    def __init__(self, transcriber):
-        self._t = transcriber
-
-    def enqueue(self, audio_path, event_id, callback):
-        self._t.enqueue(audio_path, event_id, callback,
-                        hints=_transcription_hints)
-
-    def __getattr__(self, name):
-        return getattr(self._t, name)
-
-
-def _location_payload(p):
-    return {"label": p.label, "road": p.road, "lat": p.lat, "lon": p.lon,
-            "radius_m": p.radius_m, "bearing": p.bearing,
-            "both_directions": p.both_directions, "cleared": p.cleared,
-            "what": p.what}
-
-
-def _geolocate(event_id, text):
-    """Place a transcription's incidents and store them. Never raises."""
-    if geo_service is None:
-        return None
-    try:
-        _geo_ready.wait(timeout=120)
-        if _node_place is None:
-            event_store.save_geolocation(event_id, None, "no_location")
-            return None
-        event = event_store.get_event(event_id) or {}
-        try:
-            radiotext = json.loads(event.get("radiotext") or "[]")
-        except (TypeError, ValueError):
-            radiotext = []
-        result = geo_service.locate(
-            text, _node_place.point, config.NODE_LOCATION, radiotext,
-            event_store.open_incidents())
-        if result is None:
-            event_store.save_geolocation(event_id, None, "none")
-            return None
-        status = "done" if result.placements or result.areas else "none"
-        ids = event_store.save_geolocation(event_id, result, status)
-        result.incident_ids = ids
-        log.info("Event %d placed with %s: %s", event_id, result.engine,
-                 "; ".join(f"{p.label} (±{p.radius_m} m)" for p in result.placements)
-                 or "no place found")
-        broadcast_ws({"topic": "geolocation", "event_id": event_id,
-                      "incidents": ids, "timestamp": now_iso()})
-        return result
-    except Exception:
-        log.exception("Geolocation failed for event %d", event_id)
-        try:
-            event_store.save_geolocation(event_id, None, "error")
-        except Exception:
-            pass
-        return None
-
-
-def _place_older(item):
-    """Place one message stored before the map existed (Backfill.place).
-
-    No alert, no WebSocket message: it was broadcast long ago. It is
-    placed as at the time of the broadcast.
-    """
-    if _node_place is None:
-        return None
-    result = geo_service.locate(
-        item["transcription"], _node_place.point, config.NODE_LOCATION,
-        item.get("radiotext"), event_store.open_incidents(at=item["at"]))
-    if result is None:
-        event_store.save_geolocation(item["id"], None, "none", at=item["at"])
-        return False
-    status = "done" if result.placements or result.areas else "none"
-    event_store.save_geolocation(item["id"], result, status, at=item["at"])
-    return bool(result.placements)
-
-
-_backfill = None
-
-
-def _get_backfill():
-    global _backfill
-    if _backfill is None:
-        import geo_service as geo_service_mod
-        _backfill = geo_service_mod.Backfill(
-            event_store.geo_pending, _place_older, event_store.geo_pending_count)
-    return _backfill
-
-
-def backfill_status():
-    """Placing older messages on the map: whether it can, and how far."""
-    if geo_service is None:
-        reason = "off" if not config.LOCAL_PROCESSING else "none"
-    elif geo_service.engine == "none":
-        reason = "none"
-    elif not _geo_ready.is_set():
-        reason = "starting"
-    elif _node_place is None:
-        reason = "no_location"
-    else:
-        reason = None
-    st = _get_backfill().status(available=reason is None, reason=reason)
-    st["engine"] = geo_service.engine if geo_service is not None else "none"
-    return st
-
-
-def start_backfill():
-    if not backfill_status()["available"]:
-        return False
-    return _get_backfill().start()
-
-
-def rebuild_status():
-    """What a rebuild of the map would do: messages, engine, cost, and how
-    far placing has come."""
-    import geo_service as geo_service_mod
-    bf = backfill_status()
-    out = geo_service_mod.rebuild_estimate(bf["engine"],
-                                           event_store.geo_placeable_count())
-    out.update(available=bf["available"], running=bf["running"],
-               backfill=bf)
-    if bf.get("reason"):
-        out["reason"] = bf["reason"]
-    return out
-
-
-def start_rebuild():
-    """Delete every incident and place all stored messages again, oldest
-    first, with the current engine. False if it cannot run now."""
-    bf = backfill_status()
-    if not bf["available"] or bf["running"]:
-        return False
-    gone, todo = event_store.reset_geolocation()
-    log.info("Rebuilding the map: %d incidents deleted, %d messages to place "
-             "with %s", gone, todo, bf["engine"])
-    return _get_backfill().start()
-
-# ---------------------------------------------------------------------------
-# Statistics
-# ---------------------------------------------------------------------------
 
 class Stats:
     def __init__(self):
         self.start_time = time.time()
         self.groups_total = 0
         self.lock = threading.Lock()
+        self._window = []          # (time, total) for the recent rate
 
     def inc(self):
         with self.lock:
@@ -1089,844 +74,433 @@ class Stats:
 
     def snapshot(self):
         with self.lock:
-            elapsed = time.time() - self.start_time
-            gps = self.groups_total / elapsed if elapsed > 0 else 0.0
-            return {
-                "uptime_sec": int(elapsed),
-                "groups_total": self.groups_total,
-                "groups_per_sec": round(gps, 1),
-            }
+            now = time.time()
+            elapsed = now - self.start_time
+            self._window.append((now, self.groups_total))
+            self._window = [w for w in self._window if now - w[0] <= 120]
+            t0, n0 = self._window[0]
+            recent = ((self.groups_total - n0) / (now - t0)) if now - t0 >= 5 else (
+                self.groups_total / elapsed if elapsed > 0 else 0.0)
+            return {"uptime_sec": int(elapsed), "groups_total": self.groups_total,
+                    "groups_per_sec": round(recent, 1)}
 
 
-stats = Stats()
+_INFO_KEYS = ("ps", "long_ps", "prog_type", "tp", "ta", "country", "radiotext")
+
+
+class Station:
+    """One frequency on one receiver: its rules engine, decoded fields and
+    decode rate, fed line by line from its redsea."""
+
+    def __init__(self, receiver_id, frequency, recorder=None, record_types=None):
+        self.receiver_id = receiver_id
+        self.frequency = frequency
+        self.state = StationState()
+        self.stats = Stats()
+        self.info = {}
+        self.engine = RulesEngine(recorder=recorder, record_event_types=record_types,
+                                  frequency=frequency, receiver=receiver_id)
+        self.engine.station = self
+        self._errors = 0
+        self._first = True
+        self._last_log = time.time()
+        self._lock = threading.Lock()
+
+    def update_info(self, pi, data):
+        with self._lock:
+            new = self.info.get("pi") != pi
+            if new:
+                self.info = {"pi": pi}
+                log.info("[%s %s] PI %s", self.receiver_id, self.frequency, pi)
+            had_ps = "ps" in self.info
+            if "ps" in data:
+                self.info["ps"] = data["ps"].strip()
+            elif "partial_ps" in data and "ps" not in self.info:
+                self.info["ps"] = data["partial_ps"].strip()
+            for key in ("long_ps", "radiotext"):
+                if key in data:
+                    self.info[key] = str(data[key]).strip()
+            for key in ("prog_type", "tp", "ta", "country"):
+                if key in data:
+                    self.info[key] = data[key]
+            if not had_ps and "ps" in self.info:
+                log.info("[%s %s] Locked on to %s (PI %s, PTY %s, TP %s)",
+                         self.receiver_id, self.frequency, self.info["ps"], pi,
+                         self.info.get("prog_type", "?"),
+                         "yes" if self.info.get("tp") else "no")
+
+    def snapshot(self):
+        with self._lock:
+            info = dict(self.info)
+        snap = self.stats.snapshot()
+        return {"frequency": self.frequency, "pi": info.get("pi"),
+                **{k: info.get(k) for k in _INFO_KEYS},
+                "groups_per_sec": snap["groups_per_sec"],
+                "groups_total": snap["groups_total"]}
+
+    def on_line(self, raw_line):
+        """One line of redsea JSON (the station's reader thread)."""
+        line = raw_line.decode("utf-8", errors="replace").strip()
+        if not line:
+            return
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            self._errors += 1
+            if self._errors <= 5:
+                log.warning("[%s %s] invalid JSON: %s", self.receiver_id,
+                            self.frequency, line[:100])
+            return
+        try:
+            process_group(self, data)
+        except Exception:
+            log.exception("[%s %s] error processing a group", self.receiver_id,
+                          self.frequency)
+            return
+        if self._first and data.get("pi"):
+            self._first = False
+            log.info("[%s %s] first RDS group: decoder running", self.receiver_id,
+                     self.frequency)
+        now = time.time()
+        if now - self._last_log >= 300:
+            self._last_log = now
+            s = self.snapshot()
+            log.info("[%s %s] %s: %d groups, %.1f grp/s", self.receiver_id,
+                     self.frequency, s.get("ps") or s.get("pi") or "?",
+                     s["groups_total"], s["groups_per_sec"])
+
 
 # ---------------------------------------------------------------------------
-# MQTT setup (optional — only if MQTT_HOST is configured)
+# Rules: RDS -> events
 # ---------------------------------------------------------------------------
 
-mqtt_connected = threading.Event()
-_mqtt_available = False
+class RulesEngine:
+    """Turns one station's RDS into events (stored and queued for the
+    aggregator), and starts and stops its recordings.
 
-
-def _mqtt_pub(client, topic, payload):
-    """Publish to MQTT if available.
-
-    Takes a local client reference to avoid race conditions with the
-    background MQTT thread setting the module-level mqtt_client.
+      1. TA on:  traffic announcement starts
+      2. RadioText while TA is on: the announcement is updated
+      3. TA off: it ends (shorter than 10 s: discarded as noise)
+      4. PTY Alarm: emergency broadcast starts; PTY back: it ends
     """
-    c = client  # snapshot the reference
-    if not _mqtt_available or c is None:
-        return None
-    try:
-        full_topic = f"{config.MQTT_TOPIC_PREFIX}/{topic}"
-        msg = json.dumps(payload)
-        info = c.publish(full_topic, msg, qos=1, retain=False)
-        log.debug("PUB %s %s", full_topic, msg[:120])
-        return getattr(info, "rc", 0) == 0
-    except Exception:
-        return False  # client may have disconnected during shutdown
+
+    def __init__(self, recorder=None, record_event_types=None, frequency=None,
+                 receiver=None):
+        self.lock = threading.Lock()
+        self._active = {}            # pi -> {event_id, since, radiotext}
+        self._active_emergency = {}  # pi -> {event_id, since}
+        self._recorder = recorder
+        self._record_types = {t.strip() for t in
+                              (record_event_types or "traffic,emergency").split(",")}
+        self.frequency = frequency
+        self.receiver = receiver
+        self.station = None
+
+    def _ps(self, pi):
+        info = self.station.info if self.station else {}
+        return info.get("ps") if info.get("pi") == pi else None
+
+    def _record(self, kind, event_id):
+        if self._recorder and kind in self._record_types:
+            self._recorder.start(event_id)
+
+    def _stop_recording(self):
+        return bool(self._recorder and self._recorder.stop())
+
+    def on_ta_change(self, pi, ta, data):
+        ts = msg_ts(data)
+        with self.lock:
+            if ta:
+                event_id = event_store.insert_event(
+                    event_type="traffic", severity="warning", state="start", pi=pi,
+                    data_payload={"prog_type": data.get("prog_type", "")},
+                    station_ps=self._ps(pi), frequency=self.frequency,
+                    started_at=ts, receiver=self.receiver)
+                self._active[pi] = {"event_id": event_id, "since": ts, "radiotext": []}
+                self._record("traffic", event_id)
+                log.info("EVENT traffic start on %s %s (#%d)", pi, self.frequency, event_id)
+                return
+            ann = self._active.pop(pi, None)
+            if not ann:
+                return
+            self._stop_recording()
+            duration = self._duration(ann["since"], ts)
+            if duration < MIN_EVENT_SEC:
+                event_store.delete_event(ann["event_id"])
+                log.info("Discarded short traffic event #%d on %s (%ds)",
+                         ann["event_id"], pi, duration)
+                return
+            event_store.end_event(event_id=ann["event_id"], ended_at=ts,
+                                  duration_sec=duration,
+                                  radiotext_list=ann["radiotext"])
+            log.info("EVENT traffic end on %s (%ds, %d RadioText)", pi, duration,
+                     len(ann["radiotext"]))
+
+    def on_radiotext(self, pi, rt, data):
+        with self.lock:
+            ann = self._active.get(pi)
+            if not ann:
+                return
+            if not ann["radiotext"] or ann["radiotext"][-1] != rt:
+                ann["radiotext"].append(rt)
+            event_store.update_event_radiotext(ann["event_id"], list(ann["radiotext"]))
+            log.info("EVENT traffic update on %s: %s", pi, rt[:80])
+
+    def on_pty_alert(self, pi, pty, data):
+        ts = msg_ts(data)
+        with self.lock:
+            if pi in self._active_emergency:
+                return
+            event_id = event_store.insert_event(
+                event_type="emergency", severity="critical", state="active", pi=pi,
+                data_payload={"prog_type": pty}, station_ps=self._ps(pi),
+                frequency=self.frequency, started_at=ts, receiver=self.receiver)
+            self._active_emergency[pi] = {"event_id": event_id, "since": ts}
+        self._record("emergency", event_id)
+        log.warning("EVENT emergency (PTY %s) on %s %s (#%d)", pty, pi,
+                    self.frequency, event_id)
+
+    def on_pty_normal(self, pi, pty, data):
+        ts = msg_ts(data)
+        with self.lock:
+            em = self._active_emergency.pop(pi, None)
+        if not em:
+            return
+        self._stop_recording()
+        duration = self._duration(em["since"], ts)
+        if duration < MIN_EVENT_SEC:
+            event_store.delete_event(em["event_id"])
+            log.info("Discarded short emergency event #%d on %s (%ds)",
+                     em["event_id"], pi, duration)
+            return
+        event_store.end_event(event_id=em["event_id"], ended_at=ts, duration_sec=duration)
+        log.info("EVENT emergency end on %s (PTY %s, %ds)", pi, pty, duration)
+
+    def is_active(self, pi):
+        with self.lock:
+            return pi in self._active
+
+    def is_emergency_active(self, pi):
+        with self.lock:
+            return pi in self._active_emergency
+
+    def busy(self):
+        """A broadcast is going on (no calibration now)."""
+        with self.lock:
+            return bool(self._active or self._active_emergency)
+
+    @staticmethod
+    def _duration(start, end):
+        try:
+            fmt = "%Y-%m-%dT%H:%M:%S"
+            return max(0, int(time.mktime(time.strptime(end[:19], fmt))
+                              - time.mktime(time.strptime(start[:19], fmt))))
+        except Exception:
+            return 0
 
 
-def _notify_publish(topic, payload):
-    """Publisher for push messages: None when MQTT is not configured."""
-    if not config.MQTT_ENABLED or not config.MQTT_HOST:
-        return None
-    return bool(_mqtt_pub(mqtt_client, topic, payload))
-
-
-def _notify(event_id):
-    """Check the push rules for a finished event (own thread)."""
-    if event_id:
-        notifier.dispatch_async(event_id, _notify_publish)
-
-
-def pub(client, topic, payload, qos=None, retain=False):
-    """Publish a JSON payload to an MQTT topic (for regular topic publishing).
-
-    Takes a local client reference to avoid race conditions.
-    """
-    c = client  # snapshot the reference
-    if not _mqtt_available or c is None:
-        return
-    if qos is None:
-        qos = config.MQTT_QOS
-    try:
-        full_topic = f"{config.MQTT_TOPIC_PREFIX}/{topic}"
-        msg = json.dumps(payload)
-        c.publish(full_topic, msg, qos=qos, retain=retain)
-        log.debug("PUB %s %s", full_topic, msg[:120])
-    except Exception:
-        pass  # client may have disconnected during shutdown
-
-
-def create_mqtt_client():
-    import paho.mqtt.client as mqtt
-
-    def on_connect(client, userdata, flags, reason_code, properties):
-        if reason_code == 0:
-            log.info("MQTT connected to %s:%s (client_id=%s)",
-                     config.MQTT_HOST, config.MQTT_PORT, config.MQTT_CLIENT_ID)
-            mqtt_connected.set()
-        else:
-            log.error("MQTT connection refused by broker: reason_code=%s "
-                      "(check credentials and broker config)", reason_code)
-            mqtt_connected.clear()
-
-    def on_disconnect(client, userdata, flags, reason_code, properties):
-        if reason_code == 0:
-            log.info("MQTT disconnected cleanly")
-        else:
-            log.warning("MQTT lost connection (reason_code=%s) — reconnecting...", reason_code)
-        mqtt_connected.clear()
-
-    client = mqtt.Client(
-        mqtt.CallbackAPIVersion.VERSION2,
-        client_id=config.MQTT_CLIENT_ID,
-        protocol=mqtt.MQTTv311,
-    )
-    client.on_connect = on_connect
-    client.on_disconnect = on_disconnect
-    if config.MQTT_USER:
-        client.username_pw_set(config.MQTT_USER, config.MQTT_PASSWORD)
-    client.reconnect_delay_set(min_delay=1, max_delay=30)
-    return client
-
-
-# ---------------------------------------------------------------------------
-# Timestamp helpers
-# ---------------------------------------------------------------------------
-
-def now_iso():
-    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
-
-
-def msg_ts(data):
-    return data.get("timestamp", now_iso())
-
-
-# ---------------------------------------------------------------------------
-# Group handlers — extended topic publishers (used in "all" mode)
-# ---------------------------------------------------------------------------
-
-def handle_pin(client, pi, data):
-    ts = msg_ts(data)
-    payload = {"timestamp": ts}
-    if "prog_item_number" in data:
-        payload["prog_item_number"] = data["prog_item_number"]
-    if "prog_item_started" in data:
-        payload["prog_item_started"] = data["prog_item_started"]
-    if len(payload) > 1 and state.changed(pi, "programme/pin", payload):
-        pub(client, f"{pi}/programme/pin", payload, qos=0, retain=False)
-    country = data.get("country")
-    if country and state.changed(pi, "system/country", country):
-        pub(client, f"{pi}/system/country",
-            {"country": country, "language": data.get("language", ""),
-             "timestamp": ts},
-            qos=0, retain=config.MQTT_RETAIN_STATE)
-
-
-def handle_oda(client, pi, data):
-    ts = msg_ts(data)
-    oda = data.get("open_data_app")
-    if oda and state.changed(pi, "system/oda", oda):
-        pub(client, f"{pi}/system/oda", {"open_data_app": oda, "timestamp": ts},
-            qos=0, retain=config.MQTT_RETAIN_STATE)
-
-
-def handle_clock(client, pi, data):
-    ts = msg_ts(data)
-    ct = data.get("clock_time")
-    if ct:
-        pub(client, f"{pi}/clock", {"clock_time": ct, "timestamp": ts},
-            qos=0, retain=False)
-
-
-def handle_rt_plus(client, pi, data):
-    ts = msg_ts(data)
-    rtp = data.get("radiotext_plus")
-    if rtp and state.changed(pi, "programme/rt_plus", rtp):
-        payload = {
-            "item_running": rtp.get("item_running"),
-            "tags": rtp.get("tags", []),
-            "timestamp": ts,
-        }
-        pub(client, f"{pi}/programme/rt_plus", payload, qos=1, retain=False)
-
-
-def handle_eon(client, pi, data):
-    ts = msg_ts(data)
-    on = data.get("other_network")
-    if not on:
-        return
-    other_pi = on.get("pi", "unknown")
-    payload = {
-        "pi": other_pi,
-        "ps": (on.get("ps") or "").strip(),
-        "tp": on.get("tp"),
-        "ta": on.get("ta"),
-        "kilohertz": on.get("kilohertz"),
-        "timestamp": ts,
-    }
-    eon_key = f"eon/{other_pi}"
-    if state.changed(pi, eon_key, payload):
-        pub(client, f"{pi}/eon/{other_pi}", payload,
-            qos=0, retain=config.MQTT_RETAIN_STATE)
-    if on.get("ta") is not None:
-        ta_key = f"eon/{other_pi}/ta"
-        if state.changed(pi, ta_key, on["ta"]):
-            pub(client, f"{pi}/eon/{other_pi}/ta",
-                {"active": on["ta"], "timestamp": ts},
-                qos=1, retain=config.MQTT_RETAIN_STATE)
-
-
-def handle_long_ps(client, pi, data):
-    ts = msg_ts(data)
-    lps = data.get("long_ps")
-    if lps and state.changed(pi, "station/long_ps", lps):
-        pub(client, f"{pi}/station/long_ps",
-            {"long_ps": lps.strip(), "timestamp": ts},
-            qos=1, retain=config.MQTT_RETAIN_STATE)
-
-
-def handle_ert(client, pi, data):
-    ts = msg_ts(data)
-    ert = data.get("enhanced_radiotext")
-    if ert and state.changed(pi, "programme/ert", ert):
-        pub(client, f"{pi}/programme/ert",
-            {"enhanced_radiotext": ert.strip(), "timestamp": ts},
-            qos=1, retain=False)
-
-
-def handle_bler(client, pi, data):
-    ts = msg_ts(data)
-    bler = data.get("bler")
-    if bler is not None:
-        pub(client, f"{pi}/system/bler",
-            {"bler_pct": bler, "timestamp": ts},
-            qos=0, retain=False)
-
-
-def handle_pi_topic(client, pi, data):
-    ts = msg_ts(data)
-    if state.changed(pi, "station/pi", pi):
-        pub(client, f"{pi}/station/pi", {"pi": pi, "timestamp": ts},
-            qos=1, retain=config.MQTT_RETAIN_STATE)
-
-
-# ---------------------------------------------------------------------------
-# Field-change logger — confirms active decoding in docker logs
-# ---------------------------------------------------------------------------
-
-_logged_fields = {}  # pi/key → last logged value
-
-
-def _log_field_changes(pi, data):
-    """Log notable field changes to confirm the decoder is working."""
-    # RadioText change — only log complete texts, not partial fragments
-    rt = data.get("radiotext")
-    if rt:
-        rt = rt.strip()
-        key = f"{pi}/rt"
-        if _logged_fields.get(key) != rt:
-            _logged_fields[key] = rt
-            log.info("RadioText [%s]: %s", pi, rt)
-
-    # RT+ now playing
-    rtp = data.get("radiotext_plus")
-    if rtp:
-        for tag in rtp.get("tags", []):
-            ct = tag.get("content-type", "")
-            if ct in ("item.title", "item.artist"):
-                tag_key = f"{pi}/rtp/{ct}"
-                val = tag.get("data", "")
-                if _logged_fields.get(tag_key) != val:
-                    _logged_fields[tag_key] = val
-                    label = "Title" if ct == "item.title" else "Artist"
-                    log.info("RT+ %s [%s]: %s", label, pi, val)
-
-    # PTY change
-    pty = data.get("prog_type")
-    if pty:
-        key = f"{pi}/pty"
-        if _logged_fields.get(key) != pty:
-            _logged_fields[key] = pty
-            log.info("PTY [%s]: %s", pi, pty)
-
-    # Long PS
-    lps = data.get("long_ps")
-    if lps:
-        lps = lps.strip()
-        key = f"{pi}/long_ps"
-        if _logged_fields.get(key) != lps:
-            _logged_fields[key] = lps
-            log.info("Long PS [%s]: %s", pi, lps)
-
-
-# ---------------------------------------------------------------------------
-# Main group dispatcher
-# ---------------------------------------------------------------------------
-
-def process_group(client, data, _rules_engine=None):
-    """Route a single redsea JSON object through rules engine and MQTT topics.
-
-    The rules engine ALWAYS runs (writes to SQLite + WebSocket).
-    MQTT topic publishing is controlled by PUBLISH_MODE (essential/all)
-    and only runs if MQTT is configured.
-
-    _rules_engine: override the module-level rules_engine instance.
-        Used by the multi-station path to pass the per-station engine.
-        When None (default), uses the module-level rules_engine singleton
-        (single-station path — unchanged behaviour).
-    """
+def process_group(station, data):
+    """Route one decoded RDS group through the station's rules."""
     pi = data.get("pi")
     if not pi:
         return
-
-    stats.inc()
     pi = str(pi)
-
-    if _rules_engine is None:
-        _rules_engine = rules_engine
-
-    # Always accumulate decoded fields for the status message
-    station_info.update(pi, data)
-
-    # Log notable field changes that confirm active decoding
-    _log_field_changes(pi, data)
-
+    station.stats.inc()
+    station.update_info(pi, data)
+    state, engine = station.state, station.engine
     group = data.get("group", "")
-    ts = msg_ts(data)
 
-    # --- Broadcast to WebSocket console (filtered + deduplicated) ---
-    topic_hint = group.lower() if group else "unknown"
-    if _ws_should_broadcast(pi, group, data):
-        broadcast_ws({"topic": f"{pi}/{topic_hint}", "payload": data, "timestamp": ts})
+    # 1-3: traffic announcements. The first TA value seen (start-up, a new
+    # PI) only says where we are: off ends nothing, on starts the event.
+    if "ta" in data:
+        known = state.is_known(pi, "ta")
+        if state.changed(pi, "ta", data["ta"]) and (known or data["ta"]):
+            engine.on_ta_change(pi, data["ta"], data)
 
-    # --- Rules engine: evaluate all rules ---
-
-    # Rule 1-2: Traffic Announcement (TA flag change)
-    if "ta" in data and state.changed(pi, "traffic/ta", data["ta"]):
-        _rules_engine.on_ta_change(client, pi, data["ta"], data)
-        # Also publish to MQTT topic
-        retain = config.MQTT_RETAIN_STATE
-        pub(client, f"{pi}/traffic/ta",
-            {"active": data["ta"], "since": ts,
-             "prog_type": data.get("prog_type", "")},
-            qos=1, retain=retain)
-
-    # TP flag
-    if "tp" in data and state.changed(pi, "traffic/tp", data["tp"]):
-        pub(client, f"{pi}/traffic/tp", {"tp": data["tp"], "timestamp": ts},
-            qos=1, retain=config.MQTT_RETAIN_STATE)
-
-    # Rule 3: RadioText during active TA
     if group in ("2A", "2B"):
-        # Complete RadioText — use for events and MQTT
-        rt_full = data.get("radiotext")
-        # Partial RadioText — publish to MQTT for real-time display, but
-        # do NOT use for event tracking (would flood with fragments)
-        rt_partial = data.get("partial_radiotext")
-        rt = rt_full or rt_partial
-        if rt and state.changed(pi, "programme/rt", rt):
-            rt_stripped = rt.strip()
-            pub(client, f"{pi}/programme/rt",
-                {"radiotext": rt_stripped, "partial": rt_full is None, "timestamp": ts},
-                qos=1, retain=False)
-            # Only update the traffic event with complete RadioText
-            if rt_full and _rules_engine.is_active(pi):
-                _rules_engine.on_radiotext(client, pi, rt_stripped, data)
+        rt = data.get("radiotext")      # complete RadioText only
+        if rt and state.changed(pi, "rt", rt) and engine.is_active(pi):
+            engine.on_radiotext(pi, rt.strip(), data)
 
-    # Rule 4: PTY alarm
+    # 4: emergency broadcasts
     pty = data.get("prog_type")
-    if pty and state.changed(pi, "station/pty", pty):
-        pub(client, f"{pi}/station/pty", {"prog_type": pty, "timestamp": ts},
-            qos=1, retain=config.MQTT_RETAIN_STATE)
+    if pty and state.changed(pi, "pty", pty):
         if pty in ALERT_PTY:
-            _rules_engine.on_pty_alert(client, pi, pty, data)
-        elif _rules_engine.is_emergency_active(pi):
-            _rules_engine.on_pty_normal(client, pi, pty, data)
-
-    # Rule 5: EON Traffic Announcements (group 14A)
-    # Only create events for genuine TA state transitions, not for the
-    # first observation of a linked station (startup or new PI code).
-    if group == "14A":
-        on = data.get("other_network")
-        if on and on.get("ta") is not None:
-            other_pi = on.get("pi", "unknown")
-            eon_key = f"eon/{other_pi}/ta"
-            was_known = state.is_known(pi, eon_key)
-            if state.changed(pi, eon_key, on["ta"]):
-                pub(client, f"{pi}/eon/{other_pi}/ta",
-                    {"active": on["ta"], "timestamp": ts},
-                    qos=1, retain=config.MQTT_RETAIN_STATE)
-                if was_known:
-                    _rules_engine.on_eon_ta(client, pi, other_pi, on["ta"], data)
-
-    # --- Extended topics (only in "all" mode) ---
-    publish_all = config.PUBLISH_MODE == "all"
-    if not publish_all:
-        if config.PUBLISH_RAW:
-            pub(client, f"{pi}/system/raw", data, qos=0, retain=False)
-        return
-
-    ps = data.get("ps") or data.get("partial_ps")
-    if ps and state.changed(pi, "station/ps", ps):
-        pub(client, f"{pi}/station/ps", {"ps": ps.strip(), "timestamp": ts},
-            qos=1, retain=config.MQTT_RETAIN_STATE)
-
-    handle_pi_topic(client, pi, data)
-
-    if "is_music" in data and state.changed(pi, "programme/music", data["is_music"]):
-        pub(client, f"{pi}/programme/music",
-            {"is_music": data["is_music"], "timestamp": ts},
-            qos=0, retain=config.MQTT_RETAIN_STATE)
-
-    di = data.get("di")
-    if di and state.changed(pi, "programme/di", di):
-        pub(client, f"{pi}/programme/di", {"di": di, "timestamp": ts},
-            qos=0, retain=config.MQTT_RETAIN_STATE)
-
-    for af_key in ("alt_frequencies_a", "alt_frequencies_b", "partial_alt_frequencies"):
-        af = data.get(af_key)
-        if af and state.changed(pi, "station/af", af):
-            pub(client, f"{pi}/station/af",
-                {"frequencies_khz": af, "timestamp": ts},
-                qos=0, retain=config.MQTT_RETAIN_STATE)
-
-    handle_bler(client, pi, data)
-
-    if group in ("1A", "1B"):
-        handle_pin(client, pi, data)
-    if group == "3A":
-        handle_oda(client, pi, data)
-    if group == "4A":
-        handle_clock(client, pi, data)
-    if group == "14A":
-        handle_eon(client, pi, data)
-    if group == "15A":
-        handle_long_ps(client, pi, data)
-    if "radiotext_plus" in data:
-        handle_rt_plus(client, pi, data)
-    if "enhanced_radiotext" in data:
-        handle_ert(client, pi, data)
-    if config.PUBLISH_RAW:
-        pub(client, f"{pi}/system/raw", data, qos=0, retain=False)
+            engine.on_pty_alert(pi, pty, data)
+        elif engine.is_emergency_active(pi):
+            engine.on_pty_normal(pi, pty, data)
 
 
 # ---------------------------------------------------------------------------
-# Status publisher (periodic)
+# The satellite
 # ---------------------------------------------------------------------------
 
-def status_publisher(stop_event):
+class Satellite:
+    """The receivers, their pipelines and stations, and the uplink."""
+
+    def __init__(self):
+        self.started = time.time()
+        self.receivers = []          # receivers.Receiver
+        self.pipelines = []          # pipeline.ReceiverPipeline
+        self.error = None            # why no receiver runs (no dongle …)
+        self.uplink = None
+        self.tuner = None            # gain_tuner.Tuner (set in main)
+
+    def stations(self):
+        return [st for p in self.pipelines for st in (s["station"] for s in p.stations)]
+
+    def receiver_status(self):
+        out = []
+        for p in self.pipelines:
+            pipe = p.status.snapshot()
+            cal = self.tuner.describe(p) if self.tuner else {}
+            out.append({
+                "id": p.receiver.id, "serial": p.receiver.serial,
+                "name": p.receiver.name or None,
+                "state": pipe["state"], "error": pipe["error"],
+                **cal,
+                "stations": [s["station"].snapshot() for s in p.stations],
+            })
+        return out
+
+    def status(self):
+        """For the heartbeat and the health file."""
+        recs = self.receiver_status()
+        stations = [st for r in recs for st in r["stations"]]
+        states = [r["state"] for r in recs]
+        worst = ("error" if "error" in states else
+                 "running" if states and all(s == "running" for s in states) else
+                 (states[0] if states else "error"))
+        errors = [f"{r['id']}: {r['error']}" for r in recs if r.get("error")]
+        if self.error:
+            errors.insert(0, self.error)
+        return {
+            "uptime_sec": int(time.time() - self.started),
+            "receivers": recs,
+            # For aggregators and node cards that read the flat shape
+            "pipeline": {"state": worst, "error": "; ".join(errors)[:256] or None},
+            "stations": [{k: st.get(k) for k in
+                          ("frequency", "pi", "ps", "long_ps", "prog_type", "tp", "ta",
+                           "groups_per_sec", "groups_total")} for st in stations],
+        }
+
+
+def _housekeeping(sat, stop_event):
+    import satellite_health
+    last_purge = 0.0
     while not stop_event.is_set():
-        stop_event.wait(config.STATUS_INTERVAL)
-        if stop_event.is_set():
-            break
-        snap = stats.snapshot()
-        snap["mqtt_connected"] = mqtt_connected.is_set()
-        snap["frequency"] = rules_engine.frequency
-        snap["timestamp"] = now_iso()
-        si = station_info.snapshot()
-        if si:
-            primary = next(iter(si.values()))
-            snap["station"] = primary
-        else:
-            snap["station"] = None
-        pub(mqtt_client, "system/status", snap, qos=0,
-            retain=config.MQTT_RETAIN_STATE)
-
-
-# ---------------------------------------------------------------------------
-# Retention purge (hourly)
-# ---------------------------------------------------------------------------
-
-def retention_purge(stop_event):
-    """Purge old events every hour."""
-    days = config.EVENT_RETENTION_DAYS
-    while not stop_event.is_set():
-        stop_event.wait(3600)
-        if stop_event.is_set():
-            break
-        try:
-            event_store.purge_old_events(days)
-            event_store.purge_notify_log(days)
-        except Exception:
-            log.exception("Error during retention purge")
-
-
-# ---------------------------------------------------------------------------
-# Module-level MQTT client — set by background thread, read by process_group
-# ---------------------------------------------------------------------------
-
-mqtt_client = None
-
-# Uplink to an aggregator — set by main() in satellite mode, else None
-uplink = None
-
-
-def _uplink_status():
-    """Status fields included in the uplink heartbeat."""
-    import status
-    snap = status.build_status()
-    pipe = snap.get("pipeline") or {}
-    return {
-        "uptime_sec": snap.get("uptime_sec"),
-        "pipeline": {"state": pipe.get("state"), "error": pipe.get("error")},
-        "stations": status.station_list(snap),
-        # Where this receiver is ("Ort, Län") and whether it processes its
-        # recordings itself or leaves everything to the aggregator
-        "location": config.NODE_LOCATION or None,
-        "local_processing": config.LOCAL_PROCESSING,
-    }
-
-
-# ---------------------------------------------------------------------------
-# MQTT background connector — non-blocking, never delays startup
-# ---------------------------------------------------------------------------
-
-def _connect_mqtt_background():
-    """Connect to MQTT broker in a background thread.
-
-    Sets module-level mqtt_client and _mqtt_available when ready.
-    Never blocks main startup.
-    """
-    global mqtt_client, _mqtt_available
-
-    if not config.MQTT_HOST:
-        log.warning("MQTT enabled but MQTT_HOST is empty — skipping MQTT")
-        return
-
-    log.info("MQTT connecting to %s:%s ...", config.MQTT_HOST, config.MQTT_PORT)
-    try:
-        client = create_mqtt_client()
-        client.connect(config.MQTT_HOST, config.MQTT_PORT, keepalive=60)
-        client.loop_start()
-        _mqtt_available = True
-        mqtt_client = client  # atomic ref assignment — safe under GIL
-        log.info("MQTT client started (connection in progress)")
-    except Exception as e:
-        log.error("MQTT connection failed: %s", e)
-        log.warning("Continuing without MQTT — web UI and event store still active")
-        _mqtt_available = False
-
-
-# ---------------------------------------------------------------------------
-# Pipeline data callback — fed by pipeline.py reader thread
-# ---------------------------------------------------------------------------
-
-_line_count = 0
-_error_count = 0
-_last_stats_log = 0.0
-_first_group = True
-
-
-def _on_pipeline_line(raw_line):
-    """Process a single line of ndjson from the redsea pipeline.
-
-    Called by the pipeline thread for each line of redsea output.
-    """
-    global _line_count, _error_count, _last_stats_log, _first_group
-
-    line = raw_line.decode("utf-8", errors="replace").strip()
-    if not line:
-        return
-
-    try:
-        data = json.loads(line)
-        process_group(mqtt_client, data)
-        _line_count += 1
-
-        if _first_group:
-            pi = data.get("pi", "?")
-            log.info("════════════════════════════════════════════")
-            log.info("  First RDS group received — decoder is running")
-            log.info("  PI: %s  Frequency: %s", pi, rules_engine.frequency)
-            log.info("════════════════════════════════════════════")
-            _first_group = False
-
-        # Periodic progress log every 60 seconds
         now = time.time()
-        if now - _last_stats_log >= 60:
-            snap = stats.snapshot()
-            summary = station_info.primary_summary()
-            if summary:
-                log.info("Stats: %d groups, %.1f grp/s, uptime %ds — %s",
-                         snap["groups_total"], snap["groups_per_sec"],
-                         snap["uptime_sec"], summary)
-            else:
-                log.info("Stats: %d groups, %.1f grp/s, uptime %ds (no station identified yet)",
-                         snap["groups_total"], snap["groups_per_sec"],
-                         snap["uptime_sec"])
-            _last_stats_log = now
-
-    except json.JSONDecodeError:
-        _error_count += 1
-        if _error_count <= 10:
-            log.warning("Invalid JSON (line %d): %s",
-                        _line_count + _error_count, line[:100])
-        elif _error_count == 11:
-            log.warning("Suppressing further JSON error messages")
-    except Exception:
-        log.exception("Error processing group")
+        try:
+            snap = sat.status()
+            snap["uplink"] = sat.uplink.snapshot() if sat.uplink else None
+            satellite_health.write(config.HEALTH_FILE, snap)
+        except Exception:
+            log.debug("Could not write the health file", exc_info=True)
+        if now - last_purge >= 3600:
+            last_purge = now
+            try:
+                event_store.purge(config.SATELLITE_KEEP_DAYS, config.SPOOL_DIR)
+            except Exception:
+                log.exception("Purge failed")
+        stop_event.wait(10)
 
 
-# ---------------------------------------------------------------------------
-# Main — supervisor pattern
-# ---------------------------------------------------------------------------
+def build_pipelines(sat, receivers_list):
+    from audio_recorder import AudioRecorder
+    from pipeline import ReceiverPipeline
+
+    pipelines = []
+    for r in receivers_list:
+        for w in r.warnings:
+            log.warning("[%s] %s", r.id, w)
+        stations = []
+        for freq in r.frequencies:
+            rec = AudioRecorder(config.SPOOL_DIR, max_duration_sec=config.MAX_RECORDING_SEC)
+            st = Station(r.id, freq, recorder=rec, record_types=config.RECORD_EVENT_TYPES)
+            stations.append({"frequency": freq, "callback": st.on_line,
+                             "recorder": rec, "station": st})
+        settings = (lambda r=r: sat.tuner.settings(r)) if sat.tuner else (lambda r=r: (
+            r.gain if r.gain != "auto" else 20.0, r.ppm if r.ppm != "auto" else 0))
+        pipelines.append(ReceiverPipeline(r, stations, settings))
+    return pipelines
+
 
 def main():
-    global _mqtt_available, _event_loop, _last_stats_log, uplink, geo_service
+    for msg in config.problems():
+        log.error(msg)
+        sys.exit(1)
 
     log.info("════════════════════════════════════════════")
-    log.info("  RDS Guard starting")
+    log.info("  RDS Guard satellite %s", config.BUILD_VERSION)
+    log.info("  Aggregator: %s", config.UPLINK_URL)
+    log.info("  Node name:  %s", config.NODE_NAME or "(not set)")
     log.info("════════════════════════════════════════════")
-    if config.MULTI_STATION:
-        log.info("  Frequencies: %s (multi-station)", ", ".join(config.STATION_FREQS))
-    else:
-        log.info("  Frequency:  %s", config.FM_FREQUENCY)
-    log.info("  Publish:    %s (raw: %s)", config.PUBLISH_MODE, config.PUBLISH_RAW)
-    log.info("  Retention:  %d days", config.EVENT_RETENTION_DAYS)
-    log.info("  Web UI:     port %d", config.WEB_UI_PORT)
-    log.info("  MQTT:       %s", "enabled" if config.MQTT_ENABLED else "disabled")
-    log.info("  Recording:  always on → %s", config.AUDIO_DIR)
-    if config.LOCAL_PROCESSING:
-        log.info("  Transcribe: %s", config.TRANSCRIPTION_ENGINE)
-        log.info("  Map:        %s, location %s", config.GEO_ENGINE,
-                 config.NODE_LOCATION or "(NODE_LOCATION not set)")
-        log.info("  Trafikverket: %s", "on" if config.TRAFIKVERKET_API_KEY
-                 else "off (no TRAFIKVERKET_API_KEY)")
-    else:
-        log.info("  Processing: off — raw recordings go to the aggregator, "
-                 "which transcribes and maps them")
-    if config.MQTT_ENABLED:
-        log.info("  MQTT host:  %s:%s", config.MQTT_HOST or "(empty)", config.MQTT_PORT)
-        log.info("  MQTT user:  %s", config.MQTT_USER or "(none)")
-        log.info("  MQTT prefix: %s", config.MQTT_TOPIC_PREFIX)
-    if config.UPLINK_ENABLED:
-        log.info("  Mode:       satellite → %s", config.UPLINK_URL)
-        log.info("  Node name:  %s", config.NODE_NAME or "(not set)")
-    else:
-        log.info("  Mode:       standalone (no uplink)")
+    retired = config.retired_in_use()
+    if retired:
+        log.warning("Not used by the satellite any more (the aggregator does this): %s",
+                    ", ".join(retired))
 
-    # --- 1. Initialize event store (fast, ~10ms) ---
-    log.info("Initializing event store...")
-    event_store.init_db()
-    notifier.init()
+    import receivers as receivers_mod
+    from uplink import Uplink
 
-    # Satellite mode: queue event changes for the aggregator.  Enabled before
-    # stale events are closed so that their end is forwarded too.
-    if config.UPLINK_ENABLED:
-        from uplink import Uplink
-        uplink = Uplink(
-            base_url=config.UPLINK_URL,
-            token=config.UPLINK_TOKEN,
-            audio_dir=config.AUDIO_DIR,
-            node_name=config.NODE_NAME,
-            version=config.BUILD_VERSION,
-            status_fn=_uplink_status,
-            heartbeat_sec=config.UPLINK_HEARTBEAT_SEC,
-            max_age_hours=config.UPLINK_MAX_AGE_HOURS,
-            join_key=config.JOIN_KEY,
-            suggested_location=config.NODE_LOCATION or None,
-        )
-        event_store.enable_outbox(uplink.notify)
+    event_store.init_db(config.DB_PATH)
+    event_store.migrate_from(config.OLD_DB_PATH, config.OLD_AUDIO_DIR, config.SPOOL_DIR)
 
+    sat = Satellite()
+    sat.uplink = Uplink(
+        base_url=config.UPLINK_URL, token=config.UPLINK_TOKEN,
+        audio_dir=config.SPOOL_DIR, node_name=config.NODE_NAME,
+        version=config.BUILD_VERSION, status_fn=sat.status,
+        heartbeat_sec=config.UPLINK_HEARTBEAT_SEC,
+        max_age_hours=config.UPLINK_MAX_AGE_HOURS, join_key=config.JOIN_KEY,
+        suggested_location=config.NODE_LOCATION or None)
+    event_store.enable_outbox(sat.uplink.notify)
     event_store.close_stale_events()
 
     stop_event = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stop_event.set())
+    signal.signal(signal.SIGINT, lambda *_: stop_event.set())
+    sat.uplink.start(stop_event)
+    threading.Thread(target=_housekeeping, args=(sat, stop_event), daemon=True,
+                     name="housekeeping").start()
 
-    # --- 1b. Initialize transcription + recording ---
-    from transcriber import create_transcriber
-    from audio_recorder import AudioRecorder
-
-    transcriber_instance = create_transcriber(
-        engine=config.TRANSCRIPTION_ENGINE if config.LOCAL_PROCESSING else "none",
-        language=config.TRANSCRIPTION_LANGUAGE,
-        model_size=config.TRANSCRIPTION_MODEL,
-        device=config.TRANSCRIPTION_DEVICE,
-        remote_url=config.WHISPER_REMOTE_URL,
-        remote_timeout=config.WHISPER_REMOTE_TIMEOUT,
-        initial_prompt=config.TRANSCRIPTION_PROMPT,
-        beam_size=config.TRANSCRIPTION_BEAM_SIZE,
-        cpu_threads=config.TRANSCRIPTION_CPU_THREADS,
-        elevenlabs_api_key=config.ELEVENLABS_API_KEY,
-        elevenlabs_model=config.ELEVENLABS_MODEL,
-        elevenlabs_keyterms=config.ELEVENLABS_KEYTERMS,
-        elevenlabs_timeout=config.ELEVENLABS_TIMEOUT,
-        fallback=config.TRANSCRIPTION_FALLBACK,
-    )
-    if transcriber_instance:
-        transcriber_instance.start()
-
-    if config.LOCAL_PROCESSING:
-        import geo_service as geo_service_mod
-        geo_service = geo_service_mod.create_service(
-            config.GEO_ENGINE, api_key=config.ANTHROPIC_API_KEY,
-            model=config.CLAUDE_MODEL, timeout=config.CLAUDE_TIMEOUT,
-            place_names=config.TRANSCRIPTION_PLACE_NAMES)
-        threading.Thread(target=_init_geo, daemon=True, name="geo-init").start()
-        _start_trafikverket()
-        if transcriber_instance:
-            transcriber_instance = _HintingTranscriber(transcriber_instance)
-
-    record_types_set = set(t.strip() for t in config.RECORD_EVENT_TYPES.split(","))
-
-    if not config.MULTI_STATION:
-        # Single-station: one recorder, one rules engine (module-level singletons)
-        recorder = AudioRecorder(
-            audio_dir=config.AUDIO_DIR,
-            transcriber=transcriber_instance,
-            on_transcription_complete=_on_transcription_complete,
-            max_duration_sec=config.MAX_RECORDING_SEC,
-        )
-        log.info("Audio recording enabled → %s", config.AUDIO_DIR)
-        # Wire recorder to module-level rules engine
-        rules_engine._recorder = recorder
-        rules_engine._record_types = record_types_set
-        rules_engine.frequency = config.FM_FREQUENCY
-        # Single-station station_configs not needed below — set to None
-        station_configs_multi = None
-        callbacks_multi = None
-    else:
-        # Multi-station: one recorder + one RulesEngine per station
-        recorder = None   # pipeline will use per-station recorders
-        station_configs_multi = []
-        callbacks_multi = []
-        for freq in config.STATION_FREQS:
-            rec = AudioRecorder(
-                audio_dir=config.AUDIO_DIR,
-                transcriber=transcriber_instance,
-                on_transcription_complete=_on_transcription_complete,
-                max_duration_sec=config.MAX_RECORDING_SEC,
-            )
-            st_stats = Stats()
-            _station_stats[freq] = st_stats
-            re = RulesEngine(
-                recorder=rec,
-                record_event_types=config.RECORD_EVENT_TYPES,
-                frequency=freq,
-            )
-            station_configs_multi.append({
-                "frequency": freq,
-                "freq_hz": config._parse_freq_hz(freq),
-                "recorder": rec,
-            })
-            callbacks_multi.append(
-                _make_station_callback(freq, re, st_stats)
-            )
-        log.info("Audio recording enabled → %s (multi-station)", config.AUDIO_DIR)
-
-    # --- 2. Start web server FIRST — always available ---
-    log.info("Starting web server on port %d...", config.WEB_UI_PORT)
-    import web_server
-    from pipeline import pipeline_status
-
-    web_thread = threading.Thread(
-        target=web_server.run_server,
-        args=(config.WEB_UI_PORT, stats, station_info, mqtt_connected, pipeline_status),
-        daemon=True,
-    )
-    web_thread.start()
-
-    # Give the web server a moment to bind
-    time.sleep(0.5)
-    if web_thread.is_alive():
-        log.info("Web UI ready at http://0.0.0.0:%d", config.WEB_UI_PORT)
-    else:
-        log.error("Web server thread died on startup!")
-
-    # --- 3. MQTT in background (non-blocking, fire-and-forget) ---
-    if config.MQTT_ENABLED:
-        mqtt_thread = threading.Thread(
-            target=_connect_mqtt_background,
-            daemon=True,
-        )
-        mqtt_thread.start()
-    else:
-        log.info("MQTT disabled (set MQTT_ENABLED=true in .env to activate)")
-
-    # --- 4. Start radio pipeline (with AudioTee + recorder) ---
-    from pipeline import run_pipeline, run_pipeline_multi
-
-    _last_stats_log = time.time()
-
-    if not config.MULTI_STATION:
-        pipeline_thread = threading.Thread(
-            target=run_pipeline,
-            args=(_on_pipeline_line, pipeline_status, stop_event, recorder),
-            daemon=True,
-        )
-    else:
-        pipeline_thread = threading.Thread(
-            target=run_pipeline_multi,
-            args=(station_configs_multi, callbacks_multi,
-                  pipeline_status, stop_event),
-            daemon=True,
-        )
-    pipeline_thread.start()
-
-    # --- 5. Housekeeping threads ---
-
-    # MQTT status publisher — uses module-level mqtt_client
-    # Start it even if MQTT isn't connected yet; it will be a no-op until
-    # _mqtt_available becomes True
-    if config.MQTT_ENABLED:
-        status_thread = threading.Thread(
-            target=status_publisher, args=(stop_event,), daemon=True
-        )
-        status_thread.start()
-        log.info("MQTT status publisher started (every %ds)", config.STATUS_INTERVAL)
-
-    # Retention purge
-    purge_thread = threading.Thread(
-        target=retention_purge, args=(stop_event,), daemon=True
-    )
-    purge_thread.start()
-
-    # Uplink worker + heartbeat (satellite mode only)
-    if uplink:
-        uplink.start(stop_event)
-
-    # --- 6. Signal handling + main thread wait ---
-    def shutdown(signum, frame):
-        log.info("Shutting down (signal %s)...", signum)
-        stop_event.set()
-
-    signal.signal(signal.SIGTERM, shutdown)
-    signal.signal(signal.SIGINT, shutdown)
-
-    log.info("RDS Guard running — all systems started")
-
-    # Block main thread until shutdown signal
-    try:
-        stop_event.wait()
-    except KeyboardInterrupt:
-        pass
-
-    # --- Cleanup ---
-    log.info("Cleaning up...")
-
-    if mqtt_client:
+    # The receivers: retried until a dongle is there (the heartbeat says why)
+    while not stop_event.is_set():
         try:
-            mqtt_client.loop_stop()
-            mqtt_client.disconnect()
-            log.info("MQTT disconnected")
-        except Exception:
-            pass
+            found = receivers_mod.load()
+            sat.error = None
+            break
+        except Exception as e:
+            sat.error = str(e)
+            log.error("%s (trying again in 60 s)", e)
+            stop_event.wait(60)
+    if stop_event.is_set():
+        return
 
-    # Give threads a moment to finish
-    pipeline_thread.join(timeout=5)
+    sat.receivers = found
+    try:
+        import gain_tuner
+        sat.tuner = gain_tuner.Tuner(sat)
+    except ImportError:
+        sat.tuner = None
+    sat.pipelines = build_pipelines(sat, found)
+    if sat.tuner:
+        sat.uplink.on_commands = sat.tuner.on_commands
+    for p in sat.pipelines:
+        log.info("Receiver %s (serial %s): %s", p.receiver.id, p.receiver.serial,
+                 ", ".join(p.receiver.frequencies))
+        threading.Thread(target=p.run, args=(stop_event,), daemon=True,
+                         name=f"pipeline-{p.receiver.id}").start()
+    if sat.tuner:
+        threading.Thread(target=sat.tuner.run, args=(stop_event,), daemon=True,
+                         name="gain-tuner").start()
 
-    log.info("RDS Guard stopped — %d groups decoded, %d JSON errors",
-             _line_count, _error_count)
+    log.info("RDS Guard satellite running")
+    stop_event.wait()
+    log.info("Stopping …")
+    time.sleep(1)
 
 
 if __name__ == "__main__":
-    # Register this module under its proper name so that `import rds_guard`
-    # in other modules (e.g. web_server) returns THIS module instance instead
-    # of loading a second copy.  Without this, __main__ and rds_guard would be
-    # two separate objects with independent _ws_clients / _event_loop state.
-    import sys
     sys.modules["rds_guard"] = sys.modules[__name__]
-
     main()
