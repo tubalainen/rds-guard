@@ -30,6 +30,7 @@ def event(agg_store, tmp_path):
     audio.mkdir(exist_ok=True)
     (audio / f"{UID}.ogg").write_bytes(b"OggS1234")
     agg_store.set_event_audio(node["id"], UID, f"{UID}.ogg", None)
+    agg_store.choose_audio(agg_store.get_event(UID)["id"], None, 10)
     agg_store.set_transcription(UID, "Olycka", "done", 1.5)
     return node
 

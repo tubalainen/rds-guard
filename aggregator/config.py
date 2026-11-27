@@ -50,6 +50,17 @@ MAX_AUDIO_BYTES = 8 * 1024 * 1024
 INGEST_RATE_PER_MIN = max(1, _int(os.environ.get("INGEST_RATE_PER_MIN"), 120))
 INGEST_BURST = max(1, _int(os.environ.get("INGEST_BURST"), 60))
 
+# --- One broadcast heard by several nodes or receivers ---
+# Receptions of the same type and PI whose starts (on the aggregator's clock)
+# are this close, or that start while the broadcast is on, are one broadcast
+MATCH_WINDOW_SEC = max(0, _int(os.environ.get("MATCH_WINDOW_SEC"), 30))
+# After the first recording of a broadcast arrives, wait this long for the
+# others before choosing the longest to transcribe (no wait with one)
+BEST_AUDIO_WAIT_SEC = max(0, _int(os.environ.get("BEST_AUDIO_WAIT_SEC"), 10))
+# A broadcast ends this long after one of its receptions ended, even if
+# another node went silent before reporting its end
+BROADCAST_END_GRACE_SEC = max(10, _int(os.environ.get("BROADCAST_END_GRACE_SEC"), 120))
+
 # --- Joining (protocol 2) ---
 # The same secret on a satellite (JOIN_KEY) approves its join at once, e.g.
 # both containers in one docker-compose.yml. Empty: every new satellite waits

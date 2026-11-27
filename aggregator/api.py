@@ -57,7 +57,24 @@ def public_event(row):
     ev = {k: row.get(k) for k in _PUBLIC_EVENT_FIELDS}
     ev["audio_url"] = (f"/api/v1/audio/{row['event_uid']}.ogg"
                        if row.get("audio_path") else None)
+    # Every node that heard the broadcast (node_name: the one transcribed)
+    ev["nodes"] = row.get("node_names") or ([row["node_name"]] if row.get("node_name") else [])
     return ev
+
+
+def public_reception(rec, primary_id):
+    return {
+        "node_name": rec.get("node_name"),
+        "receiver": rec.get("receiver"),
+        "frequency": rec.get("frequency"),
+        "started_at": rec.get("started_at"),
+        "ended_at": rec.get("ended_at"),
+        "duration_sec": rec.get("duration_sec"),
+        "state": rec.get("state"),
+        "transcribed": rec.get("id") == primary_id,
+        "audio_url": (f"/api/v1/audio/reception/{rec['reception_uid']}.ogg"
+                      if rec.get("audio_path") else None),
+    }
 
 
 def _with_notify(rows):
@@ -210,6 +227,9 @@ async def handle_event(request):
     def work():
         out = _with_notify([row])[0]
         trafikverket.attach(store.trv, out.get("incidents") or [])
+        recs = store.receptions_for_events([row["id"]]).get(row["id"], [])
+        out["receptions"] = [public_reception(r, row.get("primary_reception_id"))
+                             for r in recs]
         return out
     return web.json_response(await _run(work))
 
@@ -338,7 +358,11 @@ async def handle_audio(request):
     uid = request.match_info["uid"]
     if not valid_uid(uid):
         return _error(404, "not_found")
-    row = await _run(store.get_event, uid)
+    if request.match_info.get("kind") == "reception":
+        # One node's own recording of a broadcast
+        row = await _run(store.get_reception, uid)
+    else:
+        row = await _run(store.get_event, uid)
     if row is None or not row.get("audio_path"):
         return _error(404, "not_found")
     path = pathlib.Path(config.AUDIO_DIR) / pathlib.Path(row["audio_path"]).name
@@ -668,6 +692,7 @@ def create_web_app(pipeline=None, mqtt=None):
     r.add_post("/api/v1/notify/preview", handle_preview_rule)
     r.add_post("/api/v1/notify/test", handle_test_rule)
     r.add_get("/api/v1/audio/{uid}.ogg", handle_audio)
+    r.add_get("/api/v1/audio/{kind:reception}/{uid}.ogg", handle_audio)
     r.add_get("/api/v1/stations", handle_stations)
     r.add_get("/api/v1/incidents", handle_incidents)
     r.add_post("/api/v1/incidents/backfill", handle_incidents_backfill)

@@ -102,6 +102,7 @@ def alert_payload(row, transcription_status, locations=None):
             for loc in (locations or []) if loc.get("trafikverket")],
         "event_id": row["event_uid"],
         "node": {"name": row.get("node_name")},
+        "nodes": [{"name": n} for n in (row.get("node_names") or [row.get("node_name")])],
         "timestamp": store.now_iso(),
     }
 
@@ -147,8 +148,17 @@ class Pipeline(Hooks):
         self._wake.set()
 
     def on_audio(self, row):
-        self.enqueue_transcription(row)
+        # With one reception the recording is chosen (and transcribed) now;
+        # with several, once all have sent theirs or after a short wait
+        self._choose_audio(row["id"])
         self._wake.set()
+
+    def _choose_audio(self, event_id, now=None):
+        status = "queued" if self._transcriber is not None else None
+        chosen = store.choose_audio(event_id, status, config.BEST_AUDIO_WAIT_SEC, now)
+        if chosen is not None:
+            self.enqueue_transcription(chosen)
+        return chosen
 
     def on_delete(self, row):
         # A discarded (too short) announcement: clear the TA flag again
@@ -392,6 +402,13 @@ class Pipeline(Hooks):
     def sweep(self, now=None):
         """One pass: alerts, node liveness, retention."""
         now = time.time() if now is None else now
+        for event_id in store.events_waiting_for_audio():
+            self._choose_audio(event_id, now)
+        for row in store.close_lingering_broadcasts(config.BROADCAST_END_GRACE_SEC):
+            log.info("Broadcast %s ended (a node never reported its end)",
+                     row["event_uid"])
+            if row["type"] == "traffic":
+                self._publish_ta(row, False)
         self._sweep_alerts(now)
         self._sweep_nodes(now)
         if now - self._last_purge >= 3600:

@@ -204,7 +204,11 @@ async def test_audio_upload(client, node, hooks, agg_store, tmp_path):
     r = await client.put(_url(uid, "/audio"), data=OGG, headers=h)
     assert r.status == 200
 
-    row = agg_store.get_event(uid)
+    # Stored with the reception; the pipeline (on_audio) chooses the
+    # broadcast's recording
+    assert agg_store.get_reception(uid)["audio_path"] == f"{uid}.ogg"
+    assert agg_store.get_reception(uid)["audio_bytes"] == len(OGG)
+    row = agg_store.choose_audio(agg_store.get_event(uid)["id"], "queued", 10)
     assert row["audio_path"] == f"{uid}.ogg"
     assert row["transcription_status"] == "queued"
     assert (tmp_path / "audio" / f"{uid}.ogg").read_bytes() == OGG

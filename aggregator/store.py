@@ -1,5 +1,6 @@
 """SQLite store for the aggregator: nodes and the events they report."""
 
+import calendar
 import hashlib
 import hmac
 import json
@@ -144,6 +145,35 @@ def init_db(db_path):
             created_at      TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS receptions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            reception_uid   TEXT NOT NULL UNIQUE,
+            event_id        INTEGER NOT NULL
+                            REFERENCES events(id) ON DELETE CASCADE,
+            node_id         INTEGER NOT NULL
+                            REFERENCES nodes(id) ON DELETE CASCADE,
+            receiver        TEXT NOT NULL DEFAULT '0',
+            rev             INTEGER NOT NULL,
+            type            TEXT NOT NULL,
+            state           TEXT NOT NULL,
+            pi              TEXT NOT NULL,
+            station_ps      TEXT,
+            long_ps         TEXT,
+            frequency       TEXT,
+            prog_type       TEXT,
+            radiotext       TEXT NOT NULL DEFAULT '[]',
+            started_at      TEXT,
+            ended_at        TEXT,
+            duration_sec    INTEGER,
+            sent_at         TEXT,
+            received_at     TEXT NOT NULL,
+            updated_at      TEXT NOT NULL,
+            end_received_at TEXT,
+            audio_path      TEXT,
+            audio_received_at TEXT,
+            audio_bytes     INTEGER
+        );
+
         CREATE TABLE IF NOT EXISTS join_requests (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             join_id         TEXT NOT NULL UNIQUE,
@@ -171,15 +201,54 @@ def init_db(db_path):
                 raise
     # Where a node is, set by the aggregator's owner in Admin (overrides the
     # location the node reports in its heartbeat)
-    try:
-        conn.execute("ALTER TABLE nodes ADD COLUMN location TEXT")
-    except sqlite3.OperationalError as e:
-        if "duplicate column" not in str(e).lower():
-            raise
+    _add_column(conn, "nodes", "location", "TEXT")
+    # v0.11: an event is a broadcast, heard by one or more receptions
+    _add_column(conn, "events", "primary_reception_id", "INTEGER")
+    _add_column(conn, "events", "audio_pending_since", "TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_receptions_event ON receptions(event_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_receptions_node ON receptions(node_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_type_pi "
+                 "ON events(type, pi, started_at)")
+    ensure_receptions(conn)
     geolocate.init_tables(conn)
     trafikverket.init_tables(conn)
     conn.commit()
     log.info("Aggregator store initialized at %s", _DB_PATH)
+
+
+def _add_column(conn, table, column, kind):
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+    except sqlite3.OperationalError as e:
+        if "duplicate column" not in str(e).lower():
+            raise
+
+
+def ensure_receptions(conn=None):
+    """Give every event without receptions one, copied from the event (events
+    stored before v0.11, and events added by the import). Idempotent."""
+    own = conn is None
+    conn = conn or _conn()
+    cur = conn.execute(
+        "INSERT INTO receptions (reception_uid, event_id, node_id, receiver, rev, "
+        "type, state, pi, station_ps, long_ps, frequency, prog_type, radiotext, "
+        "started_at, ended_at, duration_sec, sent_at, received_at, updated_at, "
+        "end_received_at, audio_path, audio_received_at) "
+        "SELECT e.event_uid, e.id, e.node_id, '0', e.rev, e.type, e.state, e.pi, "
+        "e.station_ps, e.long_ps, e.frequency, e.prog_type, e.radiotext, "
+        "e.started_at, e.ended_at, e.duration_sec, e.sent_at, e.received_at, "
+        "e.updated_at, e.end_received_at, e.audio_path, e.audio_received_at "
+        "FROM events e WHERE NOT EXISTS "
+        "(SELECT 1 FROM receptions r WHERE r.event_id = e.id)")
+    if cur.rowcount:
+        conn.execute(
+            "UPDATE events SET primary_reception_id = (SELECT r.id FROM receptions r "
+            "WHERE r.event_id = events.id ORDER BY r.id LIMIT 1) "
+            "WHERE primary_reception_id IS NULL")
+        log.info("Gave %d events their reception", cur.rowcount)
+    if own:
+        conn.commit()
+    return cur.rowcount
 
 
 def close():
@@ -415,19 +484,25 @@ def set_node_enabled(node_id, enabled):
 
 
 def delete_node(node_id):
-    """Delete a node and all its events. Returns the audio files to remove,
-    or None if the node did not exist."""
+    """Delete a node and its receptions. Broadcasts only it heard go with
+    it; those others heard too stay, with what the others heard. Returns the
+    audio files to remove, or None if the node did not exist."""
     with _lock:
         conn = _conn()
-        rows = conn.execute(
-            "SELECT audio_path FROM events WHERE node_id = ? "
-            "AND audio_path IS NOT NULL", (node_id,)).fetchall()
-        cur = conn.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
+        if conn.execute("SELECT 1 FROM nodes WHERE id = ?", (node_id,)).fetchone() is None:
+            return None
+        files = [r["audio_path"] for r in conn.execute(
+            "SELECT audio_path FROM receptions WHERE node_id = ? "
+            "AND audio_path IS NOT NULL", (node_id,))]
+        event_ids = [r[0] for r in conn.execute(
+            "SELECT DISTINCT event_id FROM receptions WHERE node_id = ?", (node_id,))]
+        conn.execute("DELETE FROM receptions WHERE node_id = ?", (node_id,))
+        for event_id in event_ids:
+            _after_reception_removed(conn, event_id)
+        conn.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
         conn.commit()
-    if cur.rowcount == 0:
-        return None
     log.info("Node #%d deleted", node_id)
-    return [r["audio_path"] for r in rows]
+    return files
 
 
 def set_node_location(node_id, location):
@@ -511,83 +586,328 @@ STALE = "stale"
 CONFLICT = "conflict"
 
 
-def upsert_event(node_id, event_uid, ev):
-    """Store a validated event snapshot.
+def _epoch(ts):
+    if not ts:
+        return None
+    try:
+        return calendar.timegm(time.strptime(str(ts)[:19], "%Y-%m-%dT%H:%M:%S"))
+    except ValueError:
+        return None
 
-    Returns (result, previous_state, row) where result is STORED, STALE
-    (an equal or newer rev is already stored) or CONFLICT (the uid belongs
-    to another node). previous_state is None for a new event.
+
+def _offset(conn, node_id, cache):
+    """Seconds to add to a node's timestamps to get ours (0 when unknown)."""
+    if node_id not in cache:
+        row = conn.execute("SELECT clock_offset_sec FROM nodes WHERE id = ?",
+                           (node_id,)).fetchone()
+        cache[node_id] = (row[0] if row and row[0] is not None else 0) or 0
+    return cache[node_id]
+
+
+def _find_broadcast(conn, node_id, ev, window_sec):
+    """The broadcast a new reception belongs to, or None.
+
+    Same type and PI, and, on the aggregator's clock (each node's measured
+    offset applied), it started within window_sec of the broadcast's start
+    or while the broadcast was going on. A broadcast that has ended does not
+    take a reception that started after it ended: that is the next one.
+    """
+    start = _epoch(ev.get("started_at"))
+    if start is None:
+        return None
+    offsets = {}
+    start += _offset(conn, node_id, offsets)
+    lo = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start - 6 * 3600))
+    hi = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start + 6 * 3600))
+    best = None
+    for cand in conn.execute(
+            "SELECT id, state FROM events WHERE type = ? AND pi = ? "
+            "AND started_at BETWEEN ? AND ? ORDER BY id DESC",
+            (ev["type"], ev["pi"], lo, hi)).fetchall():
+        starts, ends, ongoing = [], [], cand["state"] != "end"
+        for r in conn.execute("SELECT node_id, state, started_at, ended_at "
+                              "FROM receptions WHERE event_id = ?", (cand["id"],)):
+            off = _offset(conn, r["node_id"], offsets)
+            s = _epoch(r["started_at"])
+            if s is not None:
+                starts.append(s + off)
+            e = _epoch(r["ended_at"])
+            if e is not None:
+                ends.append(e + off)
+            if r["state"] != "end":
+                ongoing = True
+        if not starts:
+            continue
+        c_start = min(starts)
+        c_end = None if ongoing or not ends else max(ends)
+        if abs(start - c_start) <= window_sec or (
+                c_start <= start and (c_end is None or start <= c_end)):
+            if best is None or abs(start - c_start) < best[0]:
+                best = (abs(start - c_start), cand["id"])
+    return best[1] if best else None
+
+
+def _recompute(conn, event_id, ts=None, end_grace_sec=None):
+    """Derive a broadcast's fields from its receptions.
+
+    It has ended when every reception has, or when some have and the last
+    end came in end_grace_sec ago (a node that went silent must not hold
+    the alert). Once ended it stays ended: late arrivals only add.
+    """
+    ts = ts or now_iso()
+    ev = conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
+    recs = conn.execute("SELECT * FROM receptions WHERE event_id = ? ORDER BY id",
+                        (event_id,)).fetchall()
+    if ev is None or not recs:
+        return None
+    by_id = {r["id"]: r for r in recs}
+    primary = by_id.get(ev["primary_reception_id"]) or recs[0]
+
+    def first(key):
+        for r in [primary] + list(recs):
+            if r[key]:
+                return r[key]
+        return None
+
+    radiotext, seen = [], set()
+    for r in recs:
+        try:
+            items = json.loads(r["radiotext"] or "[]")
+        except (TypeError, ValueError):
+            items = []
+        for item in items:
+            if item not in seen:
+                seen.add(item)
+                radiotext.append(item)
+    starts = [r["started_at"] for r in recs if r["started_at"]]
+    ended = [r for r in recs if r["state"] == "end"]
+    end_marks = [r["end_received_at"] or r["updated_at"] for r in ended]
+    grace = end_grace_sec if end_grace_sec is not None else 120
+    lingering = (ended and len(ended) < len(recs)
+                 and (_epoch(ts) or 0) - max(_epoch(m) or 0 for m in end_marks) >= grace)
+    if ev["state"] == "end" or len(ended) == len(recs) or lingering:
+        state = "end"
+        ends = [r["ended_at"] for r in recs if r["ended_at"]]
+        ended_at = max(ends) if ends else ev["ended_at"]
+    else:
+        open_ = [r for r in recs if r["state"] != "end"]
+        state = "active" if any(r["state"] == "active" for r in open_) else (
+            "update" if any(r["state"] == "update" for r in open_) else "start")
+        ended_at = None
+    started_at = min(starts) if starts else ev["started_at"]
+    duration = None
+    if started_at and ended_at:
+        a, b = _epoch(started_at), _epoch(ended_at)
+        if a is not None and b is not None and b >= a:
+            duration = int(b - a)
+    end_received = ev["end_received_at"] or (ts if state == "end" else None)
+    conn.execute(
+        "UPDATE events SET node_id = ?, primary_reception_id = ?, rev = ?, "
+        "state = ?, station_ps = ?, long_ps = ?, frequency = ?, prog_type = ?, "
+        "radiotext = ?, started_at = ?, ended_at = ?, duration_sec = ?, "
+        "sent_at = ?, updated_at = ?, end_received_at = ? WHERE id = ?",
+        (primary["node_id"], primary["id"], max(r["rev"] for r in recs), state,
+         first("station_ps"), first("long_ps"), first("frequency"),
+         first("prog_type"), json.dumps(radiotext, ensure_ascii=False),
+         started_at, ended_at, duration,
+         max((r["sent_at"] for r in recs if r["sent_at"]), default=None), ts,
+         end_received, event_id))
+    return state
+
+
+def upsert_event(node_id, event_uid, ev, window_sec=30, end_grace_sec=120):
+    """Store a validated snapshot of one reception and fold it into its
+    broadcast (matched or new), in one transaction.
+
+    Returns (result, previous_state, row): result is STORED, STALE (an equal
+    or newer rev of this reception is stored) or CONFLICT (the uid belongs
+    to another node). previous_state is the broadcast's state before (None
+    for a new broadcast) and row the broadcast.
     """
     ts = now_iso()
-    values = [ev.get(k) for k in _EVENT_FIELDS]
     radiotext = json.dumps(ev.get("radiotext") or [], ensure_ascii=False)
+    fields = [ev.get(k) for k in _EVENT_FIELDS]
     with _lock:
         conn = _conn()
-        existing = conn.execute(
-            "SELECT node_id, rev, state, end_received_at FROM events "
-            "WHERE event_uid = ?", (event_uid,)).fetchone()
-        if existing is None:
-            end_received = ts if ev["state"] == "end" else None
-            conn.execute(
-                "INSERT INTO events (event_uid, node_id, rev, "
-                + ", ".join(_EVENT_FIELDS)
-                + ", radiotext, received_at, updated_at, end_received_at) "
-                "VALUES (?, ?, ?, " + ", ".join("?" * len(_EVENT_FIELDS))
-                + ", ?, ?, ?, ?)",
-                [event_uid, node_id, ev["rev"]] + values
-                + [radiotext, ts, ts, end_received])
-            prev_state = None
-        else:
-            if existing["node_id"] != node_id:
+        rec = conn.execute("SELECT * FROM receptions WHERE reception_uid = ?",
+                           (event_uid,)).fetchone()
+        if rec is not None:
+            if rec["node_id"] != node_id:
                 return CONFLICT, None, None
-            if ev["rev"] <= existing["rev"]:
-                return STALE, existing["state"], None
-            end_received = existing["end_received_at"]
-            if ev["state"] == "end" and not end_received:
-                end_received = ts
+            prev = conn.execute("SELECT state FROM events WHERE id = ?",
+                                (rec["event_id"],)).fetchone()
+            if ev["rev"] <= rec["rev"]:
+                return STALE, prev["state"] if prev else None, None
+            end_received = rec["end_received_at"] or (ts if ev["state"] == "end" else None)
             conn.execute(
-                "UPDATE events SET rev = ?, "
+                "UPDATE receptions SET rev = ?, receiver = ?, "
                 + ", ".join(f"{k} = ?" for k in _EVENT_FIELDS)
-                + ", radiotext = ?, updated_at = ?, end_received_at = ? "
-                "WHERE event_uid = ?",
-                [ev["rev"]] + values + [radiotext, ts, end_received,
-                                        event_uid])
-            prev_state = existing["state"]
+                + ", radiotext = ?, updated_at = ?, end_received_at = ? WHERE id = ?",
+                [ev["rev"], ev.get("receiver") or "0"] + fields
+                + [radiotext, ts, end_received, rec["id"]])
+            event_id = rec["event_id"]
+            prev_state = prev["state"] if prev else None
+        else:
+            if conn.execute("SELECT 1 FROM events WHERE event_uid = ?",
+                            (event_uid,)).fetchone():
+                return CONFLICT, None, None
+            event_id = _find_broadcast(conn, node_id, ev, window_sec)
+            prev_state = None
+            if event_id is None:
+                cur = conn.execute(
+                    "INSERT INTO events (event_uid, node_id, rev, "
+                    + ", ".join(_EVENT_FIELDS)
+                    + ", radiotext, received_at, updated_at) VALUES (?, ?, ?, "
+                    + ", ".join("?" * len(_EVENT_FIELDS)) + ", ?, ?, ?)",
+                    [event_uid, node_id, ev["rev"]] + fields + [radiotext, ts, ts])
+                event_id = cur.lastrowid
+            else:
+                prev_state = conn.execute("SELECT state FROM events WHERE id = ?",
+                                          (event_id,)).fetchone()["state"]
+            conn.execute(
+                "INSERT INTO receptions (reception_uid, event_id, node_id, receiver, "
+                "rev, " + ", ".join(_EVENT_FIELDS) + ", radiotext, received_at, "
+                "updated_at, end_received_at) VALUES (?, ?, ?, ?, ?, "
+                + ", ".join("?" * len(_EVENT_FIELDS)) + ", ?, ?, ?, ?)",
+                [event_uid, event_id, node_id, ev.get("receiver") or "0", ev["rev"]]
+                + fields + [radiotext, ts, ts, ts if ev["state"] == "end" else None])
+        _recompute(conn, event_id, ts, end_grace_sec)
         conn.commit()
-    return STORED, prev_state, get_event(event_uid)
+    return STORED, prev_state, get_event_by_id(event_id)
 
 
-def set_event_audio(node_id, event_uid, audio_path, transcription_status):
-    """Attach an audio file to an event owned by node_id.
+def get_reception(reception_uid):
+    row = _conn().execute(
+        "SELECT r.*, n.name AS node_name FROM receptions r "
+        "JOIN nodes n ON n.id = r.node_id WHERE r.reception_uid = ?",
+        (reception_uid,)).fetchone()
+    return dict(row) if row else None
 
-    Clears any earlier transcription, since the audio may have changed.
-    Returns the updated row, or None if no such event for this node.
+
+def set_event_audio(node_id, event_uid, audio_path, transcription_status=None,
+                    audio_bytes=None):
+    """Attach a recording to a reception owned by node_id.
+
+    The broadcast's own audio is chosen by choose_audio (the longest of its
+    receptions'); once chosen it is not changed by later recordings.
+    Returns the broadcast row, or None if no such reception for this node.
     """
+    ts = now_iso()
     with _lock:
         conn = _conn()
-        cur = conn.execute(
-            "UPDATE events SET audio_path = ?, audio_received_at = ?, "
+        rec = conn.execute("SELECT id, event_id FROM receptions WHERE "
+                           "reception_uid = ? AND node_id = ?",
+                           (event_uid, node_id)).fetchone()
+        if rec is None:
+            return None
+        conn.execute("UPDATE receptions SET audio_path = ?, audio_received_at = ?, "
+                     "audio_bytes = ? WHERE id = ?",
+                     (audio_path, ts, audio_bytes, rec["id"]))
+        conn.execute("UPDATE events SET audio_pending_since = COALESCE("
+                     "audio_pending_since, ?) WHERE id = ? AND audio_path IS NULL",
+                     (ts, rec["event_id"]))
+        conn.commit()
+    return get_event_by_id(rec["event_id"])
+
+
+def choose_audio(event_id, transcription_status, wait_sec, now=None):
+    """Pick the broadcast's recording once every reception has sent its own,
+    or wait_sec after the first: the longest (by the reception's duration,
+    then by size). Returns the broadcast row when one was chosen now (to be
+    transcribed), else None."""
+    now = time.time() if now is None else now
+    with _lock:
+        conn = _conn()
+        ev = conn.execute("SELECT id, audio_path, audio_pending_since FROM events "
+                          "WHERE id = ?", (event_id,)).fetchone()
+        if ev is None or ev["audio_path"] or not ev["audio_pending_since"]:
+            return None
+        recs = conn.execute("SELECT * FROM receptions WHERE event_id = ? ORDER BY id",
+                            (event_id,)).fetchall()
+        with_audio = [r for r in recs if r["audio_path"]]
+        if not with_audio:
+            return None
+        waited = now - (_epoch(ev["audio_pending_since"]) or now)
+        if len(with_audio) < len(recs) and waited < wait_sec:
+            return None
+        best = max(with_audio, key=lambda r: (r["duration_sec"] or 0,
+                                              r["audio_bytes"] or 0, -r["id"]))
+        conn.execute(
+            "UPDATE events SET audio_path = ?, audio_received_at = ?, node_id = ?, "
+            "primary_reception_id = ?, audio_pending_since = NULL, "
             "transcription = NULL, transcription_duration_sec = NULL, "
             "transcription_corrected = NULL, geo_status = NULL, "
-            "transcription_status = ? "
-            "WHERE event_uid = ? AND node_id = ?",
-            (audio_path, now_iso(), transcription_status, event_uid, node_id))
+            "transcription_status = ? WHERE id = ?",
+            (best["audio_path"], best["audio_received_at"], best["node_id"],
+             best["id"], transcription_status, event_id))
         conn.commit()
-    if cur.rowcount == 0:
-        return None
-    return get_event(event_uid)
+    return get_event_by_id(event_id)
+
+
+def events_waiting_for_audio():
+    """Broadcasts whose recording is still to be chosen."""
+    return [r[0] for r in _conn().execute(
+        "SELECT id FROM events WHERE audio_pending_since IS NOT NULL "
+        "AND audio_path IS NULL")]
+
+
+def close_lingering_broadcasts(end_grace_sec):
+    """End broadcasts where some receptions ended long enough ago and the
+    rest went silent. Returns the broadcasts that ended now."""
+    ended = []
+    with _lock:
+        conn = _conn()
+        ids = [r[0] for r in conn.execute(
+            "SELECT DISTINCT e.id FROM events e JOIN receptions r ON r.event_id = e.id "
+            "WHERE e.state != 'end' AND r.state = 'end'")]
+        for event_id in ids:
+            if _recompute(conn, event_id, None, end_grace_sec) == "end":
+                ended.append(event_id)
+        conn.commit()
+    return [get_event_by_id(i) for i in ended]
+
+
+def _after_reception_removed(conn, event_id):
+    """Fold a broadcast again after one of its receptions went. Returns
+    'deleted' if none is left (the broadcast goes too), else its state."""
+    left = conn.execute("SELECT COUNT(*) FROM receptions WHERE event_id = ?",
+                        (event_id,)).fetchone()[0]
+    if left == 0:
+        conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
+        return "deleted"
+    ev = conn.execute("SELECT primary_reception_id, audio_path FROM events WHERE id = ?",
+                      (event_id,)).fetchone()
+    if not conn.execute("SELECT 1 FROM receptions WHERE id = ?",
+                        (ev["primary_reception_id"],)).fetchone():
+        # The primary went: the next one takes over, with its recording if
+        # it has one (the text already made stays)
+        nxt = conn.execute(
+            "SELECT * FROM receptions WHERE event_id = ? ORDER BY "
+            "(audio_path IS NULL), COALESCE(duration_sec, 0) DESC, id LIMIT 1",
+            (event_id,)).fetchone()
+        conn.execute("UPDATE events SET primary_reception_id = ?, audio_path = ?, "
+                     "audio_received_at = ? WHERE id = ?",
+                     (nxt["id"], nxt["audio_path"],
+                      nxt["audio_received_at"] if nxt["audio_path"] else None,
+                      event_id))
+    return _recompute(conn, event_id)
 
 
 def delete_event(node_id, event_uid):
-    """Delete an event owned by node_id. Returns its row or None."""
-    row = get_event(event_uid)
-    if row is None or row["node_id"] != node_id:
+    """Remove a reception owned by node_id (too short, discarded by its
+    satellite). Returns (reception, broadcast_before, broadcast_after) or
+    None: broadcast_after is None when the broadcast went with it."""
+    rec = get_reception(event_uid)
+    if rec is None or rec["node_id"] != node_id:
         return None
+    before = get_event_by_id(rec["event_id"])
     with _lock:
         conn = _conn()
-        conn.execute("DELETE FROM events WHERE event_uid = ?", (event_uid,))
+        conn.execute("DELETE FROM receptions WHERE id = ?", (rec["id"],))
+        result = _after_reception_removed(conn, rec["event_id"])
         conn.commit()
-    return row
+    after = None if result == "deleted" else get_event_by_id(rec["event_id"])
+    return rec, before, after
 
 
 def _event_dict(row):
@@ -598,10 +918,31 @@ def _event_dict(row):
         d["radiotext"] = json.loads(d.get("radiotext") or "[]")
     except (TypeError, ValueError):
         d["radiotext"] = []
+    if "node_names" in d:
+        names = sorted(set((d.get("node_names") or "").split(","))) if d.get("node_names") else []
+        d["node_names"] = names or ([d["node_name"]] if d.get("node_name") else [])
     return d
 
 
-_EVENT_SELECT = ("SELECT e.*, n.name AS node_name FROM events e "
+def receptions_for_events(event_ids):
+    """{event_id: [reception, ...]} (oldest first), with the node names."""
+    ids = list(event_ids)
+    out = {i: [] for i in ids}
+    conn = _conn()
+    for i in range(0, len(ids), 500):
+        part = ids[i:i + 500]
+        for r in conn.execute(
+                "SELECT r.*, n.name AS node_name FROM receptions r "
+                "JOIN nodes n ON n.id = r.node_id WHERE r.event_id IN "
+                f"({','.join('?' * len(part))}) ORDER BY r.id", part):
+            out[r["event_id"]].append(dict(r))
+    return out
+
+
+_EVENT_SELECT = ("SELECT e.*, n.name AS node_name, "
+                 "(SELECT GROUP_CONCAT(DISTINCT n2.name) FROM receptions r2 "
+                 "JOIN nodes n2 ON n2.id = r2.node_id WHERE r2.event_id = e.id) "
+                 "AS node_names FROM events e "
                  "JOIN nodes n ON n.id = e.node_id")
 
 
@@ -644,7 +985,9 @@ def query_events(event_type=None, pi=None, node=None, since=None,
         where.append("e.pi = ?")
         params.append(pi)
     if node:
-        where.append("n.name = ?")
+        # Heard by that node (any of the broadcast's receptions)
+        where.append("EXISTS (SELECT 1 FROM receptions rn JOIN nodes nn "
+                     "ON nn.id = rn.node_id WHERE rn.event_id = e.id AND nn.name = ?)")
         params.append(node)
     if since:
         where.append("COALESCE(e.started_at, e.received_at) > ?")
@@ -673,9 +1016,10 @@ def list_stations():
         "SELECT e.pi, MAX(e.station_ps) AS station_ps, "
         "MAX(e.frequency) AS frequency, COUNT(*) AS events, "
         "MAX(COALESCE(e.started_at, e.received_at)) AS last_event_at, "
-        "GROUP_CONCAT(DISTINCT n.name) AS nodes "
-        "FROM events e JOIN nodes n ON n.id = e.node_id "
-        "GROUP BY e.pi ORDER BY station_ps").fetchall()
+        "(SELECT GROUP_CONCAT(DISTINCT n.name) FROM receptions r "
+        " JOIN nodes n ON n.id = r.node_id JOIN events e2 ON e2.id = r.event_id "
+        " WHERE e2.pi = e.pi) AS nodes "
+        "FROM events e GROUP BY e.pi ORDER BY station_ps").fetchall()
     out = []
     for r in rows:
         d = dict(r)
@@ -740,8 +1084,8 @@ def purge_old_events(days):
     with _lock:
         conn = _conn()
         rows = conn.execute(
-            "SELECT audio_path FROM events WHERE received_at < ? "
-            "AND audio_path IS NOT NULL", (cutoff,)).fetchall()
+            "SELECT r.audio_path FROM receptions r JOIN events e ON e.id = r.event_id "
+            "WHERE e.received_at < ? AND r.audio_path IS NOT NULL", (cutoff,)).fetchall()
         cur = conn.execute("DELETE FROM events WHERE received_at < ?",
                            (cutoff,))
         geolocate.purge_incidents(conn, cutoff)
@@ -1000,7 +1344,8 @@ def _incident_nodes(conn, inc):
     nodes = conn.execute(
         "SELECT DISTINCT n.name FROM incident_events ie "
         "JOIN events e ON e.event_uid = ie.event_key "
-        "JOIN nodes n ON n.id = e.node_id WHERE ie.incident_id = ?",
+        "JOIN receptions r ON r.event_id = e.id "
+        "JOIN nodes n ON n.id = r.node_id WHERE ie.incident_id = ?",
         (inc["id"],)).fetchall()
     inc["nodes"] = sorted(r[0] for r in nodes)
     return inc

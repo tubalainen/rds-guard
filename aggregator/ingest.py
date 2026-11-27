@@ -360,7 +360,9 @@ async def handle_put_event(request):
     except ValidationError as e:
         return _error(422, "invalid", str(e))
 
-    result, prev_state, row = await _run(store.upsert_event, node["id"], uid, ev)
+    result, prev_state, row = await _run(
+        store.upsert_event, node["id"], uid, ev, config.MATCH_WINDOW_SEC,
+        config.BROADCAST_END_GRACE_SEC)
     await _run(store.touch_node, node["id"])
     if result == store.CONFLICT:
         return _error(409, "conflict", "event id belongs to another node")
@@ -383,8 +385,8 @@ async def handle_put_audio(request):
         uid = _uid(request)
     except ValidationError as e:
         return _error(422, "invalid", str(e))
-    row = await _run(store.get_event, uid)
-    if row is None or row["node_id"] != node["id"]:
+    rec = await _run(store.get_reception, uid)
+    if rec is None or rec["node_id"] != node["id"]:
         return _error(404, "not_found", "no such event for this node")
 
     if request.content_length is not None and request.content_length > config.MAX_AUDIO_BYTES:
@@ -397,8 +399,8 @@ async def handle_put_audio(request):
 
     filename = f"{uid}.ogg"   # named by the server, never by the client
     await _run(_write_audio, Path(config.AUDIO_DIR) / filename, body)
-    status = "queued" if config.TRANSCRIPTION_ENGINE != "none" else None
-    row = await _run(store.set_event_audio, node["id"], uid, filename, status)
+    row = await _run(store.set_event_audio, node["id"], uid, filename, None,
+                     len(body))
     await _run(store.touch_node, node["id"])
     if row is None:   # deleted while we were writing
         await _run(_remove_audio, filename)
@@ -424,12 +426,16 @@ async def handle_delete_event(request):
         uid = _uid(request)
     except ValidationError as e:
         return _error(422, "invalid", str(e))
-    row = await _run(store.delete_event, node["id"], uid)
+    res = await _run(store.delete_event, node["id"], uid)
     await _run(store.touch_node, node["id"])
-    if row is None:
+    if res is None:
         return _error(404, "not_found", "no such event for this node")
-    await _run(_remove_audio, row.get("audio_path"))
-    request.app[HOOKS].on_delete(row)
+    rec, before, after = res
+    await _run(_remove_audio, rec.get("audio_path"))
+    if after is None:
+        request.app[HOOKS].on_delete(before)     # the broadcast went with it
+    else:
+        request.app[HOOKS].on_event(after, before["state"])
     return web.json_response({"status": "deleted"})
 
 

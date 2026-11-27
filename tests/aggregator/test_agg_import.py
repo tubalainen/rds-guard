@@ -191,3 +191,31 @@ def test_events_older_than_the_retention_are_skipped(agg_store, satellite, monke
     assert agg_store.get_event(satellite["uids"][a]) is None
     # Its incident is not brought either
     assert counts["incidents"] == 0
+
+
+def test_imported_events_have_their_reception(agg_store, satellite):
+    node, _ = agg_store.create_node("docker01")
+    _run(satellite, node)
+    conn = agg_store._conn()
+    assert conn.execute("SELECT COUNT(*) FROM receptions").fetchone()[0] == 3
+    a = satellite["ids"][0]
+    ev = agg_store.get_event(satellite["uids"][a])
+    assert ev["node_names"] == ["docker01"]
+    assert agg_store.get_reception(satellite["uids"][a])["audio_path"] == ev["audio_path"]
+
+
+def test_an_event_merged_into_another_broadcast_is_not_imported_again(agg_store, satellite):
+    """The uplink delivered it as a reception of a broadcast another node
+    started: its uid is a reception's, not the broadcast's."""
+    node, _ = agg_store.create_node("docker01")
+    other, _ = agg_store.create_node("Lisa")
+    a = satellite["ids"][0]
+    base = {"rev": 1, "type": "traffic", "state": "end", "pi": "0xE824",
+            "station_ps": "P4 Värml", "long_ps": None, "frequency": "103.5M",
+            "prog_type": None, "radiotext": [], "started_at": "2026-11-20T10:00:00Z",
+            "ended_at": "2026-11-20T10:01:00Z", "duration_sec": 60,
+            "sent_at": "2026-11-20T10:01:00Z"}
+    agg_store.upsert_event(other["id"], "99999999-9999-4999-8999-999999999999", base)
+    agg_store.upsert_event(node["id"], satellite["uids"][a], dict(base, started_at="2026-11-20T10:00:05Z"))
+    counts = _run(satellite, node)
+    assert counts["skipped"] == 1 and counts["events"] == 2

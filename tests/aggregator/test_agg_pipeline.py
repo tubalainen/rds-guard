@@ -175,14 +175,17 @@ def test_deleted_short_event_clears_ta(agg_store, node):
     p = pipeline.Pipeline(mqtt=mqtt)
     _, prev, row = _store_event(node, state="start")
     p.on_event(row, prev)
-    p.on_delete(agg_store.delete_event(node["id"], row["event_uid"]))
+    rec, before, after = agg_store.delete_event(node["id"], row["event_uid"])
+    assert after is None                        # the broadcast went with it
+    p.on_delete(before)
     ta = [m[1]["active"] for m in mqtt.messages if m[0] == "0x9E04/traffic/ta"]
     assert ta == [True, False]
 
 
 def test_requeue_pending_after_restart(agg_store, node):
     _, _, row = _store_event(node)
-    agg_store.set_event_audio(node["id"], row["event_uid"], "a.ogg", "queued")
+    agg_store.set_event_audio(node["id"], row["event_uid"], "a.ogg")
+    agg_store.choose_audio(row["id"], "queued", 10)
     tr = FakeTranscriber()
     pipeline.Pipeline(transcriber=tr).requeue_pending()
     assert [j[1] for j in tr.jobs] == [row["id"]]

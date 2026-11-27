@@ -429,7 +429,8 @@ const RDSUI = (() => {
         const text = tx.text || hl(radiotext(ev).filter((r) => r !== title).join(' – '), words);
         const meta = [typePill(ev), `<span>${esc(stationLabel(ev))}</span>`];
         if (opt.showDate) meta.push(`<span>· ${esc(fmtRelDay(start))}</span>`);
-        if (ev.node_name) meta.push(`<span>· ${esc(ev.node_name)}</span>`);
+        if (ev.nodes && ev.nodes.length > 1) meta.push(`<span>· ${esc(ev.nodes.join(', '))}</span>`);
+        else if (ev.node_name) meta.push(`<span>· ${esc(ev.node_name)}</span>`);
         if (cfg.cardMeta) {
             // Host hook (e.g. a place label from the map): trusted HTML
             try { meta.push(cfg.cardMeta(ev) || ''); } catch (e) { /* ignore */ }
@@ -735,7 +736,17 @@ const RDSUI = (() => {
             ['Slut', end ? fmtTime(end) : (live ? 'pågår' : '–')],
             ['Längd', ev.duration_sec != null ? fmtDur(ev.duration_sec) : '–'],
         ];
-        if (ev.node_name) kv.push(['Nod', ev.node_name]);
+        if (ev.nodes && ev.nodes.length > 1) kv.push(['Hörd av', ev.nodes.join(', ')]);
+        else if (ev.node_name) kv.push(['Nod', ev.node_name]);
+        // A broadcast several nodes heard: each one's own recording
+        const recs = (ev.receptions || []).filter((r) => r.audio_url);
+        const recHtml = recs.length > 1 ? `<section class="card" aria-label="Mottagningar">
+            <h2 style="margin-bottom:10px">Hörd av ${recs.length} mottagare</h2>
+            ${recs.map((r) => `<div style="margin-bottom:12px"><div class="small" style="margin-bottom:6px">
+                <b>${esc(r.node_name || '')}</b>${r.receiver && r.receiver !== '0' ? ` · mottagare ${esc(r.receiver)}` : ''}
+                · ${esc(fmtFreq(r.frequency) || '')}${r.duration_sec != null ? ` · ${esc(fmtClock(r.duration_sec))}` : ''}
+                ${r.transcribed ? ' · <span class="pill">transkriberad</span>' : ''}</div>
+                ${Player.html(r.audio_url, r.duration_sec, false)}</div>`).join('')}</section>` : '';
         const pushRows = notify.filter((x) => x.status !== 'no_match');
         const pushLabel = { sent: 'skickad', failed: 'misslyckades', mqtt_off: 'MQTT av' };
         root.innerHTML = `
@@ -754,6 +765,7 @@ const RDSUI = (() => {
                         ${ev.transcription ? `<p class="prose">${tx.text}</p>`
         : `<p class="muted" style="margin:0">${tStatus || 'Ingen transkription för den här händelsen.'}</p>`}
                     </section>
+                    ${recHtml}
                     <div id="event-extras"></div>
                 </div>
                 <div class="col-side">
