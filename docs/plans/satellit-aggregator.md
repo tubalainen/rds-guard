@@ -1,6 +1,6 @@
 # Plan: satellit + aggregator som enda arkitektur
 
-Status 2026-11-27: fas 0 klar (planen i repot), fas 1 byggd (v0.10.0: compose med båda, import, nodens plats i Admin, mätverktygen i aggregatorn). Fas 2–4 återstår.
+Status 2026-11-27: fas 0 klar (planen i repot), fas 1 byggd (v0.10.0: compose med båda, import, nodens plats i Admin, mätverktygen i aggregatorn). Fas 2–4 återstår. Kartändringarna på master samma dag (v0.9.0–v0.9.2) är införda, se "Kartan: ändringar efter att planen skrevs".
 
 ## Bakgrund
 
@@ -237,7 +237,8 @@ blir `X-RDS-Guard-Protocol: 2`, och aggregatorn svarar 426 på allt annat.
 - **Bort ur satellitens image:**
   - modellsteget (KB-Whisper)
   - `faster-whisper`, `av`, `anthropic`, `paho-mqtt`, `tzdata`
-  - `static/`, `geodata/`, `tools/`, `EXPOSE 8022`
+  - `static/`, `geodata/`, `roads.py`, `gazetteer.py`, `geolocate.py`, `geo_service.py`,
+    `trafikverket.py`, `transcriber.py`, `tools/` (även `retranscribe.py`), `EXPOSE 8022`
 
   Kvar: redsea, rtl-sdr, ffmpeg, numpy, requests och pyyaml. Imagen blir mycket mindre
   och passar en Raspberry Pi.
@@ -339,7 +340,7 @@ PPM. Utan något angivet är allt automatiskt; användaren behöver inte ställa
     Annars läggs bara de regler till som inte redan finns.
   - Transkriberar inget på nytt.
   - Skriver alltid aggregatorns aktuella schema (mottagningar och sändningar efter
-    fas 2). Därför fungerar det också för den som hoppar direkt från v0.8.x till v1.0.0.
+    fas 2). Därför fungerar det också för den som hoppar direkt från v0.9.x till v1.0.0.
   - Skriver en rad per händelse medan den kör och en summering på slutet.
   - Den gemensamma compose-filen monterar `./rds-data` skrivskyddat på `/import`.
 - **MQTT:** aggregatorns ämnen räcker (`alert`, `{pi}/traffic/ta`, transkription,
@@ -351,6 +352,28 @@ PPM. Utan något angivet är allt automatiskt; användaren behöver inte ställa
   `geo_corpus.json`) flyttas till aggregatorns image. `--stored` ska fungera mot
   `/api/v1/events`, och `measure_geolocation` ska läsa aggregatorns `config` i stället
   för satellitens.
+
+## Kartan: ändringar efter att planen skrevs (v0.9.0–v0.9.2, 2026-11-27)
+
+Samma dag som planen skrevs kom tre releaser på master. Alla rör bearbetning, så de hör
+till aggregatorn i målbilden:
+
+| Release | Ändring | Var den hamnar |
+|---|---|---|
+| v0.9.0 | **Vägregistret** `roads.py` med `geodata/roads-se.tsv.gz` (9 531 numrerade vägar ur NVDB) och **Trafikverkets platser** `geodata/places-trafikverket.tsv.gz` (trafikplatser, kameror, väderstationer), inlästa av `gazetteer.py`/`geolocate.py`. Byggs med `tools/build_roads_trafikverket.py` eller `tools/build_roads.py` | Bara aggregatorn. Aggregatorns image kopierar redan `roads.py` och `geodata/`. I fas 3 tas `roads.py` och `geodata/` bort ur satellitens image, och i fas 4 flyttas de in i `aggregator/` (med `ROADS_PATH`, `GAZETTEER_PATH`, `GAZETTEER_LOCAL_PATH`). Byggverktygen stannar i `tools/` och ingår inte i någon image |
+| v0.9.1 | **`tools/retranscribe.py`**: transkriberar de sparade inspelningarna igen, äldst först, med mottagarens inställningar; därefter "Bygg om kartan" | Verktyget läser i dag satellitens `event_store`. Det **flyttas till aggregatorn i fas 2** (`python3 -m aggregator.retranscribe`, samma flaggor: `--yes`, `--limit`, `--since`, `--engine local`, en rad per meddelande, kostnad först) och tas bort ur satellitens image i fas 3. Fram till dess: kör det på satelliten *före* importen, så följer de nya texterna med |
+| v0.9.2 | Kartans popup stängs inte längre vid den tidsstyrda uppdateringen (`static/shared/map.js`) | Delat gränssnitt; följer med `static/shared/` till aggregatorn, ingen planändring |
+
+Följder för planen:
+
+- **Import (fas 1):** de nya kolumnerna och tabellerna finns inte; vägregistret
+  påverkar bara hur nya meddelanden placeras. Importerade nålar stannar där satelliten
+  satte dem. Efter importen kan **Admin → Karta → Bygg om kartan** i aggregatorn placera
+  om allt med vägarna (regelmotorn gratis, Claude ca 1,5 öre per meddelande).
+- **Tester:** `test_roads.py` följer med modulerna till aggregatorn i fas 4.
+  `test_retranscribe.py` skrivs om mot aggregatorns store i fas 2.
+- **Satellitens image (fas 3):** `roads.py`, `geodata/` och `tools/retranscribe.py`
+  läggs till i listan över det som tas bort.
 
 ## Faser och releaser
 
@@ -370,13 +393,15 @@ med en statusrad överst som uppdateras efter varje fas (som `placering-v2.md`).
   historiken importeras, satelliten får `LOCAL_PROCESSING=false` och aggregatorns
   gränssnitt används. Det testar målbilden innan något tas bort.
 
-**Fas 2, v0.10.0: protokoll v2 och sammanslagning** (båda sidor samtidigt; vänners
+**Fas 2, v0.11.0: protokoll v2 och sammanslagning** (båda sidor samtidigt; vänners
 satelliter måste uppdateras)
 - Anslutningsflödet (`join`, väntande noder, `JOIN_KEY`, verifieringskod, CLI).
 - `receiver` i händelser (`"0"` tills vidare); två köer i outboxen med väckning.
 - `receptions` och sammanslagning av sändningar, "Hörd av" per händelse.
 - Ett test av hela livscykeln i `RulesEngine` ner till outbox-rader (TA på,
   RadioText, TA av, under 10 s, larm). Det är skyddsnätet inför fas 3.
+- `tools/retranscribe.py` flyttas till aggregatorn (`python3 -m aggregator.retranscribe`),
+  med `test_retranscribe.py` omskrivet mot aggregatorns store.
 - Release notes: en uppgraderingsguide för vänners satelliter.
 
 **Fas 3, v1.0.0: satelliten headless, flera mottagare**
@@ -394,8 +419,9 @@ satelliter måste uppdateras)
 
 **Fas 4, v1.0.1: städning av repot** (ingen ändring i beteende)
 - Satellitens kod flyttas till `satellite/`, och modulerna som bara aggregatorn använder
-  flyttas in i `aggregator/`: `transcriber`, `geolocate`, `gazetteer`, `geo_service`,
-  `trafikverket`, `notify_rules`, `admin_auth`, `geodata/`, `static/shared/`. Det
+  flyttas in i `aggregator/`: `transcriber`, `geolocate`, `gazetteer`, `roads`,
+  `geo_service`, `trafikverket`, `notify_rules`, `admin_auth`, `geodata/`,
+  `static/shared/`. Det
   framgår då tydligt vilken del som använder vad.
 - `pytest.ini`, Dockerfiles och CI-matrisen följer med.
 - Arkitekturdiagrammet (`docs/architecture/*.json`, regenereras med Archify) uppdateras.
@@ -410,7 +436,8 @@ satelliter måste uppdateras)
   join_requests, `nodes.location`), `pipeline.py` (per sändning), `api.py` (väntande
   noder, plats, mottagningar), `static/js/aggregator.js` och `static/shared/rdsui.js`
   ("Hörd av", ljud per mottagning), `config.py` (`JOIN_KEY`, `MATCH_WINDOW_SEC`), nya
-  `broadcasts.py` och `import_satellite.py`, `Dockerfile` (tools), `.env.example`.
+  `broadcasts.py`, `import_satellite.py` och `retranscribe.py`, `Dockerfile` (tools),
+  `.env.example`.
 - Gemensamt: `docker-compose*.yml`, `README.md`, `aggregator/README.md`,
   `docs/uplink-protocol.md`, `docs/release-notes/*`, `RELEASE_VERSION`,
   `.github/workflows/docker-publish.yml` och `security-scan.yml` (sökvägar i fas 4).
@@ -426,8 +453,9 @@ Det som återanvänds: outbox och kollaps (`event_store._queue`, `outbox_*`),
   (`test_web_notify`, `test_geo_backfill`, `test_incident_timeline`, delarna av
   `test_admin_auth` och `test_trafikverket*` som går via `web_server`/`rds_guard`)
   skrivs om mot aggregatorn där motsvarigheten inte redan är testad.
-  Modultesterna (`test_geolocate`, `test_notify_rules`, `test_transcriber`,
-  `test_trafikverket`) följer med modulerna.
+  Modultesterna (`test_geolocate`, `test_roads`, `test_notify_rules`, `test_transcriber`,
+  `test_trafikverket`) följer med modulerna; `test_retranscribe` skrivs om mot
+  aggregatorn i fas 2.
 - **Nya tester:**
   - join: väntande, godkänd, avvisad, fel nyckel, `JOIN_KEY`, utgång, gräns för antal
     anrop, token lämnas ut en gång

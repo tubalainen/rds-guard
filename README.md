@@ -241,6 +241,17 @@ docker compose up -d
    **Admin → Noder** the node is green. The import can be run again at any
    time; it skips what is already there.
 
+Tips:
+
+- To transcribe the old recordings again first (`tools/retranscribe.py`, see
+  [Transcribe the stored messages again](#transcribe-the-stored-messages-again)),
+  do it on the satellite **before** the import; the new texts come along.
+  The aggregator gets its own version of the tool in a later release.
+- Imported pins stay where the satellite put them. **Admin → Karta → Bygg om
+  kartan** in the aggregator places every message again, with the roads and
+  Trafikverket's places (free with the rules engine, about 1.5 öre per
+  message with Claude).
+
 The satellite's own data is not changed. Your push rules are copied.
 
 **MQTT and Home Assistant:** once the satellite reports to the aggregator,
