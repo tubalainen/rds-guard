@@ -7,7 +7,8 @@
 # Two dongles with the same serial number (00000001 is common) cannot be
 # told apart: give one a new number with rtl_eeprom (the command says how).
 # An Airspy's serial number is 64 bits in hex, e.g. "0x644064DC2B1C2E4F";
-# its gain is the linearity gain 0-21, and it has no ppm (TCXO).
+# its gain is the linearity gain 0-21 (or lna:/mixer:/vga: by hand), and it
+# has no ppm (TCXO).
 #
 # Gain and ppm are found automatically for each dongle, for all its stations
 # together (at the first start, when decoding drops, and with Admin ->
@@ -30,3 +31,8 @@ receivers:
   #   name: mast
   #   frequencies: [103.5M, 102.9M]
   #   gain: 10                      # linearity 0-21; or leave it out (auto)
+  #   # Optional, an Airspy only: its stages by hand. All three: no gain
+  #   # calibration; one or two: those fixed, the others calibrated.
+  #   lna: 4                        # 0-14
+  #   mixer: 3                      # 0-15
+  #   vga: 9                        # 0-15

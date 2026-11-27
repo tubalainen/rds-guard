@@ -270,6 +270,25 @@ receivers:
 - Check that I/Q is the right way round once, with the satellite stopped:
   `docker compose run --rm rds-guard python3 iq_side.py 103.5M
   --serial 0x…` (a normal result is what the satellite expects).
+- **LNA, Mixer and VGA by hand (optional).** Each linearity step is a
+  fixed set of the three (with both AGCs off), e.g. step 8 is LNA 3,
+  Mixer 0, VGA 10. To set them yourself, add any of `lna:` (0–14),
+  `mixer:` (0–15) and `vga:` (0–15):
+
+  ```yaml
+    - serial: "0x62CC68FF3584805B"
+      frequencies: [102.8M]
+      lna: 4
+      mixer: 3
+      vga: 9
+  ```
+
+  With all three set there is no gain calibration. With one or two set,
+  those stay fixed and the calibration sweeps the others along the
+  linearity steps. The satellite turns the Airspy's LNA and Mixer AGC off
+  before it starts: the tuner keeps them between programs, so an AGC that
+  SDR++ or SDR# left on would otherwise override LNA and Mixer. The log
+  shows what runs (`gain LNA 4, Mixer 3, VGA 9 (by hand)`).
 - `python3 -m dongles` cannot list an Airspy the satellite is running (the
   device can only be opened once): stop the satellite to see it.
 - The bias tee stays off.

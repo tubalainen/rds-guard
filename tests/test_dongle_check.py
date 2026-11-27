@@ -127,6 +127,12 @@ def test_a_dongle_that_gives_flat_samples_stops_the_receiver(monkeypatch):
         fmt = "u8"
         has_ppm = True
 
+        def prepare(self):
+            pass
+
+        def describe_gain(self, gain):
+            return f"{gain:g} dB"
+
         def stream_cmd(self, center, gain, ppm):
             # Bytes at the right rate, all the same value: a dead tuner
             return [sys.executable, "-c",
@@ -135,7 +141,7 @@ def test_a_dongle_that_gives_flat_samples_stops_the_receiver(monkeypatch):
                     "while True:\n"
                     "  sys.stdout.buffer.write(b)\n"]
 
-    monkeypatch.setattr(pipeline.sdr, "open", lambda serial: FlatRadio())
+    monkeypatch.setattr(pipeline.sdr, "open", lambda serial, stages=None: FlatRadio())
     monkeypatch.setattr(pipeline, "redsea_cmd", lambda: [sys.executable, "-c",
                         "import sys\nfor _ in sys.stdin.buffer: pass"])
     r = receivers.parse({"receivers": [{"serial": "1", "frequencies": ["103.5M"]}]})[0]

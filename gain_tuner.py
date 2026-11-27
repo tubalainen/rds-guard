@@ -244,6 +244,12 @@ def calibrate(receiver, index, gains, capture_fn=None, quality_fn=redsea_quality
     # gain, and it costs nothing extra.
     sweep_ppm = 0 if want_ppm else (ppm or 0)
     gains = [g for g in gains if g > 0 or not radio.zero_is_auto] or [start_gain]
+    if radio.stages:
+        # With LNA/Mixer/VGA partly by hand, several linearity steps give the
+        # same three values: each is measured once (the lowest step)
+        seen = set()
+        gains = [g for g in sorted(gains)
+                 if not (radio.stage_values(g) in seen or seen.add(radio.stage_values(g)))]
     steps = []
     estimates = []
     for i, g in enumerate(gains, 1):
@@ -311,7 +317,7 @@ def calibrate(receiver, index, gains, capture_fn=None, quality_fn=redsea_quality
         for f in dead:
             progress(f"[{rid}] {f}: no RDS at any gain - gain chosen for the others")
         stations = next(r["stations"] for r in results if r["gain"] == chosen)
-        progress(f"[{rid}] chosen: gain {chosen:g} dB, ppm {ppm} ("
+        progress(f"[{rid}] chosen: gain {radio.describe_gain(chosen)}, ppm {ppm} ("
                  + ", ".join(f"{f} {v:.1f} grp/s" for f, v in stations.items()) + ")")
     return {"gain": chosen, "ppm": ppm, "stations": stations, "dead": dead,
             "steps": [{"gain": s["gain"], "clip": s["clip"], "worst_rds": s["worst_rds"]}
@@ -341,8 +347,9 @@ class Tuner:
     def _stored(self, r):
         import event_store
         cal = event_store.get_calibration(r.serial)
-        if cal and sorted(cal["frequencies"]) == sorted(r.frequencies):
-            return cal
+        if cal and sorted(cal["frequencies"]) == sorted(r.frequencies) and \
+                ((cal.get("result") or {}).get("stages") or {}) == _stages(r):
+            return cal                 # (an Airspy's stages by hand: the same ones)
         return None
 
     def settings(self, r, radio=None):
@@ -364,7 +371,7 @@ class Tuner:
             gain, ppm = p.gain, p.ppm
         result = (cal or {}).get("result") or {}
         return {
-            "gain": gain, "gain_mode": "manual" if r.gain != "auto" else "auto",
+            "gain": gain, "gain_mode": "manual" if _gain_fixed(r) else "auto",
             "ppm": ppm, "ppm_mode": "manual" if r.ppm != "auto" else "auto",
             "calibrated_at": cal["calibrated_at"] + "Z" if cal else None,
             "calibration": self._busy.get(r.id) or (
@@ -377,7 +384,8 @@ class Tuner:
     @staticmethod
     def _auto(r):
         # An Airspy has no ppm to measure: only its gain
-        return r.gain == "auto" or (r.ppm == "auto" and not dongles.is_airspy_serial(r.serial))
+        return (not _gain_fixed(r)
+                or (r.ppm == "auto" and not dongles.is_airspy_serial(r.serial)))
 
     # -- requests -----------------------------------------------------------
 
@@ -470,7 +478,7 @@ class Tuner:
         try:
             if not p.pause("calibrating"):
                 log.warning("[%s] the dongle did not come free; calibrating anyway", r.id)
-            res = self._calibrate(r, want_gain=r.gain == "auto", want_ppm=r.ppm == "auto")
+            res = self._calibrate(r, want_gain=not _gain_fixed(r), want_ppm=r.ppm == "auto")
             if res.get("silent"):
                 # Nothing heard: keep what it had, say why, and try again later
                 log.warning("[%s] nothing heard on this dongle: keeping the earlier settings "
@@ -479,9 +487,10 @@ class Tuner:
                 return
             event_store.save_calibration(
                 r.serial, r.frequencies,
-                res["gain"] if r.gain == "auto" else None,
+                res["gain"] if not _gain_fixed(r) else None,
                 res["ppm"] if r.ppm == "auto" else None,
                 {"stations": res.get("stations") or {}, "steps": res.get("steps") or [],
+                 "stages": _stages(r),
                  "dead": res.get("dead") or []},
                 why, at=self._now())
             log.info("[%s] calibrated: gain %s, ppm %s", r.id, res.get("gain"), res.get("ppm"))
@@ -498,12 +507,22 @@ class Tuner:
             p.resume()
 
     def _calibrate_dongle(self, r, want_gain=True, want_ppm=True):
-        radio = sdr.open(r.serial)
+        radio = sdr.open(r.serial, getattr(r, "stages", None))
+        radio.prepare()
         gains = radio.gains or FALLBACK_GAINS
         fixed_gain = r.gain if r.gain != "auto" else None
         fixed_ppm = r.ppm if r.ppm != "auto" else None
         return calibrate(r, radio.index, gains, want_gain=want_gain, want_ppm=want_ppm,
                          gain=fixed_gain, ppm=fixed_ppm, radio=radio)
+
+
+def _stages(r):
+    return dict(getattr(r, "stages", None) or {})
+
+
+def _gain_fixed(r):
+    """gain: in receivers.yml, or an Airspy's LNA, Mixer and VGA all by hand."""
+    return r.gain != "auto" or len(getattr(r, "stages", None) or {}) == 3
 
 
 def _epoch(ts):
@@ -538,7 +557,8 @@ def main(argv=None):
     else:
         sys.exit(f"Serial {args.serial} is not in receivers.yml: give --frequencies")
     try:
-        radio = sdr.open(r.serial)
+        radio = sdr.open(r.serial, r.stages)
+        radio.prepare()
         gains = radio.gains or FALLBACK_GAINS
     except dongles.DongleError as e:
         sys.exit(str(e))
@@ -550,7 +570,8 @@ def main(argv=None):
         import event_store
         event_store.init_db(config.DB_PATH)
         event_store.save_calibration(r.serial, r.frequencies, res["gain"], res["ppm"],
-                                     {"stations": res["stations"], "steps": res["steps"]},
+                                     {"stations": res["stations"], "steps": res["steps"],
+                                      "stages": _stages(r)},
                                      "by hand")
         print("Saved: the satellite uses it from its next start.", file=sys.stderr)
 

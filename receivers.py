@@ -8,6 +8,7 @@ receivers.yml.
         frequencies: [103.5M, 102.9M]
         # gain: auto (default) or e.g. 28.0 to override the calibration
         # ppm: auto (default) or e.g. 12
+        # An Airspy only, each optional: lna: 0-14, mixer: 0-15, vga: 0-15
 
 Without the file and with one dongle, FM_FREQUENCY / FM_FREQUENCIES are used
 on it (as before v1.0). With several dongles the file is needed.
@@ -35,7 +36,22 @@ class Receiver:
     name: str = ""
     gain: object = "auto"              # "auto" or dB (float)
     ppm: object = "auto"               # "auto" or int
+    # An Airspy's stages by hand (None: from the linearity step)
+    lna: object = None
+    mixer: object = None
+    vga: object = None
     warnings: list = field(default_factory=list)
+
+    @property
+    def stages(self):
+        """The Airspy stages set by hand: {"lna": 4, …} (may be empty)."""
+        return {k: v for k, v in (("lna", self.lna), ("mixer", self.mixer),
+                                  ("vga", self.vga)) if v is not None}
+
+    @property
+    def gain_fixed(self):
+        """No gain to calibrate: gain: given, or all three stages by hand."""
+        return self.gain != "auto" or len(self.stages) == 3
 
     @property
     def id(self):
@@ -76,6 +92,22 @@ def _auto_or(value, kind, where):
         raise ReceiverError(f"{where}: must be 'auto' or a number (got '{value}')")
 
 
+STAGE_MAX = {"lna": 14, "mixer": 15, "vga": 15}
+
+
+def _stage(value, name, where):
+    if value is None or str(value).strip().lower() in ("", "auto"):
+        return None
+    try:
+        v = int(str(value).strip())
+    except ValueError:
+        raise ReceiverError(f"{where}: {name} must be a whole number 0-{STAGE_MAX[name]} "
+                            f"or left out (got '{value}')")
+    if not 0 <= v <= STAGE_MAX[name]:
+        raise ReceiverError(f"{where}: {name} must be 0-{STAGE_MAX[name]} (got {v})")
+    return v
+
+
 def check(receiver, where):
     hz = receiver.freqs_hz
     if not hz:
@@ -113,10 +145,17 @@ def parse(data):
         r = Receiver(serial=serial, name=str(item.get("name") or "").strip()[:32],
                      frequencies=[_freq(f, where) for f in freqs],
                      gain=_auto_or(item.get("gain"), float, f"{where}, gain"),
-                     ppm=_auto_or(item.get("ppm"), int, f"{where}, ppm"))
+                     ppm=_auto_or(item.get("ppm"), int, f"{where}, ppm"),
+                     **{k: _stage(item.get(k), k, where) for k in STAGE_MAX})
         check(r, where)
-        if dongles.is_airspy_serial(serial) and r.ppm != "auto":
+        airspy = dongles.is_airspy_serial(serial)
+        if airspy and r.ppm != "auto":
             r.warnings.append("ppm: is not used for an Airspy (its clock is a TCXO)")
+        if r.stages and not airspy:
+            r.warnings.append("lna:/mixer:/vga: are for an Airspy; an RTL-SDR uses gain:")
+            r.lna = r.mixer = r.vga = None
+        elif len(r.stages) == 3 and r.gain != "auto":
+            r.warnings.append("gain: is not used: lna:, mixer: and vga: are all set")
         out.append(r)
     if not out:
         raise ReceiverError("receivers.yml lists no receivers")
