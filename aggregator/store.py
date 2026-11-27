@@ -604,18 +604,39 @@ def _offset(conn, node_id, cache):
     return cache[node_id]
 
 
-def _find_broadcast(conn, node_id, ev, window_sec):
+# A reception that has not ended keeps its broadcast open for receptions
+# starting at most this long after the broadcast began (a traffic
+# announcement rarely lasts 10 minutes) ...
+ONGOING_MAX_SEC = 900
+# ... and only while its node is heard from: one that went silent must not
+# keep the broadcast open for the next announcement
+LIVE_NODE_SEC = 180
+
+
+def _find_broadcast(conn, node_id, ev, window_sec, now=None):
     """The broadcast a new reception belongs to, or None.
 
-    Same type and PI, and, on the aggregator's clock (each node's measured
-    offset applied), it started within window_sec of the broadcast's start
-    or while the broadcast was going on. A broadcast that has ended does not
-    take a reception that started after it ended: that is the next one.
+    Same type and PI and, on the aggregator's clock (each node's measured
+    offset applied), it started at most window_sec before the broadcast, or
+    while the broadcast was going on: before its end if it has ended, else
+    within ONGOING_MAX_SEC of its start while one of its open receptions
+    comes from a node still heard from. A reception that starts after a
+    broadcast ended is the next one.
     """
     start = _epoch(ev.get("started_at"))
     if start is None:
         return None
-    offsets = {}
+    now = time.time() if now is None else now
+    offsets, live = {}, {}
+
+    def node_live(nid):
+        if nid not in live:
+            row = conn.execute("SELECT last_seen_at FROM nodes WHERE id = ?",
+                               (nid,)).fetchone()
+            seen = _epoch(row[0]) if row and row[0] else None
+            live[nid] = seen is None or now - seen <= LIVE_NODE_SEC
+        return live[nid]
+
     start += _offset(conn, node_id, offsets)
     lo = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start - 6 * 3600))
     hi = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start + 6 * 3600))
@@ -624,7 +645,7 @@ def _find_broadcast(conn, node_id, ev, window_sec):
             "SELECT id, state FROM events WHERE type = ? AND pi = ? "
             "AND started_at BETWEEN ? AND ? ORDER BY id DESC",
             (ev["type"], ev["pi"], lo, hi)).fetchall():
-        starts, ends, ongoing = [], [], cand["state"] != "end"
+        starts, ends, open_live = [], [], False
         for r in conn.execute("SELECT node_id, state, started_at, ended_at "
                               "FROM receptions WHERE event_id = ?", (cand["id"],)):
             off = _offset(conn, r["node_id"], offsets)
@@ -634,16 +655,21 @@ def _find_broadcast(conn, node_id, ev, window_sec):
             e = _epoch(r["ended_at"])
             if e is not None:
                 ends.append(e + off)
-            if r["state"] != "end":
-                ongoing = True
+            if r["state"] != "end" and node_live(r["node_id"]):
+                open_live = True
         if not starts:
             continue
         c_start = min(starts)
-        c_end = None if ongoing or not ends else max(ends)
-        if abs(start - c_start) <= window_sec or (
-                c_start <= start and (c_end is None or start <= c_end)):
-            if best is None or abs(start - c_start) < best[0]:
-                best = (abs(start - c_start), cand["id"])
+        if start < c_start - window_sec:
+            continue
+        if cand["state"] != "end" and open_live:
+            fits = start <= c_start + ONGOING_MAX_SEC
+        else:
+            # Ended (or only silent nodes still open): up to its last end
+            c_end = max(ends) if ends else c_start
+            fits = start <= max(c_end, c_start)
+        if fits and (best is None or abs(start - c_start) < best[0]):
+            best = (abs(start - c_start), cand["id"])
     return best[1] if best else None
 
 
@@ -932,6 +958,13 @@ def _event_dict(row):
         names = sorted(set((d.get("node_names") or "").split(","))) if d.get("node_names") else []
         d["node_names"] = names or ([d["node_name"]] if d.get("node_name") else [])
     return d
+
+
+def event_node_ids(event_id):
+    """The nodes that heard a broadcast, in the order they reported it."""
+    return [r[0] for r in _conn().execute(
+        "SELECT node_id FROM receptions WHERE event_id = ? GROUP BY node_id "
+        "ORDER BY MIN(id)", (event_id,))]
 
 
 def receptions_for_events(event_ids):

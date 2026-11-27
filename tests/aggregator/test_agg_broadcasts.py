@@ -329,3 +329,66 @@ async def test_api_shows_who_heard_it_and_each_recording(aiohttp_client, agg_sto
     assert [e["event_uid"] for e in listed] == [ua]
     # Only the broadcast's id is an event; a reception's id is not
     assert (await web.get(f"/api/v1/events/{ub}")).status == 404
+
+
+def _silent(node, ago):
+    conn = store._conn()
+    conn.execute("UPDATE nodes SET last_seen_at = ? WHERE id = ?", (_iso(time.time() - ago), node["id"]))
+    conn.commit()
+
+
+def test_a_broadcast_left_open_by_a_silent_node_takes_no_later_one(agg_store, nodes, monkeypatch):
+    """Lisa went silent mid-broadcast; Kalle's next announcement five minutes
+    later is a new event with its own TA, transcription and alert."""
+    a, b = nodes
+    mqtt, tr = FakeMqtt(), FakeTranscriber()
+    p = pipeline.Pipeline(mqtt=mqtt, transcriber=tr)
+    t = time.time() - 900
+    first = _uid()
+    put(a, first, ev(t))
+    put(b, _uid(), ev(t + 2))                 # never ends
+    put(a, first, ev(t, t + 60, rev=2))
+    _silent(b, 600)
+    monkeypatch.setattr(config, "BROADCAST_END_GRACE_SEC", 0)
+    p.sweep()
+    assert store.get_event(first)["state"] == "end"
+    second = _uid()
+    _, prev, row = put(a, second, ev(t + 360))
+    p.on_event(row, prev)
+    assert count_events() == 2 and row["event_uid"] == second
+    _, prev, row = put(a, second, ev(t + 360, t + 420, rev=2))
+    p.on_event(row, prev)
+    p.on_audio(store.set_event_audio(a["id"], second, f"{second}.ogg", None, 10))
+    assert len(tr.jobs) == 1
+    ta = [m[1]["active"] for m in mqtt.messages if m[0].endswith("traffic/ta")]
+    assert ta[-2:] == [True, False]
+
+
+def test_a_reception_stuck_open_does_not_swallow_the_next_hour(agg_store, nodes):
+    """One node, its first reception never ended (still heard from): a new
+    announcement long after is not folded into it."""
+    a, _ = nodes
+    t = time.time() - 3600
+    put(a, _uid(), ev(t))
+    put(a, _uid(), ev(t + 1800))
+    assert count_events() == 2
+
+
+def test_open_broadcast_of_a_silent_node_takes_no_new_reception(agg_store, nodes):
+    a, b = nodes
+    t = time.time() - 600
+    put(b, _uid(), ev(t))                     # Lisa: open, then silent
+    _silent(b, 400)
+    put(a, _uid(), ev(t + 200))
+    assert count_events() == 2
+
+
+def test_a_short_ended_broadcast_takes_nothing_after_its_end(agg_store, nodes):
+    a, b = nodes
+    put(a, _uid(), ev(T, T + 12))
+    put(b, _uid(), ev(T + 20))                # within 30 s of the start, after the end
+    assert count_events() == 2
+    put(b, _uid(), ev(T - 5, T + 11))          # began 5 s earlier: the same one
+    assert count_events() == 2
+    rows, _ = store.query_events()
+    assert sorted(len(r["node_names"]) for r in rows) == [1, 2]

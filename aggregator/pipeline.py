@@ -190,9 +190,22 @@ class Pipeline(Hooks):
         location = store.node_location(store.get_node(node_id))
         return self._geo.locate_node(location) if location else None
 
+    def place_of(self, row):
+        """(place, "Ort, Län") of a broadcast: the transcribed node's, else
+        that of another node that heard it; (None, None) if none has one."""
+        if self._geo is None:
+            return None, None
+        ids = [row["node_id"]] + [i for i in store.event_node_ids(row["id"])
+                                  if i != row["node_id"]]
+        for node_id in ids:
+            place = self.node_place(node_id)
+            if place is not None:
+                return place, store.node_location(store.get_node(node_id))
+        return None, None
+
     def _hints(self, row):
         """The reporting node's place names, for the transcriber."""
-        place = self.node_place(row["node_id"]) if self._geo else None
+        place = self.place_of(row)[0] if self._geo else None
         if place is None:
             return None
         try:
@@ -208,11 +221,10 @@ class Pipeline(Hooks):
             return
         uid = row["event_uid"]
         try:
-            place = self.node_place(row["node_id"])
+            place, location = self.place_of(row)
             if place is None:
                 store.save_geolocation(uid, None, "no_location")
                 return
-            location = store.node_location(store.get_node(row["node_id"]))
             result = self._geo.locate(text, place.point, location,
                                       row.get("radiotext"),
                                       store.open_incidents(place.point))
@@ -235,10 +247,9 @@ class Pipeline(Hooks):
     def _place_older(self, row):
         """Place one message stored before the map existed. No alert: it
         was broadcast long ago. None: its node has no location (yet)."""
-        place = self.node_place(row["node_id"])
+        place, location = self.place_of(row)
         if place is None:
             return None
-        location = store.node_location(store.get_node(row["node_id"]))
         result = self._geo.locate(row["transcription"], place.point, location,
                                   row.get("radiotext"),
                                   store.open_incidents(place.point, at=row["at"]))

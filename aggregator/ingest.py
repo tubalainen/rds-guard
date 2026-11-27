@@ -277,10 +277,14 @@ def client_address(request):
     """The client's address; X-Forwarded-For only from a trusted proxy."""
     peer = request.remote or ""
     if peer in config.TRUSTED_PROXIES:
-        forwarded = request.headers.get("X-Forwarded-For", "")
-        first = forwarded.split(",")[0].strip()
-        if first:
-            return first[:64]
+        # The client may write any X-Forwarded-For it likes; each trusted
+        # proxy appends the address it got the request from. Take the last
+        # address that is not one of ours.
+        hops = [h.strip() for h in request.headers.get("X-Forwarded-For", "").split(",")
+                if h.strip()]
+        for hop in reversed(hops):
+            if hop not in config.TRUSTED_PROXIES:
+                return hop[:64]
     return peer[:64]
 
 
