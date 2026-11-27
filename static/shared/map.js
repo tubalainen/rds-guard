@@ -692,9 +692,23 @@ const RDSMap = (() => {
                 html += `<h3 class="map-group">Trafikverket, ej i radion (${deviations.length})</h3>`
                     + deviations.map(trvItem).join('');
             }
-            list.innerHTML = html || (history
+            // Nothing recent: say that older incidents may be in the history
+            // (the choice is remembered per web address, so a new one starts
+            // without it)
+            const hint = !history && !incidents.length
+                ? `<p class="muted small" style="margin:0 0 8px">Inga händelser har nämnts de senaste ${HOURS} timmarna.
+                    <button class="btn small" type="button" id="map-show-history" style="margin-top:6px">Visa historiska händelser</button></p>`
+                : '';
+            list.innerHTML = (hint + html) || (history
                 ? '<p class="muted small" style="margin:0">Inga händelser finns sparade ännu.</p>'
                 : '<p class="muted small" style="margin:0">Inga händelser har nämnts de senaste timmarna.</p>');
+            const showHistory = list.querySelector('#map-show-history');
+            if (showHistory) {
+                showHistory.addEventListener('click', () => {
+                    box.checked = true;
+                    box.dispatchEvent(new Event('change'));
+                });
+            }
             list.querySelectorAll('.map-item').forEach((b) => b.addEventListener('click', () => show(b.dataset.id)));
 
             if (first) {
