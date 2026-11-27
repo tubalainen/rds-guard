@@ -111,11 +111,16 @@ class Airspy:
     zero_is_auto = False          # linearity 0 is just the lowest gain
     default_gain = AIRSPY_DEFAULT_GAIN
 
-    def __init__(self, serial, rates=(), model="Airspy", stages=None):
+    def __init__(self, serial, rates=(), model="Airspy", stages=None, rate=None):
         self.index = None
         self.serial = dongles.normalize_serial(serial)
         self.model = model
-        self.fs = pick_rate(rates, model)
+        if rate and rates and rate not in rates:
+            raise dongles.DongleError(
+                f"{model} {self.serial} cannot run at {rate / 1e6:g} MS/s (sample_rate: "
+                "in receivers.yml); it takes "
+                + ", ".join(f"{r / 1e6:g}M" for r in sorted(rates)))
+        self.fs = rate or pick_rate(rates, model)
         self.gains = list(dongles.AIRSPY_GAINS)
         # LNA / Mixer / VGA fixed by hand ({"lna": 4, …}); the others follow
         # the linearity step
@@ -209,16 +214,23 @@ def pick_rate(rates, model=""):
     return 3_000_000 if "mini" in str(model).lower() else 2_500_000
 
 
-def from_dongle(d, stages=None):
+def from_dongle(d, stages=None, rate=None):
     if d.kind == "airspy":
-        return Airspy(d.serial, d.rates, d.product, stages)
+        return Airspy(d.serial, d.rates, d.product, stages, rate)
     return RtlSdr(d.index, d.serial, d.product)
 
 
-def open(serial, stages=None):     # noqa: A001 - sdr.open(serial) reads well
+def open(serial, stages=None, rate=None):   # noqa: A001 - sdr.open(serial) reads well
     """The receiver with this serial number. Raises dongles.DongleError.
-    stages: an Airspy's LNA/Mixer/VGA by hand ({"lna": 4, …}, optional)."""
-    return from_dongle(dongles.lookup(serial), stages)
+    stages: an Airspy's LNA/Mixer/VGA by hand ({"lna": 4, …}, optional);
+    rate: an Airspy's sample rate (None: the lowest that fits)."""
+    return from_dongle(dongles.lookup(serial), stages, rate)
+
+
+def for_receiver(r):
+    """The radio for a receivers.Receiver, with its settings."""
+    rate = getattr(r, "sample_rate", None)
+    return open(r.serial, getattr(r, "stages", None), **({"rate": rate} if rate else {}))
 
 
 def capture(radio, center_hz, gain, ppm, seconds, run=subprocess.run, retries=1):
@@ -237,3 +249,59 @@ def capture(radio, center_hz, gain, ppm, seconds, run=subprocess.run, retries=1)
             time.sleep(1)
     raise RuntimeError(f"{radio.tool} gave no samples: "
                        f"{proc.stderr.decode('utf-8', 'replace')[-200:]}")
+
+
+def capture_measure(radio, center_hz, gain, ppm, seconds, offsets, popen=subprocess.Popen,
+                    retries=1):
+    """A capture decoded while it comes in, for high rates: (clip fraction,
+    level dBFS, [MPX per offset]). Only the MPX at 171 kHz is kept. Tried
+    once more after a second, as capture()."""
+    for attempt in range(retries + 1):
+        try:
+            return _capture_measure(radio, center_hz, gain, ppm, seconds, offsets, popen)
+        except RuntimeError:
+            if attempt == retries:
+                raise
+            time.sleep(1)
+
+
+def _capture_measure(radio, center_hz, gain, ppm, seconds, offsets, popen):
+    from channelizer import make_stations
+    bps = radio.bytes_per_sample
+    settle = int(0.25 * radio.fs)
+    samples = int((seconds + 0.25) * radio.fs)
+    stations, block = make_stations(offsets, radio.fs, pipe=False)
+    parts = [[] for _ in stations]
+    clipped = power = counted = 0.0
+    proc = popen(radio.capture_cmd(center_hz, gain, ppm, samples), stdout=subprocess.PIPE,
+                 stderr=subprocess.DEVNULL)
+    try:
+        skipped = 0
+        while skipped < settle:
+            chunk = proc.stdout.read(min(settle - skipped, block) * bps)
+            if not chunk:
+                break
+            skipped += len(chunk) // bps
+        while True:
+            raw = proc.stdout.read(block * bps)
+            if len(raw) < block * bps:
+                break
+            clipped += radio.clip_fraction(raw) * block * 2
+            z = radio.iq(raw)
+            power += float(np.sum(np.abs(z) ** 2))
+            counted += block
+            for st, out in zip(stations, parts):
+                m = st.demod(z)
+                if m is not None:
+                    out.append(m)
+    finally:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        proc.wait()
+    if counted < radio.fs * min(seconds, 1.0) / 2:
+        raise RuntimeError(f"{radio.tool} gave no samples (busy or gone?)")
+    level = 10 * np.log10(power / counted) if power > 0 else -120.0
+    return (clipped / (counted * 2), round(float(level), 1),
+            [np.concatenate(p) if p else np.zeros(0, dtype=np.float32) for p in parts])
