@@ -1,0 +1,25 @@
+# The satellite's receivers: one entry per RTL-SDR dongle.
+# Put this file in the satellite's data folder as rds-data/receivers.yml.
+# Without it, one dongle listens to FM_FREQUENCY / FM_FREQUENCIES from .env.
+#
+# A dongle is known by its serial number, never by its USB order. List them:
+#   docker compose exec rds-guard python3 -m dongles
+# Two dongles with the same serial number (00000001 is common) cannot be
+# told apart: give one a new number with rtl_eeprom (the command says how).
+#
+# Gain and ppm are found automatically for each dongle, for all its stations
+# together (at the first start, when decoding drops, and with Admin ->
+# Noder -> Kalibrera om). gain:/ppm: here fix them instead.
+
+receivers:
+  - serial: "00000101"            # required
+    name: tak                     # optional, shown on the aggregator
+    # Up to 4 stations within 2 MHz on one dongle
+    frequencies: [103.5M, 102.9M]
+    # gain: auto                  # default; or e.g. 28.0 (dB) to fix it
+    # ppm: auto                   # default; or e.g. 12
+
+  # - serial: "00000102"
+  #   name: källare
+  #   frequencies: [99.1M]
+  #   gain: 19.7

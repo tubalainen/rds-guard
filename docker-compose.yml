@@ -1,23 +1,23 @@
-# RDS Guard: the satellite (radio and recordings) and the aggregator (archive,
-# transcription, map, push, MQTT) on one host, sharing one .env.
+# RDS Guard on one host: the satellite (radio and recordings) and the
+# aggregator (archive, transcription, map, push, MQTT, web UI), sharing one
+# .env. From v1.0 the satellite needs the aggregator.
 #
 #   docker compose up -d
 #
 # First start: put the same secret in .env for both, e.g.
 #   echo "JOIN_KEY=$(openssl rand -hex 16)" >> .env
 # and run docker compose up -d: the satellite asks to join and the shared
-# JOIN_KEY approves it at once. (Without JOIN_KEY or UPLINK_TOKEN the
-# satellite runs standalone, as before.)
-# Moving an existing installation and its history: see the README, "Moving
-# an existing installation to satellite + aggregator" (the import prints an
-# UPLINK_TOKEN, which works as well).
+# JOIN_KEY approves it at once. (An UPLINK_TOKEN from the import works too.)
 #
-# Ports on this host:
-#   8022  the satellite's own web UI (WEB_UI_PORT)
-#   8080  the aggregator's web UI (AGGREGATOR_UI_PORT); keep it on your LAN
+# The web UI is the aggregator's, on port 8080 (AGGREGATOR_UI_PORT); keep it
+# on your LAN. The satellite has no port: `docker compose ps` shows its
+# health, and the aggregator's Admin -> Noder its receivers.
 # The aggregator's ingest API (8081) is not published: the satellite reaches
 # it over this compose network. To let satellites on other machines report
 # here, uncomment its port below (and see aggregator/README.md for HTTPS).
+#
+# Several dongles, or fixed gain: rds-data/receivers.yml (see
+# receivers.example.yml). Without it the one dongle listens to FM_FREQUENCY.
 
 services:
   rds-guard:
@@ -27,13 +27,7 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      # The aggregator below. With JOIN_KEY (or UPLINK_TOKEN) in .env the
-      # satellite reports there and only records: the aggregator transcribes,
-      # maps and sends MQTT and push. Without either it runs standalone.
-      LOCAL_AGGREGATOR: "true"
-      UPLINK_URL: http://aggregator:8081
-    ports:
-      - "${WEB_UI_PORT:-8022}:8022"
+      AGGREGATOR_URL: http://aggregator:8081
     volumes:
       - ./rds-data:/data
     devices:
@@ -50,11 +44,8 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      # Settings the two would otherwise share from .env but must not
       MQTT_CLIENT_ID: rds-guard-aggregator
-      # MQTT_TOPIC_PREFIX comes from .env: the topics the satellite used
-      # (rds/alert, rds/notify/…), so Home Assistant keeps working.
-      # AGGREGATOR_MQTT_TOPIC_PREFIX in .env gives the aggregator another one.
+      # Settings a .env from before v1.0 may hold for the satellite:
       WEB_UI_URL: ${AGGREGATOR_WEB_UI_URL:-}
       EVENT_RETENTION_DAYS: ${AGGREGATOR_RETENTION_DAYS:-90}
       PUBLIC_URL: ${PUBLIC_URL:-http://aggregator:8081}

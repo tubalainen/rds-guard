@@ -1,6 +1,6 @@
 # <img src="static/shared/icons/favicon.svg" width="40" height="40" alt="" align="top"> RDS Guard
 
-FM radio traffic and emergency monitoring for Sweden. Decodes RDS data from an RTL-SDR dongle, captures traffic announcements and emergency broadcasts, transcribes the captured audio with ElevenLabs Scribe (falling back to a local, Swedish-tuned Whisper model), sends push notifications over MQTT by rules you set in the web UI, and serves a web archive of everything it has heard.
+FM radio traffic and emergency monitoring for Sweden. RTL-SDR dongles decode RDS, capture traffic announcements and emergency broadcasts (VMA) and record them; a central aggregator transcribes the audio with ElevenLabs Scribe (falling back to a local, Swedish-tuned Whisper model), places each message on a map, sends push notifications over MQTT by rules you set in the web UI, and serves a web archive of everything that was heard.
 
 Built for Sveriges Radio P4, Sweden's primary traffic announcement carrier and emergency broadcast channel (VMA).
 
@@ -8,98 +8,80 @@ Built for Sveriges Radio P4, Sweden's primary traffic announcement carrier and e
 
 ## What it does
 
-- Tunes to an FM frequency using an RTL-SDR USB dongle
-- Decodes all RDS (Radio Data System) data in real time
-- Detects traffic announcements, emergency broadcasts, and EON cross-network alerts
-- Records broadcast audio during traffic and emergency events, removes the FM pre-emphasis and converts to OGG/WAV via ffmpeg
-- Transcribes recorded audio with ElevenLabs Scribe, or locally with the bundled Swedish KB-Whisper model (used automatically as fallback, or without an API key)
-- Stores events in a local SQLite database with 30-day retention
-- Serves a web archive (in Swedish) with a calendar, search in transcriptions, audio playback and the push rules
-- Places each traffic message on a map: which road, where, which direction, and how certain the place is (see [Map](#map))
-- Sends ready-made push messages to MQTT (`rds/notify/<rule>`) for the events that match your rules, e.g. VMA always and traffic that mentions your roads on weekday mornings
-- Optionally forwards events and decoded data to an MQTT broker for Home Assistant or other automation
-- Optionally reports to a central [aggregator](aggregator/README.md) that collects events from several installations (see [Run as a satellite](#run-as-a-satellite))
+RDS Guard is two containers:
+
+- The **satellite** (`ghcr.io/tubalainen/rds-guard`) has no web UI. It
+  - drives one or more RTL-SDR dongles, each with up to four P4 stations
+    within 2 MHz
+  - finds the best gain and frequency correction for each dongle by itself
+  - decodes RDS and detects traffic announcements (TA) and emergency
+    broadcasts (PTY Alarm)
+  - records the audio of each one (OGG/Opus)
+  - sends the event to the aggregator the moment it starts, and the
+    recording when it ends
+- The **aggregator** (`ghcr.io/tubalainen/rds-guard-aggregator`) does
+  everything else, for any number of satellites:
+  - transcribes the recordings with ElevenLabs Scribe, or locally with the
+    bundled Swedish KB-Whisper model (also the fallback, and used without an
+    API key)
+  - merges one broadcast heard by several satellites or dongles into one
+    event, using the best recording
+  - places each traffic message on a map, with Trafikverket's data as an
+    option (see [Map](#map))
+  - serves the web archive (in Swedish) with a calendar, search, audio, the
+    map and Admin
+  - sends ready-made push messages to MQTT (`rds/notify/<rule>`) for the
+    events that match your rules, plus alerts for Home Assistant
+
+Everything runs locally on a CPU; ElevenLabs and Claude are paid options
+that make transcription and the map better.
 
 ## Architecture
 
-### System overview
+![RDS Guard architecture: satellites decode P4 with RTL-SDR dongles and send events and audio to the aggregator, which stores, transcribes, maps and publishes alerts](docs/architecture/rds-guard.architecture.svg)
 
-![RDS Guard architecture: a satellite decodes P4 with an RTL-SDR, stores events and audio locally and, optionally, sends them over HTTPS through a reverse proxy to the aggregator, which stores, transcribes and publishes alerts](docs/architecture/rds-guard.architecture.svg)
+```
+ Satellite (headless, any number)                     Aggregator (one)
+ receivers.yml ─┬─ dongle A: rtl_sdr → Channelizer → redsea ×N ┐
+                └─ dongle B: rtl_sdr → Channelizer → redsea    ┤
+                                                               ▼
+   rules engine → satellite.db (events + outbox) → uplink ──HTTP(S)──→ :8081 ingest
+   recorder → /data/spool/*.ogg ──────────────────┘                     │
+   gain/ppm calibration · health.json (Docker)       merge into broadcasts ▼
+                                              transcription → map → Trafikverket
+                                              → alert / push / MQTT
+                                              :8080 web UI (archive, map, Admin)
+```
 
-Every installation is a complete RDS Guard on its own (**standalone**). With
-`UPLINK_URL` set it also becomes a **satellite** and sends a copy of each event
-and its audio to an **aggregator**, a separate container that collects events
-from many satellites, transcribes them centrally and publishes MQTT alerts. Only
-the aggregator's ingest API is on the internet, behind an HTTPS reverse proxy or
-a Cloudflare Tunnel.
-See [Run as a satellite](#run-as-a-satellite) and
-[aggregator/README.md](aggregator/README.md).
+- **Satellite:** for each dongle, `rtl_sdr` captures 2.4 MHz of raw IQ;
+  `Channelizer` (numpy) cuts out each station and demodulates it; one
+  `redsea` per station decodes RDS, and the recorder takes the same audio
+  during an event. A single station is received 250 kHz off centre, away
+  from the dongle's DC spike.
+- **Rules engine:** TA on starts a `traffic` event, TA off ends it, and
+  RadioText during it is added; PTY Alarm starts an `emergency` event. The
+  event is queued (outbox) and sent at once; its recording follows when it
+  ends. While the aggregator is unreachable everything waits in the queue
+  (for up to `UPLINK_MAX_AGE_HOURS`, 7 days by default).
+- **Aggregator:** see [aggregator/README.md](aggregator/README.md).
 
 An [interactive version](docs/architecture/rds-guard.architecture.html) of the
 diagram (download and open in a browser) links every component to the code it
-describes; see [docs/architecture](docs/architecture/README.md).
+describes; see [docs/architecture](docs/architecture/README.md). The protocol
+between the two is in [docs/uplink-protocol.md](docs/uplink-protocol.md).
 
-### Inside one installation
+### Three ways to run it
 
-Single Docker container. One process handles the entire pipeline:
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│  rds-guard container                                         │
-│                                                              │
-│  Single-station (FM_FREQUENCY):                              │
-│  rtl_fm ──→ AudioTee ──→ redsea ──→ rds_guard.py            │
-│                │                          │                  │
-│  Multi-station (FM_FREQUENCIES):          │                  │
-│  rtl_sdr ──→ Channelizer ─┬─ pipe ──→ redsea[0] ──→        │
-│                            ├─ pipe ──→ redsea[1] ──→ rds_guard.py
-│                            └─ ...                     │      │
-│                                                  ┌────┴────┐ │
-│          AudioRecorder                           │  Rules  │ │
-│            (ffmpeg)                              │  Engine │ │
-│                │                                 └──┬───┬──┘ │
-│                ▼                            ┌───────┘   └──┐ │
-│          Transcriber                        ▼              ▼ │
-│     (ElevenLabs Scribe,                 SQLite           MQTT │
-│      fallback KB-Whisper)          /data/events.db  (optional)│
-│                                         │                    │
-│          /data/audio/                   ▼                    │
-│           *.ogg / *.wav     Web server (aiohttp)             │
-│                               ├── GET  /              → UI   │
-│                               ├── GET  /api/events    → API  │
-│                               ├── GET  /api/audio/:f  → play │
-│                               ├── GET  /api/status    → info │
-│                               └── WS   /ws/console    → live │
-│                                   │                          │
-│  Uplink (optional, UPLINK_URL) ──→ HTTPS ──→ aggregator      │
-│                                   │                          │
-├───────────────────────────────────┼──────────────────────────┤
-│                               port 8022                      │
-└───────────────────────────────────┼──────────────────────────┘
-                                    ▼
-                                 Browser
-```
-
-**Single-station pipeline:** `rtl_fm` demodulates the FM signal, `AudioTee` splits the PCM stream — forwarding to `redsea` for RDS decoding while simultaneously feeding the `AudioRecorder` during active events.
-
-**Multi-station pipeline:** `rtl_sdr` captures raw wideband IQ, `Channelizer` (numpy DSP) extracts and demodulates each station to its own 171 kHz PCM pipe, and N independent `redsea` + `AudioRecorder` instances run in parallel. `rds_guard.py` processes the decoded JSON, triggers recordings, and dispatches transcriptions.
-
-**Rules engine** evaluates each decoded group against hardcoded rules defined by the RDS standard:
-
-| Trigger | Event type | Severity |
-|---------|------------|----------|
-| TA flag goes true | `traffic` | `warning` |
-| TA flag goes false (end) | `traffic` | `info` |
-| RadioText change during active TA | updates existing event | |
-| PTY changes to Alarm | `emergency` | `critical` |
-| EON linked station TA (group 14A) | `eon_traffic` | `info` |
-
-Events are written to SQLite and optionally published to MQTT. Traffic announcements and emergency broadcasts are tracked through their full lifecycle (start, RadioText updates, end with duration). Audio is automatically recorded during `traffic` and `emergency` events, then transcribed (ElevenLabs Scribe, or local KB-Whisper as fallback).
+| Where the satellite is | Its address for the aggregator | How it is approved |
+|---|---|---|
+| Same host (`docker-compose.yml`) | `http://aggregator:8081` on the compose network (set for you) | The shared `JOIN_KEY` in `.env`, at once |
+| Another machine on your LAN | `http://<aggregator's IP>:8081` | In the aggregator's **Admin → Noder** (or `JOIN_KEY`) |
+| Over the internet | `https://rds.example.com`, through a reverse proxy or tunnel | In **Admin → Noder** |
 
 ## Requirements
 
-- Linux host (Raspberry Pi, NAS, server)
-- RTL-SDR USB dongle (RTL2832U-based)
+- Linux host (Raspberry Pi 4, NAS, server)
+- One or more RTL-SDR USB dongles (RTL2832U-based)
 - Docker and Docker Compose
 - FM antenna with line of sight to a P4 transmitter
 
@@ -114,17 +96,11 @@ sudo modprobe -r dvb_usb_rtl28xxu
 
 ## Quick start
 
-RDS Guard is moving to one setup for everyone: a **satellite** that only
-receives and records, and an **aggregator** that does everything else
-(archive, transcription, map, push, MQTT). From v0.9.0 the default
-`docker-compose.yml` runs both on one host; see the
-[plan](docs/plans/satellit-aggregator.md). Until v1.0 the satellite also keeps
-its own web UI on port 8022.
+This runs the satellite and the aggregator on one host.
 
 1. Get the two files you need. There is no need to clone the repository:
-   `docker-compose.yml` uses the ready-made images
-   `ghcr.io/tubalainen/rds-guard` and `ghcr.io/tubalainen/rds-guard-aggregator`
-   (amd64 + arm64), which Docker pulls for you.
+   `docker-compose.yml` uses the ready-made images (amd64 + arm64), which
+   Docker pulls for you.
 
 ```bash
 mkdir rds-guard && cd rds-guard
@@ -133,101 +109,68 @@ curl -fsSLo .env https://raw.githubusercontent.com/tubalainen/rds-guard/master/.
 ```
 
 2. Edit `.env` and at minimum set your local P4 frequency, where the receiver
-   is, and a password for the Admin pages:
+   is, a name for it and a password for the Admin pages:
 
 ```bash
 FM_FREQUENCY=103.3M                   # Your local P4 frequency
 NODE_LOCATION=Karlstad, Värmlands län # Ort, Län: places the messages on the map
+NODE_NAME=Hemma
 ADMIN_PASSWORD=choose-one
 ```
 
-For the best transcriptions, add an [ElevenLabs](https://elevenlabs.io) API
-key (about 2–3 öre per traffic announcement). Without one, audio is
-transcribed locally with the bundled Swedish KB-Whisper model:
+3. Add a secret both containers share, so the satellite is approved at once:
 
 ```bash
-ELEVENLABS_API_KEY=your-key
+echo "JOIN_KEY=$(openssl rand -hex 16)" >> .env
 ```
 
-If you want MQTT forwarding, enable it and configure the broker:
-
-```bash
-MQTT_ENABLED=true              # Enable MQTT (default: false)
-MQTT_HOST=192.168.1.100        # Your MQTT broker IP
-MQTT_PORT=1883
-```
-
-3. Pull the images and start them:
+4. Pull the images and start them:
 
 ```bash
 docker compose pull
 docker compose up -d
 ```
 
-4. Connect the satellite to the aggregator: put the same secret in `.env`
-   for both (any long random text) and a name for the node, then start
-   again. The satellite asks to join and the shared `JOIN_KEY` approves it
-   at once:
+5. Open the web UI at **http://your-host:8080**. Under **Admin → Noder** the
+   satellite turns green within a minute. On its first start it calibrates
+   its dongle for about two minutes (see [Gain and frequency
+   correction](#gain-and-frequency-correction)); RDS comes in after that.
 
-```bash
-echo "JOIN_KEY=$(openssl rand -hex 16)" >> .env
-```
-
-```bash
-echo "NODE_NAME=Hemma" >> .env
-```
-
-```bash
-docker compose up -d
-```
-
-   Without `JOIN_KEY` the satellite still asks to join; approve it under
-   **Admin → Noder → Väntar på godkännande** in the aggregator's web UI.
-
-5. Open the aggregator's web UI at **http://your-host:8080**. The
-   satellite's own web UI stays at **http://your-host:8022** until v1.0.
+For the best transcriptions, add an [ElevenLabs](https://elevenlabs.io) API
+key (about 2–3 öre per traffic announcement); without one, audio is
+transcribed locally. For MQTT, set `MQTT_ENABLED=true` and `MQTT_HOST`. Then
+run `docker compose up -d` again.
 
 To update later, run `docker compose pull && docker compose up -d` in the
 same folder. Your `.env`, `rds-data` and `aggregator-data` are kept.
 
-View logs:
+> **Building locally:** clone the repository, copy `.env.example` to
+> `.env`, swap the `image:` lines in `docker-compose.yml` for the `build:`
+> lines and run `docker compose up -d --build`.
 
-```bash
-docker compose logs -f rds-guard aggregator
-```
+### Upgrading to v1.0 from an older installation
 
-> **Building locally:** Only if you want to build the images yourself instead of pulling them, you need the whole repository: `git clone https://github.com/tubalainen/rds-guard.git`, then in `rds-guard` copy `.env.example` to `.env`, edit `docker-compose.yml` (comment out the `image:` lines and uncomment the `build:` lines) and run `docker compose up -d --build`.
+From v1.0 the `rds-guard` image is only a satellite: its web UI (port 8022),
+MQTT, push and transcription are gone, and it needs an aggregator. The
+release notes, [docs/release-notes/v1.0.0.md](docs/release-notes/v1.0.0.md),
+walk through it step by step, for one host and for a satellite on its own.
+In short, on one host:
 
-> **Only the satellite:** on a host that reports to someone else's
-> aggregator (or where you want no aggregator yet), use
-> `docker-compose.satellite.yml` instead:
-> `curl -fsSLo docker-compose.yml https://raw.githubusercontent.com/tubalainen/rds-guard/master/docker-compose.satellite.yml`.
-> See [Run as a satellite](#run-as-a-satellite).
+1. Replace `docker-compose.yml` with the new one (keep `.env`, `rds-data`
+   and `aggregator-data`).
+2. Bring your history into the aggregator first, if you have not already:
+   [Importing an installation's history](#importing-an-installations-history).
+3. `docker compose pull && docker compose up -d`. The satellite moves its
+   identity and its unsent queue from `events.db` to the new
+   `satellite.db` by itself; `events.db` and `audio/` are left as they were.
+4. Point your bookmarks and reverse proxy at port 8080 instead of 8022.
 
-### Moving an existing installation to satellite + aggregator
+### Importing an installation's history
 
-If you already run RDS Guard on its own (one `rds-guard` container), you can
-add the aggregator next to it and bring your history along: events, audio,
-transcriptions, the map and your push rules. Nothing is transcribed again
-and nothing is pushed again.
-
-1. In the folder you run RDS Guard from, replace `docker-compose.yml` with
-   the new one (keep `.env` and `rds-data`):
-
-```bash
-curl -fsSLo docker-compose.yml https://raw.githubusercontent.com/tubalainen/rds-guard/master/docker-compose.yml
-```
-
-2. Pull and start. The satellite runs as before; the aggregator starts
-   empty:
-
-```bash
-docker compose pull && docker compose up -d
-```
-
-3. Import the history. This creates the node (here `docker01`) and prints its
-   lines; one line per event shows how far it has come. Run it with
-   `--dry-run` first to see what it would do:
+A standalone RDS Guard (up to v0.10) has its events, audio, transcriptions,
+map and push rules in `rds-data/events.db` and `rds-data/audio/`. The
+aggregator can import them as the events of one node; nothing is
+transcribed or pushed again:
 
 ```bash
 docker compose exec aggregator python3 -m aggregator.import_satellite /import/events.db /import/audio --node "docker01" --dry-run
@@ -237,320 +180,216 @@ docker compose exec aggregator python3 -m aggregator.import_satellite /import/ev
 docker compose exec aggregator python3 -m aggregator.import_satellite /import/events.db /import/audio --node "docker01"
 ```
 
-4. Put the printed `UPLINK_TOKEN=…` line in `.env` and restart. From now on
-   the satellite only records and sends; the aggregator transcribes, maps and
-   pushes:
+It prints a line per event and the node's `UPLINK_TOKEN=…`; put that line in
+`.env` so the satellite continues as the same node. It can run again at any
+time and skips what is already there. The aggregator keeps
+`AGGREGATOR_RETENTION_DAYS` (default 90) days; the import skips older events
+and says how many.
+
+The imported incidents are older than 12 hours, so the map shows them only
+with **Visa historiska händelser** ticked. **Admin → Karta → Bygg om
+kartan** places every message again, with the roads and Trafikverket's
+places.
+
+**MQTT and Home Assistant:** only the aggregator publishes, under
+`MQTT_TOPIC_PREFIX` (default `rds` in the combined `.env`). `rds/alert`,
+`rds/notify/…`, `rds/{pi}/traffic/ta` and `rds/{pi}/{type}/transcription`
+keep their names and fields, with three differences: `event_id` is a text id
+(the event's uid) instead of a number, times end in `Z`, and the alert also
+has `node`, `nodes` (who heard it) and the map's `locations`. The old
+satellite's other topics (`rds/{pi}/programme/rt`, `station/pty`,
+`traffic/tp`, `eon/…`, `system/status`) are gone.
+
+## Satellites
+
+### Dongles: `receivers.yml`
+
+With one dongle you need nothing more than `FM_FREQUENCY` (or
+`FM_FREQUENCIES`, 2–4 stations within 2 MHz) in `.env`. For several dongles,
+or to fix a dongle's gain, put `receivers.yml` in the satellite's data
+folder (`rds-data/receivers.yml`; see
+[receivers.example.yml](receivers.example.yml)):
+
+```yaml
+receivers:
+  - serial: "00000101"          # required
+    name: tak                   # optional, shown on the aggregator
+    frequencies: [103.5M, 102.9M]
+  - serial: "00000102"
+    frequencies: [99.1M]
+    gain: 19.7                  # fixed: no gain calibration for this one
+```
+
+A dongle is always known by its **serial number**, never by its place on
+the USB bus, which changes when you replug. List the dongles that are
+connected:
 
 ```bash
-docker compose up -d
+docker compose exec rds-guard python3 -m dongles
 ```
 
-5. Check: the aggregator's web UI (port 8080) shows your history, and under
-   **Admin → Noder** the node is green. The import can be run again at any
-   time; it skips what is already there.
+- Many dongles come with the same serial number (`00000001`). Two of them
+  cannot be told apart, and the satellite stops with a message that shows
+  how to give one a new number with `rtl_eeprom -d <index> -s <new>` (run
+  it with only that dongle in use, then replug it).
+- Up to 4 stations per dongle, all within 2 MHz of each other.
+- The same frequency on two dongles is allowed (a warning): the aggregator
+  merges what both hear into one event.
+- A connected dongle that is not in the file is left alone; one in the file
+  that is missing is reported in the log and on the node card, and the
+  others keep running.
+- Without `receivers.yml` and with several dongles, set
+  `RTL_DEVICE_SERIAL` to pick the one `FM_FREQUENCY` is for.
 
-Tips:
+### Gain and frequency correction
 
-- To transcribe the old recordings again first (`tools/retranscribe.py`, see
-  [Transcribe the stored messages again](#transcribe-the-stored-messages-again)),
-  do it on the satellite **before** the import; the new texts come along.
-  The aggregator gets its own version of the tool in a later release.
-- The imported incidents are older than 12 hours, so the map shows them
-  only with **Visa historiska händelser** ticked (the button on an empty
-  map does it). That choice is remembered per web address, so the
-  aggregator's page starts without it even if the satellite's had it.
-- Imported pins stay where the satellite put them. **Admin → Karta → Bygg om
-  kartan** in the aggregator places every message again, with the roads and
-  Trafikverket's places (free with the rules engine, about 1.5 öre per
-  message with Claude).
+FM stations are strong, and the dongle's own automatic gain (and most
+fixed values) overdrive its amplifier: intermodulation then spoils RDS on
+every station, even when nothing visibly clips. So the satellite finds the
+gain itself, for each dongle and for all its stations together:
 
-The satellite's own data is not changed. Your push rules are copied.
+1. **Frequency correction (ppm)** from how far each station's carrier is
+   off its nominal frequency, the median over the stations.
+2. **A quick sweep** over all the dongle's gain steps, about a second each:
+   ADC clipping and the signal-to-noise of each station's 19 kHz pilot and
+   57 kHz RDS carrier.
+3. **A check with real decoding** of the four best steps, 8 s per station:
+   RDS groups per second and block errors.
+4. **The choice:** the step where the *worst* station decodes best, so no
+   station is sacrificed for another; within 5 %, the lower gain, for margin.
+   With no RDS at all (no antenna?) it uses 20 dB and says so.
 
-**MQTT and Home Assistant:** once the satellite reports to the aggregator,
-only the aggregator publishes, under the same prefix (`MQTT_TOPIC_PREFIX`,
-default `rds`). `rds/alert`, `rds/notify/…`, `rds/{pi}/traffic/ta` and
-`rds/{pi}/{type}/transcription` keep their names and fields, with three
-differences: `event_id` is now a text id (the event's uid) instead of a
-number, times end in `Z`, and the alert also has `node` (who heard it) and the
-map's `locations`. Push messages link to the event only if
-`AGGREGATOR_WEB_UI_URL` is set (the aggregator's address). The satellite's
-other topics (`rds/{pi}/programme/rt`, `station/pty`, `traffic/tp`,
-`system/status` and everything from `PUBLISH_MODE=all`) are no longer sent.
-`SATELLITE_MQTT_ENABLED=true` turns the satellite's own MQTT on again until
-v1.0, but then pushes come twice; `AGGREGATOR_MQTT_TOPIC_PREFIX` gives the
-aggregator another prefix. Before `UPLINK_TOKEN` is set, the satellite runs
-standalone with its own MQTT and push, exactly as before.
+It takes about two minutes per dongle, and only that dongle pauses. It runs
 
-**Retention:** the aggregator keeps `AGGREGATOR_RETENTION_DAYS` (default 90)
-days. The import skips older events and says how many; raise the setting
-first to bring them.
+- at the first start, and when a dongle's stations change
+- when a station decodes less than 60 % as well as it did at calibration
+  for 15 minutes (at most every 6 hours)
+- from **Admin → Noder → Kalibrera om** in the aggregator
 
-## Run as a satellite
+and never during a traffic announcement or VMA on that dongle: it waits
+until the broadcast has ended. The result is kept in `satellite.db` and
+shown on the node card (gain, ppm, when, and the quality of each station).
+`gain:` and `ppm:` in `receivers.yml` fix them instead.
 
-A satellite is an ordinary RDS Guard installation that also reports to a
-central **aggregator**, which collects traffic announcements and emergency
-broadcasts from many places. Nothing changes locally: you keep your own events,
-audio, transcriptions, web UI and MQTT. The uplink only adds a copy that is
-sent to the aggregator.
-
-```
- Your RDS Guard (satellite)                         Aggregator (someone else's server)
- RTL-SDR → decode → events, audio, UI, MQTT
-                │
-                └── uplink.py ── outbound HTTPS ──→  https://rds.example.com
-                    (queued locally while offline)
-```
-
-### Before you start
-
-1. Get the satellite working first: follow the [Quick start](#quick-start)
-   but download `docker-compose.satellite.yml` as `docker-compose.yml` (a
-   friend's satellite needs no aggregator of its own). The *Debug* page of the web UI (link in the footer) shows your station and a decode rate above 5 grp/s.
-2. Ask the aggregator's owner for its address. That is all: your
-   satellite asks to join, and the owner approves it in the aggregator's web
-   UI (*Admin → Noder → Väntar på godkännande*). (A token from *Lägg till
-   nod* also still works, as `UPLINK_TOKEN`.)
-
-No ports need to be opened on your router: the satellite only makes outbound
-HTTPS requests.
-
-### Connect
-
-1. Add the aggregator's address to `.env`, with your node's name and
-   where your receiver is:
+To try it by hand, without changing anything (stop the satellite first, it
+needs the dongle):
 
 ```bash
-AGGREGATOR_URL=https://rds.example.com # Aggregator address
+docker compose stop rds-guard
+docker compose run --rm rds-guard python3 -m gain_tuner --serial 00000101
+docker compose start rds-guard
+```
+
+It prints a line per step and the table it chose from; `--save` keeps the
+result.
+
+### A satellite on another machine
+
+On a host that reports to an aggregator elsewhere (your own on the LAN, or a
+friend's over HTTPS), run only the satellite:
+
+```bash
+mkdir rds-guard && cd rds-guard
+curl -fsSLo docker-compose.yml https://raw.githubusercontent.com/tubalainen/rds-guard/master/docker-compose.satellite.yml
+curl -fsSLo .env https://raw.githubusercontent.com/tubalainen/rds-guard/master/.env.example
+```
+
+In `.env`, set the radio part and:
+
+```bash
+AGGREGATOR_URL=https://rds.example.com # From the aggregator's owner
 NODE_NAME=Kalle, Karlstad              # Shown on the aggregator
-NODE_LOCATION=Karlstad, Värmlands län  # Ort, Län: suggested to the aggregator for the map
+NODE_LOCATION=Karlstad, Värmlands län  # Suggested to the aggregator for the map
+# JOIN_KEY=...                         # Only for your own aggregator
 ```
 
-2. Restart the container so it reads the new settings:
+Start it with `docker compose up -d`. Without `JOIN_KEY` the satellite asks
+to join and waits; its log shows a code such as `K7Q-3PD`:
 
 ```bash
-docker compose up -d
+docker compose logs rds-guard | grep -i -E "join|code|approved"
 ```
 
-3. The log (and the web UI's footer) shows a code, e.g. `K7Q-3PD`. Send
-   it to the aggregator's owner: the same code is shown next to your node
-   under *Väntar på godkännande*, so they approve the right one. Until then
-   your satellite records as usual and queues everything for the
-   aggregator; nothing is lost.
+The aggregator's owner sees the same code under **Admin → Noder → Väntar på
+godkännande** and approves it there (or with
+`python3 -m aggregator.nodes approve K7Q-3PD`). Until then the satellite
+records as usual and queues everything; nothing is lost. No ports need to
+be opened on your router: the satellite only makes outbound requests.
+
+What is sent: each traffic announcement and emergency broadcast (station,
+frequency, programme type, RadioText, start and end), its recording (about
+0.7 MB per 2 minutes), and a status report every 30 seconds (stations,
+decode rate, gain, ppm, version, queue length). Nothing else leaves your
+network.
+
+To run an aggregator for friends' satellites, see
+[aggregator/README.md](aggregator/README.md): it goes behind your own HTTPS
+reverse proxy or a Cloudflare Tunnel.
+
+### Is it working?
+
+The satellite has no web page; three places tell you:
+
+- `docker compose ps` shows it `healthy` when at least one dongle is
+  receiving. The health check prints why not:
 
 ```bash
-docker compose logs rds-guard | grep -i -E "join|code"
+docker compose exec rds-guard python3 -m satellite_health
 ```
 
-### Check that it works
-
-Within a minute:
-
-- The footer of the web UI shows **Uplink ansluten**.
-- The log shows `Mode: satellite` at start-up and then `Uplink connected`:
+- The log: the join code, `approved by the aggregator`, each dongle's
+  calibration, and one line per event.
 
 ```bash
-docker compose logs rds-guard | grep -i -E "mode|uplink"
+docker compose logs -f rds-guard
 ```
 
-- The status API reports the uplink state and how many items are queued:
+- The aggregator's **Admin → Noder**: online or not, each dongle's state,
+  gain and ppm, each station's PS, PI and decode rate (above 5 grp/s is
+  good), and the queue length.
 
-```bash
-curl -s http://localhost:8022/api/status | python3 -m json.tool | grep -A6 '"uplink"'
-```
-
-  `"state": "connected"` with `"queue_depth": 0` means everything has been delivered.
-
-- On the aggregator, your node turns green under **Nodes**.
-
-| Status bar | Meaning | What to do |
-|---|---|---|
-| `uplink` (green) | Connected | Nothing |
-| `uplink offline` | Aggregator unreachable; data is queued | Check your internet connection and `UPLINK_URL`; hover over the status for the last error |
-| `uplink: bad token` | Token wrong, rotated or node disabled | Ask the aggregator's owner for a new token |
-| `uplink: update needed` | Your RDS Guard version is not supported by the aggregator | Update: `docker compose pull && docker compose up -d` |
-| *(no uplink shown)* | `UPLINK_URL` is empty | Standalone mode; see [Connect](#connect) |
-
-### Who processes the recordings: your choice
-
-A satellite can either process its recordings itself **and** send them to
-the aggregator (the default), or only record and send them, leaving all
-processing to the aggregator. Processing means transcription (speech to
-text) and placing the messages on the map. You choose with one line in
-`.env`:
-
-| `LOCAL_PROCESSING` | What your satellite does | What you see locally | Good when |
-|---|---|---|---|
-| `true` (default) | Records, transcribes, places on the map, and sends the raw recording to the aggregator | Everything: transcriptions, map, push rules on the text | You want your own installation to be complete |
-| `false` | Records and sends the raw recording only; no transcription, no map, no AI or cloud calls | Events with audio only; the map page says the aggregator has it | A small host (Raspberry Pi), or no ElevenLabs/Claude keys on this machine |
-
-The aggregator always transcribes and maps everything it receives, whatever
-you choose. With `true`, the same message is processed twice: once here and
-once on the aggregator. That costs nothing extra with the local engines, but
-if both have paid keys (ElevenLabs, Claude), both pay.
-
-`LOCAL_PROCESSING=false` only works for a satellite. A standalone
-installation (no `UPLINK_URL`) always processes its own recordings; the
-setting is then ignored with a warning in the log.
-
-### What is sent
-
-- Each traffic announcement and emergency broadcast: station (PI, PS),
-  frequency, programme type, RadioText, start and end time.
-- The recorded audio of each event (OGG/Opus, about 0.7 MB per 2 minutes).
-- A status report every 30 seconds: station, decode rate, pipeline health,
-  software version, queue length, your `NODE_LOCATION` ("Ort, Län") and
-  whether you process recordings yourself (`LOCAL_PROCESSING`).
-
-Transcriptions are **not** sent; the aggregator transcribes the audio itself.
-Nothing else leaves your network: no MQTT data, no web UI, no raw RDS stream.
-
-If the aggregator or your internet connection is down, everything is queued
-locally and sent once the connection is back, for up to
-`UPLINK_MAX_AGE_HOURS` (72 hours by default). The protocol is described in
-[docs/uplink-protocol.md](docs/uplink-protocol.md).
-
-### Disconnect
-
-Remove or comment out `UPLINK_URL` in `.env` and run `docker compose up -d`.
-The installation is standalone again; local data is not affected.
-
-### Run the aggregator yourself
-
-To collect events from friends' satellites, run the separate aggregator
-container: see [aggregator/README.md](aggregator/README.md). It is a single
-container that you put behind your own HTTPS reverse proxy (for example
-Nginx Proxy Manager with Cloudflare) or a Cloudflare Tunnel; its README has
-the settings for both and a way to
-[check that it works](aggregator/README.md#check-that-it-works).
+The satellite keeps delivered recordings for `SATELLITE_KEEP_DAYS` (7) days
+in `rds-data/spool/`, then deletes them; the aggregator has its own copy.
 
 ## Configuration
 
-All settings are in the `.env` file:
+Settings are in `.env`. The aggregator's are described in
+[aggregator/README.md](aggregator/README.md#configuration) and in
+[.env.example](.env.example); in the combined `.env` a few have an
+`AGGREGATOR_` name so they cannot clash (`AGGREGATOR_UI_PORT`,
+`AGGREGATOR_WEB_UI_URL`, `AGGREGATOR_RETENTION_DAYS`,
+`AGGREGATOR_MQTT_TOPIC_PREFIX`).
 
-### RTL-SDR
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `FM_FREQUENCY` | `103.5M` | FM frequency to tune (single-station mode) |
-| `FM_FREQUENCIES` | | Comma-separated 2–4 frequencies for multi-station mode, e.g. `103.5M,102.9M` (see [Multi-station monitoring](#multi-station-monitoring)) |
-| `RTL_GAIN` | `8` | Tuner gain in dB (0-50) |
-| `PPM_CORRECTION` | `0` | Frequency correction for your dongle |
-| `RTL_DEVICE_INDEX` | `0` | Device index if multiple dongles |
-| `RTL_DEVICE_SERIAL` | | Select dongle by serial number instead of index |
-
-### MQTT (optional)
+The satellite's:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MQTT_ENABLED` | `false` | Enable MQTT publishing (`true`/`false`) |
-| `MQTT_HOST` | | Broker hostname/IP |
-| `MQTT_PORT` | `1883` | Broker port |
-| `MQTT_USER` | | Username (optional) |
-| `MQTT_PASSWORD` | | Password (optional) |
-| `MQTT_TOPIC_PREFIX` | `rds` | Base topic prefix |
-| `MQTT_CLIENT_ID` | `rds-guard` | MQTT client ID |
-| `MQTT_QOS` | `1` | Default QoS level |
-| `MQTT_RETAIN_STATE` | `true` | Retain state topics |
-
-### Publishing control
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PUBLISH_MODE` | `essential` | `essential` = alert topic carries only traffic announcements and emergencies. `all` = every decoded RDS field + EON on alert topic. |
-| `PUBLISH_RAW` | `false` | Publish raw RDS groups to `system/raw` (high volume) |
-| `STATUS_INTERVAL` | `30` | Seconds between status messages |
-
-### Web UI
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `WEB_UI_PORT` | `8022` | HTTP port for the web UI and API |
-| `EVENT_RETENTION_DAYS` | `30` | Auto-delete events older than this |
-| `WEB_UI_URL` | | Address the web UI is reached on, e.g. `https://rds.example.se`. When set, push messages link to the event and its audio |
-| `NOTIFY_TIMEZONE` | `Europe/Stockholm` | Time zone for the days and times in push rules |
-| `ADMIN_PASSWORD` | *(empty)* | Password for the **Admin** page (push rules). Empty switches Admin off and the rules cannot be changed |
-
-### Audio recording
-
-Audio is always recorded during traffic and emergency events. Recordings are stored as OGG (Opus) by default.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AUDIO_DIR` | `/data/audio` | Directory for recorded audio files |
-| `RECORD_EVENT_TYPES` | `traffic,emergency` | Comma-separated event types to record |
-| `AUDIO_FORMAT` | `ogg` | Output format: `ogg` (Opus) or `wav` |
-| `MAX_RECORDING_SEC` | `600` | Maximum recording duration (safety cutoff) |
-
-### Transcription
-
-Recorded audio is transcribed for searchable text and MQTT alerts. By default ElevenLabs Scribe does the work and the local KB-Whisper model takes over when the API fails; without `ELEVENLABS_API_KEY` everything is transcribed locally.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TRANSCRIPTION_ENGINE` | `elevenlabs` | `elevenlabs` = ElevenLabs Scribe API with local fallback (runs as `local` without an API key), `local` = built-in faster-whisper, `remote` = external ASR server, `none` = disable |
-| `TRANSCRIPTION_LANGUAGE` | `sv` | Language code for Whisper (e.g. `sv`, `en`, `de`) |
-| `TRANSCRIPTION_MODEL` | *(auto)* | Empty = the bundled KB-Whisper small *strict* model for Swedish, `small` for other languages. Any size (`tiny` … `large-v3`, `large-v3-turbo`) or a Hugging Face CTranslate2 repo such as `KBLab/kb-whisper-medium` (local only) |
-| `TRANSCRIPTION_DEVICE` | `cpu` | Compute device: `cpu` or `cuda` (local only) |
-| `TRANSCRIPTION_PROMPT` | | Optional vocabulary hint passed to Whisper, e.g. `Trafikverket, E4, E18, Essingeleden, olycka, kö, körfält` |
-| `TRANSCRIPTION_BEAM_SIZE` | `5` | Beam search width; `1` is roughly twice as fast on CPU at a small accuracy cost (local only) |
-| `TRANSCRIPTION_CPU_THREADS` | `0` | CPU threads for inference, `0` = automatic (local only) |
-| `WHISPER_REMOTE_URL` | | URL of remote Whisper ASR server, e.g. `http://whisper:9000` (remote only) |
-| `WHISPER_REMOTE_TIMEOUT` | `120` | HTTP timeout in seconds for remote ASR requests |
-| `ELEVENLABS_API_KEY` | | ElevenLabs API key (elevenlabs only) |
-| `ELEVENLABS_MODEL` | `scribe_v3` | `scribe_v3` (writes numbers as digits) or `scribe_v2` |
-| `ELEVENLABS_KEYTERMS` | | Comma-separated words to listen for, e.g. `E18, Bergviksmotet, Våxnäsmotet` (max 50 characters / 5 words each; costs 20 % extra) |
-| `ELEVENLABS_TIMEOUT` | `60` | HTTP timeout in seconds |
-| `TRANSCRIPTION_FALLBACK` | `local` | When the ElevenLabs call fails: `local` = transcribe with faster-whisper instead, `none` = mark as failed |
-
-> **Swedish model:** for `TRANSCRIPTION_LANGUAGE=sv` the default is [KB-Whisper](https://huggingface.co/KBLab/kb-whisper-small) small from the National Library of Sweden, in its verbatim *strict* style, which the Docker image converts and bundles at build time (`/opt/models`) because KBLab only publishes the default style for faster-whisper. KB-Whisper is trained on 50 000+ hours of Swedish. `kb-whisper-small` has about 6–7 % word error rate on Swedish benchmarks versus 20–26 % for OpenAI's `small` (and beats OpenAI's `large-v3`) at the same CPU cost. On a stronger host, `KBLab/kb-whisper-medium` or `KBLab/kb-whisper-large` is more accurate still. Other models are downloaded once and cached under `/data/models`.
-
-> **ElevenLabs:** on P4 traffic clips Scribe was more complete than local KB-Whisper (fewer dropped place names and details, phone and road numbers right) and took 2–5 s per clip. Audio is sent to ElevenLabs (US processing by default). With the default fallback, a failed call is transcribed locally, so alerts still get text.
-
-**Check that ElevenLabs works:** at startup the container checks the key against ElevenLabs (an account lookup, no credits used) and logs the result. `docker compose logs rds-guard | grep -i elevenlabs` shows one of:
-
-```
-ElevenLabs: connected and authenticated (plan starter, 20 264 of 90 000 credits used) — transcribing with scribe_v3, fallback local
-ElevenLabs: authentication failed (HTTP 401: invalid_api_key) — check ELEVENLABS_API_KEY; clips will be transcribed locally (…)
-ElevenLabs: could not reach api.elevenlabs.io (…) — clips will be transcribed locally (…) until it answers
-ElevenLabs: no ELEVENLABS_API_KEY set — transcribing locally instead
-```
-
-Each transcription is logged with the engine that served it, e.g. `Transcription complete for event 42 via ElevenLabs scribe_v3 (333 chars, 3.1s)` or `… via local … (fallback)`. A warning appears when 90 % of the period's credits are used.
-
-> **Local vs Remote:** Local transcription works out of the box but uses significant CPU/RAM (especially larger models). For Raspberry Pi or low-power hosts, use `TRANSCRIPTION_ENGINE=remote` with a [whisper-asr-webservice](https://github.com/ahmetoner/whisper-asr-webservice) container running on a more powerful machine, or set `TRANSCRIPTION_ENGINE=none` to disable transcription while still recording audio.
-
-### Location and map
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `NODE_LOCATION` | | Where the receiver is, as `Ort, Län`, e.g. `Örebro, Örebro län` or `Karlstad, Värmland`. Needed for the map; a satellite also reports it to the aggregator |
-| `GEO_ENGINE` | `claude` | `claude` = Claude reads the transcription, corrects misheard words and finds the places, with the rules engine as fallback (runs as `rules` without an API key), `rules` = local patterns and place-name registry only, `none` = no map |
-| `ANTHROPIC_API_KEY` | | Claude API key (claude only) |
-| `CLAUDE_MODEL` | `claude-haiku-5-5` | Claude model for the map engine |
-| `CLAUDE_TIMEOUT` | `60` | HTTP timeout in seconds |
-| `TRANSCRIPTION_PLACE_NAMES` | `true` | Give the transcriber local place names to listen for: ElevenLabs keyterms (costs about 20 % more per clip) and the local Whisper prompt |
-| `TRAFIKVERKET_API_KEY` | | Optional, free key for [Trafikverket's open API](https://data.trafikverket.se/): exact places, a timeline and push updates for the incidents the radio speaks of, and a map layer for the rest (see [Trafikverket](#trafikverket)). Needs `NODE_LOCATION`. Empty = off |
-| `TRAFIKVERKET_RADIUS_KM` | `150` | Trafikverket's deviations within this distance of the receiver are kept |
-| `TRAFIKVERKET_POLL_SEC` | `60` | Seconds between calls to Trafikverket (each call only fetches what changed) |
-| `LOCAL_PROCESSING` | `true` | Satellite only: `false` = do not transcribe or map here, leave it to the aggregator (see [Who processes the recordings](#who-processes-the-recordings-your-choice)) |
-
-### Uplink to an aggregator (optional)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AGGREGATOR_URL` (or `UPLINK_URL`) | | Aggregator address. Empty = standalone (see [Run as a satellite](#run-as-a-satellite)) |
-| `UPLINK_TOKEN` | | Optional node token from *Lägg till nod*. Empty = the satellite makes its own and asks to join |
-| `JOIN_KEY` | | The same secret as the aggregator's `JOIN_KEY` approves the join at once |
-| `NODE_NAME` | | Your name or place, shown on the aggregator |
+| `AGGREGATOR_URL` (or `UPLINK_URL`) | | The aggregator's address. Required; the combined compose sets it |
+| `JOIN_KEY` | | The same secret as the aggregator's approves the satellite at once |
+| `UPLINK_TOKEN` | | A node token from the aggregator (*Lägg till nod*, or the import). Empty = the satellite makes its own and asks to join |
+| `NODE_NAME` | | Shown on the aggregator |
+| `NODE_LOCATION` | | Where the receiver is, as `Ort, Län`; a suggestion, the aggregator's Admin has the last word |
+| `FM_FREQUENCY` | `103.5M` | The station, without `receivers.yml` |
+| `FM_FREQUENCIES` | | 2–4 stations within 2 MHz on one dongle, e.g. `103.5M,102.9M` |
+| `RTL_DEVICE_SERIAL` | | Which dongle `FM_FREQUENCY` is for, with several and no `receivers.yml` |
+| `RECEIVERS_FILE` | `/data/receivers.yml` | Where the dongle file is |
+| `RECORD_EVENT_TYPES` | `traffic,emergency` | Event types to record |
+| `MAX_RECORDING_SEC` | `600` | Safety cutoff for one recording (at most 1200) |
+| `SATELLITE_KEEP_DAYS` | `7` | Days to keep delivered recordings and events |
 | `UPLINK_HEARTBEAT_SEC` | `30` | Seconds between status reports |
 | `UPLINK_MAX_AGE_HOURS` | `168` | Unsent items older than this are dropped |
+
+Settings only the old satellite used (`RTL_GAIN`, `PPM_CORRECTION`,
+`RTL_DEVICE_INDEX`, `PUBLISH_MODE`, `AUDIO_FORMAT`, `LOCAL_PROCESSING`, …)
+are ignored, with a line in its log. The transcription, map and MQTT
+settings are the aggregator's now.
 
 ## Web UI
 
 The web UI is in Swedish and works on phones and desktops, with a dark
 theme by default (*Ljust tema* in the footer switches to light, and the
 choice is remembered in the browser). It is built around the history of
-what the receiver has heard:
+what the satellites have heard:
 
 - **Arkiv** — a calendar over the stored days (colour = number of
   messages, red ring = VMA) and the messages of the chosen day, each with
@@ -570,8 +409,9 @@ what the receiver has heard:
   `ADMIN_PASSWORD` the Admin page is switched off; rules already saved keep
   sending.
 - **Händelse** — one event: audio, full transcription, RadioText, pushes,
-  a small map of the places it mentions, and details. Push messages link
-  here when `WEB_UI_URL` is set.
+  a small map of the places it mentions, **Hörd av** (each satellite and
+  dongle that heard it, with its own recording) and details. Push messages
+  link here when `AGGREGATOR_WEB_UI_URL` is set.
 
 When Claude corrected misheard words in a transcription, the corrected text
 is shown with a **Rättad** tag; tap the tag to switch to the original text
@@ -581,9 +421,10 @@ The audio player is [wavesurfer.js](https://wavesurfer.xyz/) 7 (BSD-3,
 bundled in `static/shared/vendor/`, no CDN): a waveform you can click in,
 playback speed and download.
 
-**Debug** (link in the footer) shows the receiver status (PI, PTY, TP/TA,
-RadioText, decode rate, pipeline, uplink) and the live stream of all
-decoded RDS groups over WebSocket, with pause and filters.
+**Admin → Noder** lists the satellites: online or not, each dongle and its
+stations (PS, PI, decode rate), gain and ppm with **Kalibrera om**, the
+queue, and the satellites waiting to be approved. **Admin → Karta** rebuilds
+the map.
 
 ## Push notifications
 
@@ -606,8 +447,8 @@ made-up message.
 - VMA is pushed as soon as the broadcast starts.
 - A fresh install starts with two rules: **VMA** (`rds/notify/vma`,
   critical) and **Trafik** (`rds/notify/trafik`, all traffic messages).
-- Rules are stored in the database (`/data/events.db`); the broker itself
-  is still set in `.env`. Without MQTT nothing is sent, but rules can still
+- Rules are stored in the aggregator's database
+  (`aggregator-data/aggregator.db`); the broker itself is set in `.env`. Without MQTT nothing is sent, but rules can still
   be made and tried.
 
 The message:
@@ -622,17 +463,18 @@ The message:
   "matched_keywords": ["Essingeleden"],
   "station": {"pi": "0xE203", "ps": "P4 Sthlm"},
   "frequency": "103.3M",
-  "started": "2026-11-24T16:12:04",
+  "started": "2026-11-24T16:12:04Z",
   "duration_sec": 64,
-  "event_id": 1234,
-  "url": "https://rds.example.se/#/event/1234",
-  "audio_url": "https://rds.example.se/api/audio/1234.ogg",
+  "event_id": "4f0c2a9e-…",
+  "url": "https://rds.example.se/#/event/4f0c2a9e-…",
+  "audio_url": "https://rds.example.se/api/v1/audio/4f0c2a9e-….ogg",
   "test": false,
   "timestamp": "2026-11-24T16:13:20Z"
 }
 ```
 
-`url` and `audio_url` are `null` without `WEB_UI_URL`.
+`url` and `audio_url` are `null` without `AGGREGATOR_WEB_UI_URL`
+(`WEB_UI_URL` for an aggregator on its own).
 
 With `TRAFIKVERKET_API_KEY`, Trafikverket's later updates of an incident
 whose message was pushed go to the same topic, with `event_type`
@@ -645,7 +487,7 @@ whose message was pushed go to the same topic, with `event_type`
   "priority": "normal",
   "event_type": "traffic_update",
   "rule": {"id": 2, "name": "Trafik"},
-  "event_id": "1234",
+  "event_id": "4f0c2a9e-…",
   "incident_id": 56,
   "url": "https://rds.example.se/#/karta?i=56",
   "trafikverket": {"id": "SE_STA_TRISSID_1_123", "type": "Olycka",
@@ -695,14 +537,14 @@ shows its places, and each event page has a small map.
 ### History
 
 Tick **Visa historiska händelser** to see every incident still stored
-(`EVENT_RETENTION_DAYS`), not only the last 12 hours. Incidents older than
+(`AGGREGATOR_RETENTION_DAYS`), not only the last 12 hours. Incidents older than
 12 hours are violet, and the list is grouped by day. An incident becomes
 history by itself once 12 hours have passed since it was last mentioned.
 The choice is remembered in your browser. A place label on an older event
 opens the map with the history shown.
 
 The first time, the messages stored before the map existed (before
-v0.5.0, or while `NODE_LOCATION` was not set) are placed on the map, once,
+v0.5.0, or while the node had no location) are placed on the map, once,
 in the background; the map shows how far it has come. Each is placed as at
 the time it was broadcast, so messages about the same incident join one pin
 that day. It uses the same engine as new messages: with Claude on
@@ -714,7 +556,7 @@ or MQTT alerts are sent for them.
 
 With a free key for Trafikverket's open API (`TRAFIKVERKET_API_KEY`, from
 [data.trafikverket.se](https://data.trafikverket.se/)) the map also uses
-Trafikverket's own traffic information around the receiver: accidents,
+Trafikverket's own traffic information around each satellite: accidents,
 obstacles, restrictions, traffic messages and important traffic information
 (road works and ferries are left out). It is fetched every minute; only
 what changed since the last call.
@@ -754,8 +596,8 @@ kind of incident, …). Since Trafikverket keeps removed deviations for only
 24 hours, this is how a miss can be looked into afterwards:
 
 ```bash
-docker compose logs rds-guard | grep "Trafikverket: incident"
-curl -s 'http://localhost:8022/api/incidents?hours=168' | python3 -c 'import json,sys; [print(i["label"], "|", i.get("trv_note")) for i in json.load(sys.stdin)["incidents"]]'
+docker compose logs aggregator | grep "Trafikverket: incident"
+curl -s 'http://localhost:8080/api/v1/incidents?hours=168' | python3 -c 'import json,sys; [print(i["label"], "|", i.get("trv_note")) for i in json.load(sys.stdin)["incidents"]]'
 ```
 
 ### How it works, and what it costs
@@ -782,9 +624,9 @@ are looked up in a **place-name registry** bundled in the image
 (`geodata/gazetteer-se.tsv.gz`, about all Swedish towns, villages,
 junctions, roundabouts, tunnels, bridges, rest areas, airports and lakes
 from [OpenStreetMap](https://www.openstreetmap.org/copyright), ODbL). Only
-names within 200 km of `NODE_LOCATION` are considered, which tells apart
+names within 200 km of the node's location are considered, which tells apart
 places with the same name. Claude receives the transcription, RadioText,
-`NODE_LOCATION`, real place names nearby and the incidents already open;
+the node's location, real place names nearby and the incidents already open;
 no audio. If the Claude call fails, the rules engine places the message
 instead.
 
@@ -796,8 +638,8 @@ Claude can correct, and names missing from OpenStreetMap ("Grumsrondellen").
 Measure on your own messages:
 
 ```bash
-docker compose exec rds-guard python3 /app/tools/measure_geolocation.py
-docker compose exec rds-guard python3 /app/tools/measure_geolocation.py --keyterms --limit 20
+docker compose exec aggregator python3 /app/tools/measure_geolocation.py
+docker compose exec aggregator python3 /app/tools/measure_geolocation.py --keyterms --limit 20
 ```
 
 To score the engines against a labelled set of real messages
@@ -806,7 +648,7 @@ where, of what kind, and which messages are about the same incident):
 
 ```bash
 python3 tools/eval_geolocation.py                   # rules engine, free
-docker compose exec rds-guard python3 /app/tools/eval_geolocation.py --engine claude
+docker compose exec aggregator python3 /app/tools/eval_geolocation.py --engine claude
 python3 tools/eval_geolocation.py --import events.json   # add messages to label
 python3 tools/eval_geolocation.py --stored events.json   # score what was stored, free
 ```
@@ -824,20 +666,20 @@ the place names, to see whether they help.
 
 After a better transcription engine, more place names or a new version,
 the stored recordings can be transcribed again, oldest first, with the
-receiver's own settings. It shows the count and the cost first and changes
-nothing without `--yes`:
+aggregator's engine and each node's place names. It shows the count and the
+cost first and changes nothing without `--yes`:
 
 ```bash
-docker compose exec rds-guard python3 /app/tools/retranscribe.py
-docker compose exec rds-guard python3 /app/tools/retranscribe.py --yes
-docker compose exec rds-guard python3 /app/tools/retranscribe.py --yes --limit 5      # try a few
-docker compose exec rds-guard python3 /app/tools/retranscribe.py --yes --engine local # free, on the CPU
+docker compose exec aggregator python3 -m aggregator.retranscribe
+docker compose exec aggregator python3 -m aggregator.retranscribe --yes
+docker compose exec aggregator python3 -m aggregator.retranscribe --yes --limit 5      # try a few
+docker compose exec aggregator python3 -m aggregator.retranscribe --yes --engine local # free, on the CPU
 ```
 
 ElevenLabs costs about 2–3 öre per message (from the plan's credits);
-local is free. It prints a line per message. The map is not touched: then
-**Admin → Karta → Bygg om kartan** places every message again from the new
-texts.
+local is free. It prints a line per message (`--since`, `--node` narrow it
+down). The map is not touched: then **Admin → Karta → Bygg om kartan**
+places every message again from the new texts.
 
 Places missing from OpenStreetMap, or the one of several same-named places
 that the traffic desk means, are added by hand in
@@ -881,84 +723,23 @@ and `python3 tools/build_roads.py` (both need the Overpass API, set
 `OVERPASS_URL` for another server; the roads take a while, about an hour,
 and continue where they stopped if interrupted).
 
-## REST API
+## MQTT and Home Assistant
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/events` | GET | Query events. Params: `type`, `since`, `q` (words in RadioText/transcription), `from`/`to` (UTC, on the start time), `pi`, `limit`, `offset` |
-| `/api/events/{id}` | GET | One event |
-| `/api/events/active` | GET | In-progress announcements only |
-| `/api/calendar` | GET | Light rows for the whole retention period (calendar and figures) |
-| `/api/incidents` | GET | Incidents for the map. Params: `hours` (default 12), `history=1` (all stored, plus how far placing the older messages has come) |
-| `/api/incidents/backfill` | POST | Place the messages stored before the map existed (once, in the background; JSON body `{}`) |
-| `/api/trafikverket` | GET | Trafikverket's deviations near the receiver (with `TRAFIKVERKET_API_KEY`): current ones and those changed in the last `hours` (default 12), each with its versions. `layer=1`: only the map layer's (current accidents, obstacles and the like no radio incident is linked to) |
-| `/api/status` | GET | Decoder status (uptime, station info, decode rate) |
-| `/api/audio/{filename}` | GET | Stream recorded audio file (OGG/WAV) |
-| `/api/events` | DELETE | Clear all events |
-| `/api/admin/session` | GET | Whether Admin is on and you are logged in |
-| `/api/admin/login` / `/api/admin/logout` | POST | Log in (`{"password": "…"}`) or out; sets a session cookie |
-| `/api/notify` | GET | Push rules and the MQTT connection (needs Admin login, as do all `/api/notify*`) |
-| `/api/notify/rules` | POST | Create a rule |
-| `/api/notify/rules/{id}` | PUT / DELETE | Change or remove a rule |
-| `/api/notify/preview` | POST | Try a rule (unsaved) on the stored history |
-| `/api/notify/test` | POST | Send a test message for a rule |
-| `/api/notify/log` | GET | Latest push messages |
-| `/ws/console` | WS | Live stream of all decoded RDS messages |
-
-Event responses include `audio_url`, `transcription`,
-`transcription_corrected` (Claude's corrected text, or `null`),
-`incidents` (the places on the map), `geo_status` and `notify` (the push
-messages sent for the event). Writes to `/api/notify` and `/api/admin` must
-be JSON and, from a browser, same-origin.
-
-## MQTT topics
-
-When MQTT is enabled, decoded data is published to structured topics:
+The aggregator publishes events only (see
+[aggregator/README.md](aggregator/README.md#mqtt-topics) for all topics and
+fields):
 
 ```
-rds/{pi}/traffic/ta                # Traffic Announcement active (bool)
-rds/{pi}/traffic/tp                # Traffic Programme flag
-rds/{pi}/programme/rt              # RadioText (64-char free text)
-rds/{pi}/station/pty               # Programme Type
-rds/{pi}/eon/{other_pi}/ta         # Linked station TA via EON
-rds/{pi}/{type}/transcription      # Transcription text (retained)
-rds/alert                          # Traffic & emergency events (see below)
+rds/alert                          # One message per finished event, with the transcription
 rds/notify/{topic}                 # Push messages from your rules (see Push notifications)
 rds/trafikverket/update            # Trafikverket's update of an incident the radio spoke of
-rds/system/status                  # Bridge health (periodic)
+rds/{pi}/traffic/ta                # TA active true/false (retained)
+rds/{pi}/{type}/transcription      # Latest transcription per station (retained)
+rds/nodes/{node}/status            # Satellite online/offline (retained)
+rds/aggregator/status              # Aggregator online/offline (retained)
 ```
 
-### Alert topic (`rds/alert`)
-
-A single MQTT message is published to `rds/alert` when an event is fully complete. The alert is held until audio transcription finishes (up to 2 minutes), so subscribers receive the transcribed text in the same message. If transcription fails or times out, the alert is sent without it.
-
-Each alert message includes:
-
-| Field | Description |
-|-------|-------------|
-| `event_type` | `traffic_announcement`, `emergency_broadcast`, or `eon_traffic` (all mode only) |
-| `state` | `end` |
-| `transcribed_text` | Speech-to-text of the broadcast audio, or `null` if transcription failed/timed out |
-| `transcription_status` | `done`, `error`, `timeout`, or `none` (no audio) |
-| `transcribed_text_corrected` | The text with misheard words corrected by Claude, or `null` |
-| `locations` | Where the message was placed: `label` (e.g. `E18 Bergviksmotet`), `road`, `lat`, `lon`, `radius_m`, `bearing` (direction of affected traffic, degrees), `both_directions`, `cleared`, `what` |
-| `trafikverket` | Trafikverket's deviations linked to the message (with `TRAFIKVERKET_API_KEY`): `id`, `message_type`, `message`, `location`, `severity_text`, `restriction`, `end_time`, `status`, `lat`, `lon`, `incident_id`, … |
-| `station` | Station context (PI code, PS name, etc.) |
-| `duration_sec` | Event duration in seconds |
-| `radiotext` | RadioText messages collected during the event |
-| `audio_available` | Whether recorded audio is available for playback |
-| `timestamp` | ISO 8601 timestamp |
-
-**Publish mode behavior:**
-
-- **`essential`** (default) — Only traffic announcements and emergency broadcasts are published to `rds/alert`. EON (Enhanced Other Networks) events and other decoded RDS data are excluded.
-- **`all`** — Everything published to `rds/alert`, including EON linked station traffic events (`event_type: "eon_traffic"`). Additional per-field topics are also published for PS, AF, clock, RT+, Long PS, ODA, BLER, and more.
-
-The `rds/{pi}/{type}/transcription` topic is retained so new subscribers receive the latest transcription immediately.
-
-## Home Assistant
-
-The MQTT output works directly with Home Assistant. Example configuration:
+`rds` is `MQTT_TOPIC_PREFIX`. A traffic announcement in Home Assistant:
 
 ```yaml
 mqtt:
@@ -966,36 +747,12 @@ mqtt:
     - name: "P4 Traffic Announcement"
       state_topic: "rds/0x9E04/traffic/ta"
       value_template: "{{ value_json.active }}"
-      payload_on: "true"
-      payload_off: "false"
+      payload_on: true
+      payload_off: false
       device_class: problem
-
-  sensor:
-    - name: "P4 RadioText"
-      state_topic: "rds/0x9E04/programme/rt"
-      value_template: "{{ value_json.radiotext }}"
-      icon: mdi:message-text
 ```
 
-Example automation for traffic announcement notifications:
-
-```yaml
-automation:
-  - alias: "Traffic Announcement on P4"
-    trigger:
-      - platform: mqtt
-        topic: "rds/+/traffic/ta"
-    condition:
-      - condition: template
-        value_template: "{{ trigger.payload_json.active == true }}"
-    action:
-      - service: notify.mobile_app
-        data:
-          title: "Traffic announcement on P4"
-          message: "A traffic announcement is being broadcast"
-```
-
-Send a notification with transcription when a traffic announcement ends:
+And a notification with the transcription when it has ended:
 
 ```yaml
 automation:
@@ -1020,7 +777,7 @@ automation:
 
 ## P4 regional frequencies
 
-P4 is Sweden's primary traffic and emergency broadcast network with 25 regional stations. Set `FM_FREQUENCY` to your local station:
+P4 is Sweden's primary traffic and emergency broadcast network with 25 regional stations. Set `FM_FREQUENCY` (or `frequencies:` in `receivers.yml`) to your local station:
 
 | Station | City | Frequency |
 |---------|------|-----------|
@@ -1056,137 +813,52 @@ Frequencies may vary by relay transmitter. The decoded AF (Alternative Frequenci
 
 ```
 rds-guard/
-├── Dockerfile
+├── Dockerfile                    # The satellite's image
 ├── docker-compose.yml            # Satellite + aggregator on one host
 ├── docker-compose.satellite.yml  # Satellite only
-├── .env
-├── config.py
-├── requirements.txt
-├── entrypoint.sh
-├── rds_guard.py          # Supervisor: rules engine, MQTT, WebSocket hub
-├── pipeline.py           # Subprocess manager for rtl_fm + redsea (+ multi-station path)
-├── channelizer.py        # Wideband IQ → N×PCM (numpy DSP, multi-station only)
-├── audio_tee.py          # PCM stream splitter (rtl_fm → redsea + recorder)
-├── audio_recorder.py     # Recording lifecycle, ffmpeg conversion
-├── transcriber.py        # Speech-to-text: ElevenLabs Scribe, local faster-whisper or remote ASR
-├── gazetteer.py          # Place-name registry: lookup, sound-alike correction (shared)
-├── roads.py              # Road registry: where the numbered roads run (shared)
-├── geolocate.py          # Map engines (rules, Claude), placement, incidents (shared)
-├── geo_service.py        # Registry per node area + engine (shared with the aggregator)
-├── trafikverket.py       # Trafikverket's deviations: feed and storage (shared with the aggregator)
-├── geodata/gazetteer-se.tsv.gz # Swedish place names from OpenStreetMap (ODbL)
-├── geodata/roads-se.tsv.gz     # Swedish numbered roads from Trafikverket (NVDB)
-├── geodata/places-trafikverket.tsv.gz # Interchanges, camera and weather station names (Trafikverket)
-├── tools/convert_kb_whisper.py # Build step: converts KB-Whisper strict for faster-whisper
-├── tools/build_gazetteer.py    # Rebuilds the place names in geodata/ from OpenStreetMap
-├── tools/build_roads.py        # Rebuilds the roads in geodata/ from OpenStreetMap
-├── tools/build_roads_trafikverket.py # Rebuilds roads and Trafikverket's places in geodata/
-├── tools/measure_geolocation.py # Measures the map engines on your own messages
-├── tools/retranscribe.py      # Transcribes the stored recordings again
-├── status.py             # Status snapshot (/api/status + uplink heartbeat)
-├── uplink.py             # Satellite → aggregator sender (outbox + heartbeat)
-├── docs/
-│   ├── architecture/     # Archify architecture diagram (SVG, HTML, JSON source)
-│   └── uplink-protocol.md # Satellite ↔ aggregator protocol
-├── aggregator/           # Aggregator service (separate container, see its README)
-├── tests/                # pytest suite (pip install -r requirements-dev.txt; pytest)
-├── event_store.py        # SQLite wrapper
-├── web_server.py         # aiohttp REST API + WebSocket + static serving
-├── notify_rules.py       # Push rules: validation, matching, message (shared with aggregator)
-├── notifier.py           # Push dispatch on the satellite
-└── static/
-    ├── index.html
-    ├── shared/           # Web UI shared with the aggregator
-    │   ├── app.css
-    │   ├── rdsui.js      # Arkiv, Sök, Händelse, Admin (Aviseringar), audio player
-    │   ├── map.js        # Karta, place labels, event mini map
-    │   └── vendor/       # wavesurfer.js, Leaflet
-    ├── css/
-    │   └── debug.css     # Debug view
-    └── js/
-        ├── satellite.js  # Status, Debug view
-        └── console.js    # WebSocket console, pause/filter
+├── receivers.example.yml         # Dongles and their stations
+├── .env.example
+├── rds_guard.py          # Satellite: rules engine, stations, housekeeping
+├── config.py             # Satellite settings
+├── receivers.py          # receivers.yml: dongles, stations, checks
+├── dongles.py            # rtl_test: connected dongles, serial numbers, gain steps
+├── pipeline.py           # One rtl_sdr + Channelizer + redsea per dongle
+├── channelizer.py        # Wideband IQ → one FM demodulated stream per station (numpy)
+├── audio_tee.py          # Audio to redsea and the recorder
+├── audio_recorder.py     # Recordings (OGG/Opus via ffmpeg) to /data/spool
+├── gain_tuner.py         # Gain and ppm calibration per dongle
+├── event_store.py        # satellite.db: events, outbox, calibration
+├── uplink.py             # Satellite → aggregator: join, outbox, heartbeat
+├── satellite_health.py   # Docker health check
+├── aggregator/           # The aggregator (its own image, see its README)
+├── transcriber.py        # Speech to text (aggregator)
+├── geolocate.py, gazetteer.py, roads.py, geo_service.py  # The map (aggregator)
+├── trafikverket.py       # Trafikverket's deviations (aggregator)
+├── notify_rules.py       # Push rules (aggregator)
+├── geodata/              # Place names and roads (aggregator)
+├── static/shared/        # The web UI (aggregator)
+├── tools/                # Building geodata, measuring the map, KB-Whisper conversion
+├── docs/                 # Architecture, protocol, plans, release notes
+└── tests/                # pytest suite (pip install -r requirements-dev.txt; pytest)
 ```
 
 ## Operations
 
 ### Update and restart
 
-Pull the latest image and restart (preserves event history):
-
 ```bash
-docker compose down && docker compose pull && docker compose up -d && docker compose logs -f
+docker compose pull && docker compose up -d && docker compose logs -f
 ```
 
-Clean restart from scratch (deletes the event database, audio and all other
-data in `./rds-data`). The data is in a bind-mounted folder, so
-`docker compose down -v` does not remove it; delete the folder instead. The
-container writes its files as root, so this needs `sudo`:
+If building locally (a clone of the repository, with `build:` in
+docker-compose.yml), run `git pull` first, then
+`docker compose up -d --build`.
 
-```bash
-docker compose down && sudo rm -rf ./rds-data && docker compose pull && docker compose up -d && docker compose logs -f
-```
-
-If building locally (a clone of the repository, with `build: .` in
-docker-compose.yml), run `git pull` first, then:
-
-```bash
-docker compose down && docker compose build --no-cache && docker compose up -d && docker compose logs -f
-```
-
-### Upgrading from v0.1.3 to v0.2.x
-
-v0.2.x is a drop-in upgrade for a standalone install. Satellite mode is
-optional and **off by default**: if you don't set `UPLINK_URL`, RDS Guard runs
-exactly as before, and nothing is sent anywhere. You don't need to change
-`.env` or `docker-compose.yml`, and your existing events, audio and
-transcriptions are kept.
-
-1. **Back up your data (recommended):**
-   ```bash
-   docker compose down
-   cp -a rds-data rds-data.backup-0.1.3
-   ```
-2. **Pull the new image and start again:**
-   ```bash
-   docker compose pull
-   docker compose up -d
-   ```
-   If you build locally (`build: .`), run `git pull` and then
-   `docker compose up -d --build` instead.
-3. **Check the log** with `docker compose logs -f rds-guard`. You should see
-   `Mode: standalone (no uplink)`. The web UI footer shows the new version.
-
-On first start the database in `rds-data/events.db` is migrated
-automatically. A new `event_uid` column and an empty `outbox` table are added,
-and existing rows are not changed. The outbox is only used in satellite mode.
-
-**Pinning a version:** `ghcr.io/tubalainen/rds-guard:latest` follows
-`master`. To stay on a release, set the image to
-`ghcr.io/tubalainen/rds-guard:0.4.3` (or `:0.4` to get 0.4.x patch releases).
-
-**Rolling back:** set the image to `ghcr.io/tubalainen/rds-guard:0.1.3`, and
-restore `rds-data.backup-0.1.3` if you want the database exactly as it was.
-v0.1.3 ignores the added column and table, so it also runs on the migrated
-database.
-
-**Joining an aggregator** is a separate, optional step after the upgrade. See
-[Run as a satellite](#run-as-a-satellite). Only events recorded after the
-uplink is turned on are sent. Older events and transcriptions are not.
-
-### Transcription changes in v0.2.2
-
-- **ElevenLabs is the default engine.** Add `ELEVENLABS_API_KEY` to `.env` to
-  use it. Without a key nothing changes in how it works: audio is transcribed
-  locally. To keep local only, set `TRANSCRIPTION_ENGINE=local`.
-- **New local model.** With `TRANSCRIPTION_LANGUAGE=sv` and
-  `TRANSCRIPTION_MODEL` empty, the bundled KB-Whisper small *strict* model is
-  used (it is in the image, nothing to download). If your `.env` still has
-  `TRANSCRIPTION_MODEL=small`, you stay on OpenAI's small model: clear the
-  line to switch.
-- New recordings have the FM pre-emphasis removed, so they sound less sharp.
-- Other models are now cached in `rds-data/models`; a model you set yourself
-  is downloaded once more after the upgrade.
+**Pinning a version:** `:latest` follows `master`. To stay on a release, set
+both images to the same version, e.g. `ghcr.io/tubalainen/rds-guard:1.0.0`
+and `ghcr.io/tubalainen/rds-guard-aggregator:1.0.0` (or `:1.0` for patch
+releases). The satellite and the aggregator must speak the same protocol;
+an older or newer satellite logs `Uplink incompatible` and keeps its queue.
 
 ### Releasing
 
@@ -1201,94 +873,23 @@ same pull request. They appear above the generated notes. A notes file added
 later for a release that already exists is put at the top of that release's
 text once, when it reaches `master`.
 
-### View logs
-
-```bash
-docker compose logs -f rds-guard
-```
-
-### Check decoder status
-
-The status API returns pipeline health, station info, decode rate, and uptime:
-
-```bash
-curl http://localhost:8022/api/status
-```
-
 ### Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
-| Header says *Inte startad* or *Fel i mottagaren* | Pipeline hasn't started or RTL-SDR not found | Check logs for `[rtl_fm]` errors. Verify dongle is plugged in and driver is blacklisted |
-| `usb_open error` in logs | Kernel DVB driver still loaded | Run `sudo modprobe -r dvb_usb_rtl28xxu` on the host |
-| `No RTL-SDR devices found` | Dongle not passed to container | Verify `privileged: true` in docker-compose.yml or add the device explicitly |
-| Pipeline status shows `error` | rtl_fm or redsea crashed | Check logs for `[rtl_fm]` / `[redsea]` error lines. Rebuild with `--no-cache` |
-| Events show as "In progress" after restart | Normal — stale events from the previous run | They are automatically closed on startup. Do a clean rebuild with `-v` to clear old data |
-| MQTT not publishing | MQTT disabled or broker unreachable | Set `MQTT_ENABLED=true` in `.env` and verify broker IP/port. Check logs for MQTT connection errors |
-| Low decode rate (< 5 grp/s) | Weak signal or wrong frequency | Try increasing `RTL_GAIN`. Verify `FM_FREQUENCY` matches a nearby P4 transmitter |
-| Status bar shows `uplink väntar på godkännande (kod …)` | The aggregator's owner has not approved this satellite yet | Send them the code; they approve it under *Admin → Noder*. Everything is queued meanwhile |
-| Status bar shows `uplink nekad` | The owner rejected it, or `JOIN_KEY` differs from the aggregator's | Ask the owner; with `JOIN_KEY`, check that both have the same |
-| Status bar shows `uplink offline` | Aggregator unreachable, or a proxy/Cloudflare answered instead of it | Hover over the uplink status, or check `docker compose logs rds-guard \| grep -i uplink`. Data stays queued and is sent later |
-| Status bar shows `uplink: bad token` | Token wrong, rotated or node disabled | Ask the aggregator's owner for a new token and update `UPLINK_TOKEN` |
-| `queue_depth` in `/api/status` keeps growing | Uplink cannot deliver | See the two rows above; items older than `UPLINK_MAX_AGE_HOURS` are dropped |
-
-## Multi-station monitoring
-
-A single RTL-SDR dongle covers up to ~2.4 MHz of instantaneous bandwidth, which is enough to capture 4 FM stations at once (each channel is 200 kHz wide, and 4 channels spaced within 2 MHz fit comfortably).
-
-Set `FM_FREQUENCIES` to a comma-separated list of 2–4 stations to enable simultaneous monitoring:
-
-```bash
-FM_FREQUENCIES=103.5M,102.9M,101.3M
-```
-
-### How it works
-
-When `FM_FREQUENCIES` is set with 2 or more values, the pipeline switches to a wideband capture mode:
-
-1. `rtl_sdr` captures raw IQ at 2 394 000 samples/sec centred between all target frequencies
-2. A Python channelizer thread (numpy DSP) extracts each station, demodulates FM, and writes 171 kHz PCM to a dedicated pipe per station
-3. One `redsea` process and one audio recorder run independently per station
-
-Station names are decoded live from the RDS Programme Service (PS) field — no configuration needed.
-
-### Constraints
-
-- **Maximum 4 stations** — hardware and CPU limit
-- **All frequencies must be within 2.0 MHz of each other** — this is the usable bandwidth at the chosen sample rate. Startup will abort with a clear error if this constraint is violated.
-- Adequate on any x86_64 host and Raspberry Pi 4. Not tested on Raspberry Pi 3.
-
-### API changes in multi-station mode
-
-`GET /api/status` returns a `stations[]` array instead of a single `station` object:
-
-```json
-{
-  "pipeline": { "state": "running", ... },
-  "stations": [
-    { "frequency": "103.5M", "pi": "C404", "ps": "P4 Värmland", "groups_per_sec": 11.3 },
-    { "frequency": "102.9M", "pi": "C502", "ps": "P4 Sjuharad", "groups_per_sec": 11.1 }
-  ]
-}
-```
-
-Events in the database and web UI are always tagged with `frequency` and `station_ps`, so the archive works identically regardless of mode.
-
-### Backward compatibility
-
-- `FM_FREQUENCIES` unset → single-station mode using `FM_FREQUENCY` (unchanged)
-- `FM_FREQUENCIES` with exactly 1 value → also single-station mode
-- `FM_FREQUENCIES` with 2–4 values → wideband multi-station mode
-
-## Multiple RTL-SDR dongles
-
-If you have more than one RTL-SDR plugged in, you can select by serial number:
-
-```bash
-RTL_DEVICE_SERIAL=00000002
-```
-
-The pipeline manager resolves the serial to a device index automatically using `rtl_test`.
+| Satellite stops at once: `RDS Guard needs an aggregator` | `AGGREGATOR_URL` is empty | Use the combined `docker-compose.yml`, or set `AGGREGATOR_URL` |
+| `No RTL-SDR dongle found` | Dongle not plugged in or not passed to the container | Check `devices: /dev/bus/usb` in the compose file and `python3 -m dongles` |
+| `usb_open error` in the log | Kernel DVB driver still loaded | Run `sudo modprobe -r dvb_usb_rtl28xxu` on the host |
+| Two dongles with the same serial number | Factory default `00000001` | Give one a new number with `rtl_eeprom` as the log says |
+| `docker compose ps` shows `unhealthy` | No dongle is receiving | `docker compose exec rds-guard python3 -m satellite_health` says why; the log has the details |
+| Low decode rate (< 5 grp/s) | Weak signal, wrong frequency or gain | **Admin → Noder → Kalibrera om**; check the antenna and that the frequency matches a nearby P4 transmitter |
+| Calibration chose 20 dB and says no RDS | No antenna or no station on the frequency | Check the antenna and `frequencies` |
+| Log: `Uplink pending: waiting for approval (code …)` | The aggregator has not approved the satellite | Approve it under **Admin → Noder**, or give both the same `JOIN_KEY` |
+| Log: `Uplink rejected` | Rejected in Admin, or `JOIN_KEY` differs | Check that both have the same `JOIN_KEY` |
+| Log: `Uplink incompatible` | Satellite and aggregator speak different protocol versions | Update both: `docker compose pull && docker compose up -d` |
+| Log: `Uplink unauthorized … check UPLINK_TOKEN` | The `UPLINK_TOKEN` in `.env` was rotated or its node removed | Remove `UPLINK_TOKEN` from `.env` and let it join again |
+| Queue keeps growing on the node card | The satellite cannot deliver | See the log lines above; items older than `UPLINK_MAX_AGE_HOURS` are dropped |
+| MQTT not publishing | MQTT disabled or broker unreachable | Set `MQTT_ENABLED=true` and `MQTT_HOST`; `docker compose logs aggregator \| grep -i mqtt` |
 
 ## License
 

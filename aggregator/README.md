@@ -227,7 +227,7 @@ A satellite only needs this aggregator's address. It asks to join, and you
 approve it:
 
 1. Send your friend the address (`PUBLIC_URL`) and a link to
-   [Run as a satellite](../README.md#run-as-a-satellite) in the main README.
+   [A satellite on another machine](../README.md#a-satellite-on-another-machine) in the main README.
    In short, they add to their `.env`:
 
 ```bash
@@ -418,7 +418,7 @@ browser, come from the same origin.
 
 ## Importing a satellite's history
 
-A standalone RDS Guard's events, audio, transcriptions, map and push rules
+An RDS Guard up to v0.10 (its `events.db`): its events, audio, transcriptions, map and push rules
 can be copied into the aggregator, as the events of one node:
 
 ```bash

@@ -12,7 +12,7 @@ The satellite sends raw data only:
 - **audio**: the recording of each event, as OGG/Opus
 - **heartbeat**: station and pipeline status every 30 seconds
 
-Version 2 (v0.11.0) adds **joining**: a satellite without a configured token
+Version 2 (v1.0.0) adds **joining**: a satellite without a configured token
 makes its own and asks to join, and the aggregator's owner approves it. It
 also adds the `receiver` of an event. An aggregator answers every request
 that carries another protocol version with 426, so satellites and
@@ -133,7 +133,7 @@ Body (JSON, at most 64 KiB):
 | `ended_at` | timestamp or null | |
 | `duration_sec` | integer or null | 0–86400 |
 | `sent_at` | timestamp | Satellite clock when sent |
-| `receiver` | string or null | ≤ 32 chars, which of the satellite's receivers heard it (`"0"` until satellites have several) |
+| `receiver` | string or null | ≤ 32 chars, which of the satellite's receivers (dongles) heard it: its `name` from `receivers.yml`, or its serial number |
 
 Unknown fields are ignored.
 
@@ -189,14 +189,40 @@ Body (JSON, at most 64 KiB):
 | `version` | string | ≤ 64 chars |
 | `sent_at` | timestamp | |
 | `uptime_sec` | integer or null | |
-| `pipeline` | object | `{"state": string, "error": string or null}`, each ≤ 256 chars |
-| `stations` | array | ≤ 8 items: `frequency`, `pi`, `ps`, `long_ps`, `prog_type`, `tp`, `ta`, `groups_per_sec`, `groups_total` |
+| `receivers` | array | ≤ 8 items, one per dongle (see below) |
+| `pipeline` | object | `{"state": string, "error": string or null}`, each ≤ 256 chars: the worst of the receivers |
+| `stations` | array | ≤ 8 items: `frequency`, `pi`, `ps`, `long_ps`, `prog_type`, `tp`, `ta`, `groups_per_sec`, `groups_total`, all receivers together |
 | `queue_depth` | integer or null | Items waiting in the satellite's outbox |
 | `suggested_location` | string or null | ≤ 80 chars, the satellite's `NODE_LOCATION` as "Ort, Län" (e.g. `Karlstad, Värmlands län`). The aggregator places the node's messages there unless its owner set another place in Admin. Optional (`location` is read too) |
-| `local_processing` | boolean or null | Whether the satellite transcribes and maps its recordings itself (`LOCAL_PROCESSING`). Informational. Optional |
 
-Unknown fields are ignored, and the two optional fields may be missing, so
-older satellites and aggregators keep working with newer ones.
+Each item of `receivers`:
+
+| Field | Type | Constraint |
+|---|---|---|
+| `id` | string | ≤ 32 chars, the `receiver` its events carry |
+| `serial` | string | ≤ 32 chars, the dongle's serial number |
+| `name` | string or null | ≤ 32 chars, from `receivers.yml` |
+| `state` | string | ≤ 32 chars: `not_started`, `starting`, `running`, `paused` (calibrating), `error`, `stopped` |
+| `error` | string or null | ≤ 256 chars |
+| `gain`, `ppm` | number or null | In use now |
+| `gain_mode`, `ppm_mode` | string | `auto` (calibrated) or `manual` (fixed in `receivers.yml`) |
+| `calibrated_at` | timestamp or null | Last calibration |
+| `calibration` | string or null | ≤ 64 chars: what the calibration is doing, or why it failed |
+| `quality` | object | ≤ 8 entries, frequency → RDS groups per second at calibration |
+| `stations` | array | ≤ 4 items, as `stations` above |
+
+`pipeline` and `stations` repeat what `receivers` holds, for node cards that
+read the flat shape. Unknown fields are ignored and the optional ones may be
+missing.
 
 Response: `200 {"server_time": "<timestamp>"}`. The aggregator compares
 `sent_at` with its own clock to show each node's clock offset.
+
+The answer may also carry `commands`, an array of what the node's owner
+asked for in Admin. Each is sent once and then forgotten by the aggregator;
+the satellite runs each `id` at most once and ignores types it does not
+know.
+
+| `type` | Fields | What the satellite does |
+|---|---|---|
+| `recalibrate` | `id` (integer), `receiver` (its `id` or `serial`) | Calibrates that receiver's gain and ppm as soon as no broadcast is going on there; the result shows in a later heartbeat |
