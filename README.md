@@ -704,7 +704,7 @@ wins over the others.
 
 A **road registry** is bundled too (`geodata/roads-se.tsv.gz`): where
 Sweden's numbered roads run (E-roads, riksvägar and länsvägar, simplified
-to within 20 m), from OpenStreetMap. When a message names a road ("riksväg
+to within 20 m), from Trafikverket. When a message names a road ("riksväg
 61 vid Kärr") it is used to:
 
 - pick the place next to that road when several have the name
