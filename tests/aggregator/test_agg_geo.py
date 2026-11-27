@@ -213,3 +213,24 @@ async def test_location_can_be_edited_in_admin(aiohttp_client, agg_store, event,
     assert agg_store.get_event(UID)["geo_status"] == "no_location"
     await web.patch(f"/api/v1/nodes/{event['id']}", json={"location": "Karlstad, Värmlands län"})
     assert pipe._placeable_count() == 1
+
+
+def test_place_falls_back_to_another_node_that_heard_it(agg_store, event, geo):
+    """The transcribed node has no place; another that heard it has one."""
+    agg_store.record_heartbeat(event["id"], "Kalle", "1.0", {"location": None}, 0)
+    lisa, _ = agg_store.create_node("Lisa")
+    agg_store.record_heartbeat(lisa["id"], "Lisa", "1.0",
+                               {"location": "Grums, Värmlands län"}, 0)
+    agg_store.upsert_event(lisa["id"], "44444444-4444-4444-8444-444444444444", {
+        "rev": 1, "type": "traffic", "state": "end", "pi": "0xE824",
+        "station_ps": "P4 Värml", "long_ps": None, "frequency": "103.5M",
+        "prog_type": None, "radiotext": [], "started_at": "2026-11-25T10:00:03Z",
+        "ended_at": "2026-11-25T10:01:00Z", "duration_sec": 57,
+        "sent_at": "2026-11-25T10:01:00Z"})
+    pipe = Pipeline(transcriber=None, mqtt=None, geo=geo)
+    row = agg_store.get_event(UID)
+    assert row["node_name"] == "Kalle" and row["node_names"] == ["Kalle", "Lisa"]
+    place, location = pipe.place_of(row)
+    assert place.name == "Grums" and location == "Grums, Värmlands län"
+    pipe._on_transcribed(row["id"], TEXT, None, 2.0)
+    assert agg_store.get_event(UID)["geo_status"] != "no_location"

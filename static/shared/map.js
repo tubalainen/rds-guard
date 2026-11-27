@@ -439,11 +439,6 @@ const RDSMap = (() => {
 
     function notice(geo) {
         if (!geo) return '';
-        if (!geo.enabled && geo.reason === 'off') {
-            return `<div class="map-note">Den här satelliten behandlar inte sina inspelningar själv
-                (<code>LOCAL_PROCESSING=false</code>): de skickas till aggregatorn, som transkriberar dem
-                och placerar dem på kartan. Kartan finns där.</div>`;
-        }
         if (!geo.enabled) {
             return '<div class="map-note">Kartan är avstängd (<code>GEO_ENGINE=none</code>).</div>';
         }

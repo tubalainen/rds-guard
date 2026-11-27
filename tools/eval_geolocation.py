@@ -552,10 +552,7 @@ def main():
             with open(args.replay, encoding="utf-8") as f:
                 g = geolocate.Geolocator(ReplayReader(json.load(f)))
         elif name == "claude":
-            try:
-                import config
-            except ImportError:   # in the aggregator's image
-                from aggregator import config
+            from aggregator import config
             if not config.ANTHROPIC_API_KEY:
                 sys.exit("ANTHROPIC_API_KEY saknas.")
             reader = geolocate.ClaudeReader(

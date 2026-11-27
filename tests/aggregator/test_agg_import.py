@@ -4,7 +4,6 @@ import json
 
 import pytest
 
-import event_store
 import geolocate
 import notify_rules
 from aggregator import import_satellite as imp
@@ -24,8 +23,9 @@ def _area():
 
 
 @pytest.fixture
-def satellite(store, tmp_path):
-    """A satellite database the way the satellite itself writes it."""
+def satellite(legacy_db, tmp_path):
+    """A satellite database as a satellite before v1.0 wrote it."""
+    store = legacy_db
     audio = tmp_path / "sat-audio"
     audio.mkdir()
     # 1: traffic with audio, transcription, a map incident and an area warning
@@ -59,8 +59,7 @@ def satellite(store, tmp_path):
     store.create_rule(notify_rules.validate(
         {"name": "Nattlarm", "enabled": True, "event_types": ["emergency"],
          "priority": "critical", "topic": "natt"}))
-    conn = event_store._conn()
-    conn.commit()
+    conn = store._conn()
     uids = {r["id"]: r["event_uid"] for r in conn.execute("SELECT id, event_uid FROM events")}
     return {"db": str(tmp_path / "events.db"), "audio": audio, "ids": (a, b, c), "uids": uids}
 
@@ -134,8 +133,8 @@ def test_events_the_uplink_delivered_are_skipped_with_their_map(agg_store, satel
     assert agg_store.get_event(satellite["uids"][a])["rev"] == 3
 
 
-def test_events_without_uid_get_a_stable_one(agg_store, satellite):
-    conn = event_store._conn()
+def test_events_without_uid_get_a_stable_one(agg_store, satellite, legacy_db):
+    conn = legacy_db._conn()
     conn.execute("UPDATE events SET event_uid = NULL")
     conn.commit()
     node, _ = agg_store.create_node("docker01")
@@ -178,9 +177,10 @@ def test_command_line(agg_store, satellite, monkeypatch, capsys):
     json.dumps(agg_store.list_nodes())          # serialisable as before
 
 
-def test_events_older_than_the_retention_are_skipped(agg_store, satellite, monkeypatch):
+def test_events_older_than_the_retention_are_skipped(agg_store, satellite, monkeypatch,
+                                                     legacy_db):
     from aggregator import config
-    conn = event_store._conn()
+    conn = legacy_db._conn()
     a = satellite["ids"][0]
     conn.execute("UPDATE events SET created_at = '2020-01-01T00:00:00' WHERE id = ?", (a,))
     conn.commit()
@@ -192,6 +192,33 @@ def test_events_older_than_the_retention_are_skipped(agg_store, satellite, monke
     # Its incident is not brought either
     assert counts["incidents"] == 0
 
+
+def test_imported_events_have_their_reception(agg_store, satellite):
+    node, _ = agg_store.create_node("docker01")
+    _run(satellite, node)
+    conn = agg_store._conn()
+    assert conn.execute("SELECT COUNT(*) FROM receptions").fetchone()[0] == 3
+    a = satellite["ids"][0]
+    ev = agg_store.get_event(satellite["uids"][a])
+    assert ev["node_names"] == ["docker01"]
+    assert agg_store.get_reception(satellite["uids"][a])["audio_path"] == ev["audio_path"]
+
+
+def test_an_event_merged_into_another_broadcast_is_not_imported_again(agg_store, satellite):
+    """The uplink delivered it as a reception of a broadcast another node
+    started: its uid is a reception's, not the broadcast's."""
+    node, _ = agg_store.create_node("docker01")
+    other, _ = agg_store.create_node("Lisa")
+    a = satellite["ids"][0]
+    base = {"rev": 1, "type": "traffic", "state": "end", "pi": "0xE824",
+            "station_ps": "P4 Värml", "long_ps": None, "frequency": "103.5M",
+            "prog_type": None, "radiotext": [], "started_at": "2026-11-20T10:00:00Z",
+            "ended_at": "2026-11-20T10:01:00Z", "duration_sec": 60,
+            "sent_at": "2026-11-20T10:01:00Z"}
+    agg_store.upsert_event(other["id"], "99999999-9999-4999-8999-999999999999", base)
+    agg_store.upsert_event(node["id"], satellite["uids"][a], dict(base, started_at="2026-11-20T10:00:05Z"))
+    counts = _run(satellite, node)
+    assert counts["skipped"] == 1 and counts["events"] == 2
 
 def test_deleting_the_node_takes_its_map_along(agg_store, satellite):
     """Delete the node and import again: one copy of the map, not two."""

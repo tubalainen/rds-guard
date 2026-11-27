@@ -8,7 +8,7 @@ import uplink as up
 class FakeResponse:
     def __init__(self, status, from_aggregator=True, text=""):
         self.status_code = status
-        self.headers = {up.PROTOCOL_HEADER: "1"} if from_aggregator else {}
+        self.headers = {up.PROTOCOL_HEADER: "2"} if from_aggregator else {}
         self.text = text
 
 
@@ -63,7 +63,6 @@ def _traffic_event(store, tmp_path):
     store.end_event(event_id, "2026-11-25T10:01:00", 60, ["Olycka på E4"])
     (tmp_path / f"{event_id}.ogg").write_bytes(b"OggS" + b"\0" * 100)
     store.update_event_audio(event_id, f"{event_id}.ogg")
-    store.update_event_transcription(event_id, "secret text", status="done")
     return event_id
 
 
@@ -85,16 +84,17 @@ def test_full_event_is_sent_once_then_audio(store, link, tmp_path):
     assert body["long_ps"] == "P4 Test Long"
     assert body["prog_type"] == "Information"
     assert body["rev"] > 0
-    # Raw data only — never the transcription
-    assert "secret text" not in repr(body)
     assert not any("transcri" in k for k in body)
 
     hdrs = calls[0]["headers"]
     assert hdrs["Authorization"] == "Bearer tok123"
-    assert hdrs[up.PROTOCOL_HEADER] == "1"
+    assert hdrs[up.PROTOCOL_HEADER] == "2"
+    assert body["receiver"] == "0"
     assert calls[1]["data"].startswith(b"OggS")
     assert calls[1]["headers"]["Content-Type"] == "audio/ogg"
     assert store.outbox_depth() == 0
+    # Delivered: kept SATELLITE_KEEP_DAYS, then removed by the purge
+    assert store.get_event(event_id)["audio_delivered_at"]
 
 
 def test_network_error_keeps_queue(store, link, tmp_path):
@@ -188,3 +188,110 @@ def test_utc_z():
     assert up.utc_z("2026-11-25T10:00:00.123456") == "2026-11-25T10:00:00Z"
     assert up.utc_z(None) is None
     assert up.utc_z("garbage") is None
+
+
+# --- two queues ---------------------------------------------------------------
+
+def test_a_new_event_is_sent_before_queued_audio(store, link, tmp_path):
+    """The events queue does not wait behind an audio upload."""
+    first = _traffic_event(store, tmp_path)
+    assert link.process_one(up.EVENTS) == up.OK       # first event delivered
+    second = store.insert_event(
+        event_type="traffic", severity="warning", state="start", pi="0x9E04",
+        data_payload={}, started_at="2026-11-25T11:00:00")
+    # The audio of the first is queued before the second's start, but the
+    # events queue sends the start straight away
+    assert store.outbox_head()["kind"] == "audio"
+    assert link.process_one(up.EVENTS) == up.OK
+    uid2 = store.get_event(second)["event_uid"]
+    assert link.http.calls[-1]["url"].endswith(f"/events/{uid2}")
+    assert link.process_one(up.AUDIO) == up.OK
+    assert link.http.calls[-1]["url"].endswith(
+        f"/events/{store.get_event(first)['event_uid']}/audio")
+
+
+def test_audio_waits_for_its_event(store, link, tmp_path):
+    """After an outage the audio queue must not overtake the event."""
+    _traffic_event(store, tmp_path)
+    assert link.process_one(up.AUDIO) == up.WAIT
+    assert link.http.calls == []
+    assert link.process_one(up.EVENTS) == up.OK
+    assert link.process_one(up.AUDIO) == up.OK
+    assert [c["method"] for c in link.http.calls] == ["PUT", "PUT"]
+
+
+def test_a_retry_wait_is_cut_short_by_new_work():
+    import threading, time
+    stop, wake = threading.Event(), threading.Event()
+    t0 = time.monotonic()
+    threading.Timer(0.2, wake.set).start()
+    up._wait(stop, wake, 30)
+    assert time.monotonic() - t0 < 5
+    assert not wake.is_set()
+
+
+# --- joining -------------------------------------------------------------------
+
+def _joining(store, tmp_path, answers, **kw):
+    http = FakeHttp()
+    http.answers = list(answers)
+    u = up.Uplink("https://agg.example", "", tmp_path, node_name="Kalle",
+                  version="9", http=http, suggested_location="Karlstad, Värmlands län",
+                  **kw)
+    return u, http
+
+
+def test_join_makes_its_own_token_and_keeps_it(store, tmp_path):
+    u, http = _joining(store, tmp_path, [FakeResponse(202)])
+    assert u.join_once() == "pending"
+    assert u.snapshot()["state"] == "pending" and u.snapshot()["verify"]
+    call = http.calls[0]
+    assert call["url"] == "https://agg.example/api/v1/ingest/join"
+    token = call["headers"]["Authorization"][7:]
+    assert len(token) >= 32
+    assert call["json"]["join_id"] and call["json"]["node_name"] == "Kalle"
+    assert call["json"]["suggested_location"] == "Karlstad, Värmlands län"
+    # A restart keeps the same identity
+    again, _ = _joining(store, tmp_path, [])
+    assert again._token == token and again._verify == u._verify
+
+
+def test_a_lost_approval_answer_is_harmless(store, tmp_path):
+    """Nothing secret comes back: asking again after a lost answer works."""
+    u, http = _joining(store, tmp_path, [OSError("timeout"), FakeResponse(200)])
+    assert u.join_once() == up.RETRY
+    assert not u._ready.is_set()
+    assert u.join_once() == "approved"
+    assert u._ready.is_set()
+    tokens = {c["headers"]["Authorization"] for c in http.calls}
+    assert len(tokens) == 1
+    # Approved survives a restart
+    again, _ = _joining(store, tmp_path, [])
+    assert again._ready.is_set()
+
+
+def test_join_key_and_rejection(store, tmp_path):
+    u, http = _joining(store, tmp_path, [FakeResponse(403)], join_key="hemlig")
+    assert u.join_once() == "rejected"
+    assert http.calls[0]["json"]["join_key"] == "hemlig"
+    assert u.snapshot()["state"] == "rejected"
+
+
+def test_nothing_is_sent_before_approval_and_a_removed_node_joins_again(store, tmp_path):
+    u, http = _joining(store, tmp_path, [FakeResponse(200), FakeResponse(401)])
+    store.enable_outbox(u.notify)
+    _traffic_event(store, tmp_path)
+    depth = store.outbox_depth()
+    assert not u._ready.is_set()            # events wait in the queue
+    assert u.join_once() == "approved"
+    assert u.process_one(up.EVENTS) == up.UNAUTHORIZED   # node removed meanwhile
+    assert not u._ready.is_set()
+    assert store.get_setting("uplink_joined") is None
+    assert u.snapshot()["state"] == "joining"
+    assert store.outbox_depth() == depth    # nothing lost
+
+
+def test_verify_code_format():
+    code = up.verify_code("8c7f3a0e-0000-4000-8000-000000000000")
+    assert len(code) == 7 and code[3] == "-"
+    assert code == up.verify_code("8c7f3a0e-0000-4000-8000-000000000000")

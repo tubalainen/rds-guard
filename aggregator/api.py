@@ -57,7 +57,24 @@ def public_event(row):
     ev = {k: row.get(k) for k in _PUBLIC_EVENT_FIELDS}
     ev["audio_url"] = (f"/api/v1/audio/{row['event_uid']}.ogg"
                        if row.get("audio_path") else None)
+    # Every node that heard the broadcast (node_name: the one transcribed)
+    ev["nodes"] = row.get("node_names") or ([row["node_name"]] if row.get("node_name") else [])
     return ev
+
+
+def public_reception(rec, primary_id):
+    return {
+        "node_name": rec.get("node_name"),
+        "receiver": rec.get("receiver"),
+        "frequency": rec.get("frequency"),
+        "started_at": rec.get("started_at"),
+        "ended_at": rec.get("ended_at"),
+        "duration_sec": rec.get("duration_sec"),
+        "state": rec.get("state"),
+        "transcribed": rec.get("id") == primary_id,
+        "audio_url": (f"/api/v1/audio/reception/{rec['reception_uid']}.ogg"
+                      if rec.get("audio_path") else None),
+    }
 
 
 def _with_notify(rows):
@@ -91,6 +108,7 @@ def public_node(node, pipeline=None):
         "uptime_sec": status.get("uptime_sec"),
         "pipeline": status.get("pipeline"),
         "stations": status.get("stations") or [],
+        "receivers": status.get("receivers") or [],
         "queue_depth": status.get("queue_depth"),
         "location": store.node_location(node),
         "location_set": node.get("location"),
@@ -210,6 +228,9 @@ async def handle_event(request):
     def work():
         out = _with_notify([row])[0]
         trafikverket.attach(store.trv, out.get("incidents") or [])
+        recs = store.receptions_for_events([row["id"]]).get(row["id"], [])
+        out["receptions"] = [public_reception(r, row.get("primary_reception_id"))
+                             for r in recs]
         return out
     return web.json_response(await _run(work))
 
@@ -338,7 +359,11 @@ async def handle_audio(request):
     uid = request.match_info["uid"]
     if not valid_uid(uid):
         return _error(404, "not_found")
-    row = await _run(store.get_event, uid)
+    if request.match_info.get("kind") == "reception":
+        # One node's own recording of a broadcast
+        row = await _run(store.get_reception, uid)
+    else:
+        row = await _run(store.get_event, uid)
     if row is None or not row.get("audio_path"):
         return _error(404, "not_found")
     path = pathlib.Path(config.AUDIO_DIR) / pathlib.Path(row["audio_path"]).name
@@ -554,6 +579,76 @@ async def handle_update_node(request):
     return web.json_response({"node": public_node(node, request.app[PIPELINE])})
 
 
+def public_join(req):
+    return {k: req.get(k) for k in ("id", "verify", "node_name", "version",
+                                    "suggested_location", "stations", "address",
+                                    "created_at", "last_seen_at")}
+
+
+async def handle_join_requests(request):
+    """GET /api/v1/nodes/pending — satellites waiting to be approved."""
+    rows = await _run(store.list_join_requests)
+    return web.json_response({"pending": [public_join(r) for r in rows],
+                              "join_key": bool(config.JOIN_KEY)})
+
+
+def _request_id(request):
+    try:
+        return int(request.match_info["request_id"])
+    except (TypeError, ValueError):
+        return None
+
+
+async def handle_approve_join(request):
+    """POST /api/v1/nodes/pending/{id}/approve — {"name", "location",
+    "replace_node_id"} (all optional)."""
+    body = await _json_body(request)
+    if body is None:
+        return _error(422, "invalid", "body must be a JSON object")
+    name, location, replace = body.get("name"), body.get("location"), body.get("replace_node_id")
+    if ((name is not None and not isinstance(name, str))
+            or (location is not None and not isinstance(location, str))
+            or (replace is not None and (isinstance(replace, bool)
+                                         or not isinstance(replace, int)))):
+        return _error(422, "invalid", "name and location are text, "
+                                      "replace_node_id a node id")
+    location = " ".join((location or "").split())[:80] or None
+    request_id = _request_id(request)
+    try:
+        if name is not None and name.strip():
+            name = nodes.clean_name(name)
+        node = await _run(store.approve_join, request_id, name or None, location,
+                          replace) if request_id else None
+    except ValueError as e:
+        return _error(422, "invalid", str(e))
+    if node is None:
+        return _error(404, "not_found", "no such waiting satellite (or node)")
+    return web.json_response({"node": public_node(node, request.app[PIPELINE])})
+
+
+async def handle_reject_join(request):
+    request_id = _request_id(request)
+    if not request_id or not await _run(store.reject_join, request_id):
+        return _error(404, "not_found")
+    return web.json_response({"rejected": True})
+
+
+async def handle_recalibrate(request):
+    """POST /api/v1/nodes/{id}/recalibrate {"receiver": id or serial}: the
+    satellite calibrates that receiver's gain and ppm at its next heartbeat
+    (not during a broadcast)."""
+    node_id = _node_id(request)
+    body = await _json_body(request)
+    receiver = body.get("receiver") if body else None
+    if not isinstance(receiver, str) or not receiver.strip() or len(receiver) > 32:
+        return _error(422, "invalid", "expected {\"receiver\": \"<id or serial>\"}")
+    if not node_id or await _run(store.get_node, node_id) is None:
+        return _error(404, "not_found")
+    cid = await _run(store.add_node_command, node_id,
+                     {"type": "recalibrate", "receiver": receiver.strip()})
+    return web.json_response({"queued": True, "id": cid}, status=202)
+
+
 async def handle_delete_node(request):
     node_id = _node_id(request)
     paths = await _run(store.delete_node, node_id) if node_id else None
@@ -614,6 +709,7 @@ def create_web_app(pipeline=None, mqtt=None):
     r.add_post("/api/v1/notify/preview", handle_preview_rule)
     r.add_post("/api/v1/notify/test", handle_test_rule)
     r.add_get("/api/v1/audio/{uid}.ogg", handle_audio)
+    r.add_get("/api/v1/audio/{kind:reception}/{uid}.ogg", handle_audio)
     r.add_get("/api/v1/stations", handle_stations)
     r.add_get("/api/v1/incidents", handle_incidents)
     r.add_post("/api/v1/incidents/backfill", handle_incidents_backfill)
@@ -622,9 +718,13 @@ def create_web_app(pipeline=None, mqtt=None):
     r.add_get("/api/v1/incidents/{incident_id:\\d+}", handle_incident)
     r.add_get("/api/v1/trafikverket", handle_trafikverket)
     r.add_get("/api/v1/nodes", handle_nodes)
+    r.add_get("/api/v1/nodes/pending", handle_join_requests)
+    r.add_post("/api/v1/nodes/pending/{request_id}/approve", handle_approve_join)
+    r.add_post("/api/v1/nodes/pending/{request_id}/reject", handle_reject_join)
     r.add_post("/api/v1/nodes", handle_create_node)
     r.add_post("/api/v1/nodes/{node_id}/rotate", handle_rotate_node)
     r.add_patch("/api/v1/nodes/{node_id}", handle_update_node)
+    r.add_post("/api/v1/nodes/{node_id}/recalibrate", handle_recalibrate)
     r.add_delete("/api/v1/nodes/{node_id}", handle_delete_node)
     if SHARED_DIR.exists():
         r.add_static("/static/shared/", SHARED_DIR, show_index=False)

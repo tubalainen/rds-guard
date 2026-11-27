@@ -1,6 +1,6 @@
 """Ingest API for satellites — the only part of the aggregator on the internet.
 
-Implements docs/uplink-protocol.md (version 1). Every response, errors
+Implements docs/uplink-protocol.md (version 2). Every response, errors
 included, carries the protocol header so a satellite can tell the
 aggregator's answers apart from those of a proxy or a wrong URL.
 
@@ -11,6 +11,8 @@ touch its own events.
 
 import asyncio
 import functools
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -26,7 +28,7 @@ from . import config, store
 
 log = logging.getLogger("rds-aggregator")
 
-PROTOCOL_VERSION = "1"
+PROTOCOL_VERSION = "2"
 PROTOCOL_HEADER = "X-RDS-Guard-Protocol"
 
 EVENT_TYPES = ("traffic", "emergency")
@@ -135,6 +137,8 @@ def validate_event(body):
         "ended_at": _opt_ts(body, "ended_at"),
         "duration_sec": _opt_int(body, "duration_sec", 0, 86400),
         "sent_at": _opt_ts(body, "sent_at", required=True),
+        # Which of the satellite's receivers heard it (protocol 2)
+        "receiver": _opt_str(body, "receiver", 32) or "0",
     }
     if ev["type"] not in EVENT_TYPES:
         raise ValidationError(f"'type' must be one of {', '.join(EVENT_TYPES)}")
@@ -172,17 +176,12 @@ def _num(val):
     return val
 
 
-def clean_heartbeat(body):
-    """Reduce a heartbeat body to known, length-capped fields."""
-    if not isinstance(body, dict):
-        raise ValidationError("body must be a JSON object")
-    pipe = body.get("pipeline") if isinstance(body.get("pipeline"), dict) else {}
-    stations = body.get("stations") if isinstance(body.get("stations"), list) else []
-    clean_stations = []
-    for st in stations[:8]:
+def _clean_stations(stations, limit=8):
+    out = []
+    for st in (stations if isinstance(stations, list) else [])[:limit]:
         if not isinstance(st, dict):
             continue
-        clean_stations.append({
+        out.append({
             "frequency": _cap(st.get("frequency"), 16),
             "pi": _cap(st.get("pi"), 16),
             "ps": _cap(st.get("ps"), 64),
@@ -193,6 +192,40 @@ def clean_heartbeat(body):
             "groups_per_sec": _num(st.get("groups_per_sec")),
             "groups_total": _num(st.get("groups_total")),
         })
+    return out
+
+
+def _clean_receivers(receivers):
+    """The satellite's receivers (one per RTL-SDR, protocol 2, v1.0)."""
+    out = []
+    for r in (receivers if isinstance(receivers, list) else [])[:8]:
+        if not isinstance(r, dict):
+            continue
+        quality = r.get("quality") if isinstance(r.get("quality"), dict) else {}
+        out.append({
+            "id": _cap(r.get("id"), 32),
+            "serial": _cap(r.get("serial"), 32),
+            "name": _cap(r.get("name"), 32),
+            "state": _cap(r.get("state"), 32),
+            "error": _cap(r.get("error"), 256),
+            "gain": _num(r.get("gain")),
+            "gain_mode": _cap(r.get("gain_mode"), 16),
+            "ppm": _num(r.get("ppm")),
+            "ppm_mode": _cap(r.get("ppm_mode"), 16),
+            "calibrated_at": _cap(r.get("calibrated_at"), 32),
+            "calibration": _cap(r.get("calibration"), 64),
+            "quality": {_cap(k, 16): _num(v) for k, v in list(quality.items())[:8]},
+            "stations": _clean_stations(r.get("stations"), 4),
+        })
+    return out
+
+
+def clean_heartbeat(body):
+    """Reduce a heartbeat body to known, length-capped fields."""
+    if not isinstance(body, dict):
+        raise ValidationError("body must be a JSON object")
+    pipe = body.get("pipeline") if isinstance(body.get("pipeline"), dict) else {}
+    clean_stations = _clean_stations(body.get("stations"))
     sent_at = body.get("sent_at")
     if not isinstance(sent_at, str) or not _TS_RE.match(sent_at):
         sent_at = None
@@ -209,9 +242,12 @@ def clean_heartbeat(body):
                 "error": _cap(pipe.get("error"), 256),
             },
             "stations": clean_stations,
+            "receivers": _clean_receivers(body.get("receivers")),
             "queue_depth": _num(body.get("queue_depth")),
-            # "Ort, Län" the satellite owner gave (NODE_LOCATION)
-            "location": _cap(body.get("location"), 80),
+            # "Ort, Län" the satellite owner gave (NODE_LOCATION); the
+            # owner of the aggregator can set another under Admin -> Noder
+            "location": _cap(body.get("suggested_location")
+                             or body.get("location"), 80),
             "local_processing": (body.get("local_processing")
                                  if isinstance(body.get("local_processing"), bool)
                                  else None),
@@ -255,6 +291,31 @@ class RateLimiter:
 
 
 LIMITER = web.AppKey("limiter", RateLimiter)
+JOIN_LIMITER = web.AppKey("join_limiter", RateLimiter)
+
+
+def verify_code(join_id):
+    """Short code shown in the satellite's log and in Admin (same formula
+    as the satellite's uplink.verify_code)."""
+    digest = hashlib.sha256(join_id.encode("utf-8")).digest()
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    chars = [alphabet[b % len(alphabet)] for b in digest[:6]]
+    return "".join(chars[:3]) + "-" + "".join(chars[3:])
+
+
+def client_address(request):
+    """The client's address; X-Forwarded-For only from a trusted proxy."""
+    peer = request.remote or ""
+    if peer in config.TRUSTED_PROXIES:
+        # The client may write any X-Forwarded-For it likes; each trusted
+        # proxy appends the address it got the request from. Take the last
+        # address that is not one of ours.
+        hops = [h.strip() for h in request.headers.get("X-Forwarded-For", "").split(",")
+                if h.strip()]
+        for hop in reversed(hops):
+            if hop not in config.TRUSTED_PROXIES:
+                return hop[:64]
+    return peer[:64]
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +345,8 @@ async def auth_middleware(request, handler):
     if request.headers.get(PROTOCOL_HEADER) != PROTOCOL_VERSION:
         return _error(426, "unsupported_protocol",
                       f"this aggregator speaks protocol {PROTOCOL_VERSION}")
+    if request.path == JOIN_PATH:
+        return await handler(request)      # authenticates by itself
     auth = request.headers.get("Authorization", "")
     token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
     node = await _run(store.authenticate, token) if token else None
@@ -331,7 +394,9 @@ async def handle_put_event(request):
     except ValidationError as e:
         return _error(422, "invalid", str(e))
 
-    result, prev_state, row = await _run(store.upsert_event, node["id"], uid, ev)
+    result, prev_state, row = await _run(
+        store.upsert_event, node["id"], uid, ev, config.MATCH_WINDOW_SEC,
+        config.BROADCAST_END_GRACE_SEC)
     await _run(store.touch_node, node["id"])
     if result == store.CONFLICT:
         return _error(409, "conflict", "event id belongs to another node")
@@ -354,8 +419,8 @@ async def handle_put_audio(request):
         uid = _uid(request)
     except ValidationError as e:
         return _error(422, "invalid", str(e))
-    row = await _run(store.get_event, uid)
-    if row is None or row["node_id"] != node["id"]:
+    rec = await _run(store.get_reception, uid)
+    if rec is None or rec["node_id"] != node["id"]:
         return _error(404, "not_found", "no such event for this node")
 
     if request.content_length is not None and request.content_length > config.MAX_AUDIO_BYTES:
@@ -368,8 +433,8 @@ async def handle_put_audio(request):
 
     filename = f"{uid}.ogg"   # named by the server, never by the client
     await _run(_write_audio, Path(config.AUDIO_DIR) / filename, body)
-    status = "queued" if config.TRANSCRIPTION_ENGINE != "none" else None
-    row = await _run(store.set_event_audio, node["id"], uid, filename, status)
+    row = await _run(store.set_event_audio, node["id"], uid, filename, None,
+                     len(body))
     await _run(store.touch_node, node["id"])
     if row is None:   # deleted while we were writing
         await _run(_remove_audio, filename)
@@ -395,12 +460,16 @@ async def handle_delete_event(request):
         uid = _uid(request)
     except ValidationError as e:
         return _error(422, "invalid", str(e))
-    row = await _run(store.delete_event, node["id"], uid)
+    res = await _run(store.delete_event, node["id"], uid)
     await _run(store.touch_node, node["id"])
-    if row is None:
+    if res is None:
         return _error(404, "not_found", "no such event for this node")
-    await _run(_remove_audio, row.get("audio_path"))
-    request.app[HOOKS].on_delete(row)
+    rec, before, after = res
+    await _run(_remove_audio, rec.get("audio_path"))
+    if after is None:
+        request.app[HOOKS].on_delete(before)     # the broadcast went with it
+    else:
+        request.app[HOOKS].on_event(after, before["state"])
     return web.json_response({"status": "deleted"})
 
 
@@ -413,7 +482,83 @@ async def handle_heartbeat(request):
     await _run(store.record_heartbeat, node["id"], hb["node_name"],
                hb["version"], hb["status"], clock_offset(hb["sent_at"]))
     request.app[HOOKS].on_heartbeat(await _run(store.get_node, node["id"]))
-    return web.json_response({"server_time": store.now_iso()})
+    answer = {"server_time": store.now_iso()}
+    commands = await _run(store.take_node_commands, node["id"])
+    if commands:
+        answer["commands"] = commands
+    return web.json_response(answer)
+
+
+JOIN_PATH = "/api/v1/ingest/join"
+
+
+def _bearer(request):
+    auth = request.headers.get("Authorization", "")
+    return auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+
+
+async def handle_join(request):
+    """POST /join — a satellite asks to become a node, with a token it made
+    itself. Pending until the owner approves it (Admin -> Noder or the
+    nodes CLI); a matching JOIN_KEY approves at once. Nothing secret is
+    sent back, so the satellite simply asks again until approved."""
+    address = client_address(request)
+    limiter = request.app[JOIN_LIMITER]
+    if not limiter.allow(f"ip:{address}") or not limiter.allow("all"):
+        return _error(429, "rate_limited", "too many join requests")
+    token = _bearer(request)
+    if len(token) < 32 or len(token) > 256:
+        return _error(401, "unauthorized", "a join needs the satellite's own "
+                                           "token (at least 32 characters)")
+    try:
+        body = await _read_json(request)
+        if not isinstance(body, dict):
+            raise ValidationError("body must be a JSON object")
+        join_id = body.get("join_id")
+        if not valid_uid(join_id):
+            raise ValidationError("'join_id' must be a lowercase UUID")
+        info = {
+            "node_name": _opt_str(body, "node_name", 64),
+            "version": _opt_str(body, "version", 64),
+            "suggested_location": _opt_str(body, "suggested_location", 80),
+            "stations": [
+                {"frequency": _cap(st.get("frequency"), 16), "pi": _cap(st.get("pi"), 16),
+                 "ps": _cap(st.get("ps"), 64)}
+                for st in (body.get("stations") or [])[:8] if isinstance(st, dict)],
+        }
+        join_key = body.get("join_key")
+        if join_key is not None and not isinstance(join_key, str):
+            raise ValidationError("'join_key' must be a string")
+    except ValidationError as e:
+        return _error(422, "invalid", str(e))
+
+    node = await _run(store.authenticate, token)
+    if node is not None:
+        if not node["enabled"]:
+            return _error(403, "node_disabled",
+                          "this node has been disabled by the aggregator's owner")
+        return web.json_response({"status": "approved", "node": node["name"]})
+
+    if join_key:
+        if not config.JOIN_KEY or not hmac.compare_digest(
+                join_key.encode("utf-8"), config.JOIN_KEY.encode("utf-8")):
+            return _error(403, "rejected", "join refused")
+    verify = verify_code(join_id)
+    status, req = await _run(store.record_join_request, token, join_id, verify,
+                             info, address, config.JOIN_MAX_PENDING)
+    if status == "conflict":
+        return _error(409, "conflict", "this join id belongs to another token")
+    if status == "full":
+        return _error(429, "too_many_pending", "too many satellites are waiting "
+                                               "for approval")
+    if status == store.JOIN_REJECTED:
+        return _error(403, "rejected", "join refused")
+    if join_key:   # matches JOIN_KEY: approve at once
+        name = await _run(store.free_name, info["node_name"] or f"Nod {verify}")
+        node = await _run(store.approve_join, req["id"], name,
+                          info["suggested_location"])
+        return web.json_response({"status": "approved", "node": node["name"]})
+    return web.json_response({"status": "pending", "verify": verify}, status=202)
 
 
 # ---------------------------------------------------------------------------
@@ -429,10 +574,12 @@ def create_ingest_app(hooks=None, limiter=None):
     app[HOOKS] = hooks or Hooks()
     app[LIMITER] = limiter or RateLimiter(config.INGEST_RATE_PER_MIN,
                                           config.INGEST_BURST)
+    app[JOIN_LIMITER] = RateLimiter(config.JOIN_RATE_PER_MIN, config.JOIN_RATE_PER_MIN)
     base = "/api/v1/ingest"
     uid = "{uid}"
     app.router.add_put(f"{base}/events/{uid}", handle_put_event)
     app.router.add_put(f"{base}/events/{uid}/audio", handle_put_audio)
     app.router.add_delete(f"{base}/events/{uid}", handle_delete_event)
     app.router.add_post(f"{base}/heartbeat", handle_heartbeat)
+    app.router.add_post(JOIN_PATH, handle_join)
     return app

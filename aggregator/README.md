@@ -19,7 +19,11 @@ local events, transcriptions, web UI and MQTT. The protocol is in
 ## What it does
 
 - Receives events, audio and status from any number of satellites, each
-  with its own token that can be revoked at any time
+  with its own token that can be revoked at any time. A new satellite asks
+  to join and you approve it (or a shared `JOIN_KEY` approves it)
+- One broadcast heard by several satellites is **one event**: transcribed
+  once (the longest recording), alerted and pushed once, with every node
+  that heard it and each one's own recording
 - Transcribes all audio centrally with ElevenLabs Scribe, falling back to the bundled Swedish KB-Whisper model (or a remote Whisper server)
 - Web UI on your LAN, the same as on the satellites (in Swedish): an
   archive calendar over all stations, search in transcriptions filtered by
@@ -184,14 +188,14 @@ From any computer on the internet:
 curl -i https://rds.example.com/api/v1/ingest/heartbeat
 ```
 
-The right answer is **HTTP 426** with the header `X-RDS-Guard-Protocol: 1`
+The right answer is **HTTP 426** with the header `X-RDS-Guard-Protocol: 2`
 and the body `{"error": "unsupported_protocol", …}`. It means the request
 went all the way to the ingest port, which refused it because `curl` is not
 a satellite.
 
 | Answer | Meaning |
 |---|---|
-| 426 with `X-RDS-Guard-Protocol: 1` | Everything is connected |
+| 426 with `X-RDS-Guard-Protocol: 2` | Everything is connected |
 | 404 without that header, and `https://rds.example.com/` shows the web UI | The proxy forwards to port 8080. Change it to `8081` right away: the web UI has no login |
 | 502 or 504 | The proxy cannot reach the aggregator: check the forward address and port, and that the container runs (`docker compose ps`) |
 | 403 from Cloudflare | See [Bot protection](#bot-protection) |
@@ -219,49 +223,76 @@ such answers; they keep it queued and retry.
 
 ## Adding a satellite
 
-**In the web UI:** Admin → Noder → type a name (e.g. `Kalle, Karlstad`) → *Lägg
-till nod*. The token is shown once, together with the lines to send.
+A satellite only needs this aggregator's address. It asks to join, and you
+approve it:
 
-**Or from the command line:**
-
-```bash
-docker compose exec aggregator python3 -m aggregator.nodes add "Kalle, Karlstad"
-```
-
-Other commands: `list`, `rotate`, `disable`, `enable`, `remove`. Only a
-hash of each token is stored, so a lost token cannot be shown again;
-rotate it instead.
-
-### Instructions for the satellite owner
-
-Send your friend the three lines and a link to
-[Run as a satellite](../README.md#run-as-a-satellite) in the main README. In
-short:
-
-1. Install RDS Guard by following its [Quick start](../README.md#quick-start),
-   with the frequency of the local P4 station, and check that it decodes.
-2. Add the three lines to `.env`, and where the receiver is:
+1. Send your friend the address (`PUBLIC_URL`) and a link to
+   [A satellite on another machine](../README.md#a-satellite-on-another-machine) in the main README.
+   In short, they add to their `.env`:
 
 ```bash
-UPLINK_URL=https://rds.example.com
-UPLINK_TOKEN=…
+AGGREGATOR_URL=https://rds.example.com
 NODE_NAME=Kalle, Karlstad
 NODE_LOCATION=Karlstad, Värmlands län
 ```
 
-   `NODE_LOCATION` ("Ort, Län") is how the aggregator knows where the
-   node's messages are from; without it they are not placed on the map.
-   You can also set or correct it yourself under **Admin → Noder → Ändra
-   plats**; that place wins over the one the node reports.
-   The owner can also choose `LOCAL_PROCESSING=false`: the satellite then
-   only records and sends, and this aggregator does all transcription and
-   mapping (see [Who processes the recordings](../README.md#who-processes-the-recordings-your-choice)).
+2. When their satellite starts, it shows up under **Admin → Noder → Väntar
+   på godkännande**, with its stations, suggested place and a code like
+   `K7Q-3PD`. Their log shows the same code: compare them, then
+   **Godkänn** (choose the name and place) or **Avvisa**. **Ersätt
+   befintlig nod** gives an existing node the new satellite's token and keeps
+   its history (for example after they reinstalled).
 
-3. Restart with `docker compose up -d`.
+3. Within a minute the node turns green. Until you approve it, the satellite
+   records as usual and queues everything; nothing is lost.
 
-The satellite's status bar shows `uplink` in green when it is connected, and
-the node turns green under **Admin → Noder** here within a minute. No ports need to be
-opened at the satellite.
+**From the command line** (also when Admin is off, `ADMIN_PASSWORD` empty):
+
+```bash
+docker compose exec aggregator python3 -m aggregator.nodes pending
+```
+
+```bash
+docker compose exec aggregator python3 -m aggregator.nodes approve K7Q-3PD --name "Kalle" --location "Karlstad, Värmlands län"
+```
+
+`reject K7Q-3PD` rejects one. A request that is not repeated for 24 hours
+is forgotten.
+
+**`JOIN_KEY`:** a satellite that sends the same secret as this
+aggregator's `JOIN_KEY` is approved at once. Use it for your own satellites
+(the main `docker-compose.yml` shares one `.env`); do not give it to people
+you would not approve anyway.
+
+**A token instead:** *Admin → Noder → Lägg till nod* (or `nodes add
+"Kalle, Karlstad"`) still makes a node with a token, shown once, for
+`UPLINK_TOKEN` on the satellite. Other commands: `list`, `rotate`,
+`disable`, `enable`, `remove`. Only a hash of each token is stored.
+
+`NODE_LOCATION` ("Ort, Län") is how the aggregator knows where a node's
+messages are from; without it they are not placed on the map. You can set or
+correct it yourself under **Admin → Noder → Ändra plats**; that place wins
+over the one the node suggests.
+
+## One broadcast, several satellites
+
+When several satellites (or receivers) hear the same broadcast, each sends
+its own reception, and the aggregator folds them into one event: the same
+type and PI, starting within `MATCH_WINDOW_SEC` (30 s) of it or while it is
+going on, on the aggregator's clock (each node's clock offset is applied).
+
+- **One transcription:** once every reception has sent its recording, or
+  `BEST_AUDIO_WAIT_SEC` (10 s) after the first, the longest is transcribed.
+  With one reception there is no wait. Each node's recording can be played
+  in the event's view (*Hörd av*).
+- **One alert and one push.** `node` in the alert is the node whose
+  recording was transcribed, and `nodes` lists every node that heard it.
+  Push rules limited to a node, and the search's node filter, match every
+  broadcast that node heard.
+- **No hanging broadcasts:** it ends when all receptions have ended, or
+  `BROADCAST_END_GRACE_SEC` (120 s) after one did, if another node went
+  silent.
+- Removing a node keeps the broadcasts other nodes heard too.
 
 ## Configuration
 
@@ -301,6 +332,12 @@ All settings are in `.env`; see [.env.example](.env.example).
 | `ALERT_MAX_DELAY_MIN` | `60` | Events that ended longer ago (delivered late after an outage) are stored but not alerted |
 | `NODE_OFFLINE_SEC` | `120` | A node is offline after this long without a heartbeat |
 | `INGEST_RATE_PER_MIN` / `INGEST_BURST` | `120` / `60` | Request budget per node |
+| `JOIN_KEY` | | A satellite with the same `JOIN_KEY` is approved at once. Empty: every new satellite waits for approval |
+| `JOIN_RATE_PER_MIN` / `JOIN_MAX_PENDING` / `JOIN_PENDING_HOURS` | `12` / `20` / `24` | Join requests per address (and in total) per minute, satellites waiting at most, hours a request is kept |
+| `TRUSTED_PROXIES` | | Your reverse proxy's address(es), comma-separated: then `X-Forwarded-For` names the client for the join limit |
+| `MATCH_WINDOW_SEC` | `30` | Receptions starting this close are one broadcast (see [One broadcast, several satellites](#one-broadcast-several-satellites)) |
+| `BEST_AUDIO_WAIT_SEC` | `10` | Wait this long for more recordings of a broadcast before transcribing the longest |
+| `BROADCAST_END_GRACE_SEC` | `120` | A broadcast ends this long after one of its receptions ended |
 
 The Swedish KB-Whisper model is bundled in the image, so local transcription
 needs no download. A model you set with `TRANSCRIPTION_MODEL` is downloaded
@@ -326,7 +363,8 @@ rds-aggregator/aggregator/status             # Aggregator online/offline (retain
 `alert` uses the same fields as a satellite's `rds/alert` (`event_type`,
 `state`, `station`, `frequency`, `started`, `ended`, `duration_sec`,
 `radiotext`, `audio_available`, `transcribed_text`,
-`transcription_status`, `event_id`, `timestamp`) plus `node.name`. It is
+`transcription_status`, `event_id`, `timestamp`) plus `node.name` (whose
+recording was transcribed) and `nodes` (every node that heard it). It is
 published once per event, after the transcription is done or after the
 wait times above, and never twice, even across restarts.
 `{node}` is the node name in lower case, with å/ä/ö turned into a/a/o and
@@ -339,8 +377,9 @@ other characters into `-`.
 | `GET /api/v1/events` | Events, newest first. Params: `type`, `pi`, `node`, `since`, `q` (words in RadioText/transcription), `from`/`to` (UTC start time), `active` (`1`/`0`), `limit` (≤ 200), `offset` |
 | `GET /api/v1/calendar` | Light rows for the whole retention period |
 | `GET /api/v1/events/active` | Events in progress |
-| `GET /api/v1/events/{event_uid}` | One event |
-| `GET /api/v1/audio/{event_uid}.ogg` | Audio |
+| `GET /api/v1/events/{event_uid}` | One event, with `nodes` and `receptions` (each node's start, end and recording) |
+| `GET /api/v1/audio/{event_uid}.ogg` | Audio (the transcribed recording) |
+| `GET /api/v1/audio/reception/{uid}.ogg` | One node's own recording of a broadcast |
 | `GET /api/v1/stations` | Stations seen, with the nodes that reported them |
 | `GET /api/v1/incidents` | Incidents for the map, with the nodes that heard them. Params: `hours` (default 12), `history=1` (all stored, plus how far placing the older messages has come) |
 | `POST /api/v1/incidents/backfill` | Place the messages stored before the map existed (once, in the background; JSON body `{}`). Messages from nodes without `NODE_LOCATION` wait until the node reports one |
@@ -349,7 +388,9 @@ other characters into `-`.
 | `GET /api/v1/status` | Aggregator status |
 | `POST /api/v1/nodes` | `{"name": "…"}` → node, token and setup lines |
 | `POST /api/v1/nodes/{id}/rotate` | New token |
-| `PATCH /api/v1/nodes/{id}` | `{"enabled": true\|false}` |
+| `PATCH /api/v1/nodes/{id}` | `{"enabled": true\|false}` and/or `{"location": "Ort, Län"\|null}` |
+| `GET /api/v1/nodes/pending` | Satellites waiting to be approved |
+| `POST /api/v1/nodes/pending/{id}/approve`\|`reject` | `{"name", "location", "replace_node_id"}` (all optional) |
 | `DELETE /api/v1/nodes/{id}` | Remove node and its events |
 | `GET /api/v1/admin/session`, `POST /api/v1/admin/login`\|`logout` | Admin login (session cookie) |
 | `GET /api/v1/notify` | Push rules and the MQTT connection (needs Admin login, as do all `/api/v1/notify*`) |
@@ -377,7 +418,7 @@ browser, come from the same origin.
 
 ## Importing a satellite's history
 
-A standalone RDS Guard's events, audio, transcriptions, map and push rules
+An RDS Guard up to v0.10 (its `events.db`): its events, audio, transcriptions, map and push rules
 can be copied into the aggregator, as the events of one node:
 
 ```bash
@@ -389,6 +430,18 @@ Mount the satellite's data folder read-only at `/import` (the main
 setup lines are printed. Nothing is transcribed or pushed again; events the
 aggregator already has (for example from the uplink) are skipped, so it can
 run again; `--dry-run` shows what it would do.
+
+## Transcribing the archive again
+
+```bash
+docker compose exec aggregator python3 -m aggregator.retranscribe
+```
+
+shows how many recordings there are and what it would cost; `--yes` does
+it, oldest first, with the aggregator's engine and each node's place names
+(`--limit 5`, `--since 2026-11-20`, `--node "Kalle"`, `--engine local`).
+ElevenLabs is about 2–3 öre per message; local is free. It prints a line per
+message. Then rebuild the map: **Admin → Karta → Bygg om kartan**.
 
 ## Operations
 

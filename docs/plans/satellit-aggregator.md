@@ -1,6 +1,6 @@
 # Plan: satellit + aggregator som enda arkitektur
 
-Status 2026-11-27: fas 0 klar (planen i repot), fas 1 byggd (v0.10.0: compose med båda, import, nodens plats i Admin, mätverktygen i aggregatorn). Fas 2–4 återstår. Kartändringarna på master samma dag (v0.9.0–v0.9.2) är införda, se "Kartan: ändringar efter att planen skrevs". v0.10.1: en tom karta erbjuder historiken (importen fungerade; valet att visa historiken sparas per adress). v0.10.2: aggregatorns karta får kartbilder från OSM igen (Referer skickas). v0.10.3: kartan dubbleras inte när en nod tas bort och historiken importeras igen.
+Status 2026-11-27: fas 0 klar (planen i repot), fas 1 byggd (v0.10.0: compose med båda, import, nodens plats i Admin, mätverktygen i aggregatorn). Fas 2 byggd (v0.11.0: protokoll 2, anslutning genom godkännande och JOIN_KEY, två köer i outboxen, en sändning hörd av flera noder blir en händelse, aggregator.retranscribe, livscykeltest av RulesEngine). Fas 2 släpptes inte för sig utan kommer med fas 3 i v1.0.0. Fas 3 byggd (headless satellit med satellite.db och spool, receivers.yml med serienummer, en rtl_sdr + channelizer per dongel, automatisk gain och ppm med Admin-knapp, hälsokontroll, compose utan satellitport, ny README och release notes v1.0.0). Avvikelse: aggregatorns webb ligger kvar på 8080 (proxyn på docker01 pekas om), inte 8022. Arkitekturdiagrammet regenereras i fas 4 (Archify saknas i sessionen). Före release: en mätning på docker01 av vilken sida av mittfrekvensen stationen hamnar och dongelns ppm. Fas 4 återstår. Kartändringarna på master samma dag (v0.9.0–v0.9.2) är införda, se "Kartan: ändringar efter att planen skrevs". v0.10.1: en tom karta erbjuder historiken (importen fungerade; valet att visa historiken sparas per adress). v0.10.2: aggregatorns karta får kartbilder från OSM igen (Referer skickas). v0.10.3: kartan dubbleras inte när en nod tas bort och historiken importeras igen.
 
 ## Bakgrund
 
@@ -393,7 +393,7 @@ med en statusrad överst som uppdateras efter varje fas (som `placering-v2.md`).
   historiken importeras, satelliten får `LOCAL_PROCESSING=false` och aggregatorns
   gränssnitt används. Det testar målbilden innan något tas bort.
 
-**Fas 2, v0.11.0: protokoll v2 och sammanslagning** (båda sidor samtidigt; vänners
+**Fas 2, v0.11.0 (byggd): protokoll v2 och sammanslagning** (båda sidor samtidigt; vänners
 satelliter måste uppdateras)
 - Anslutningsflödet (`join`, väntande noder, `JOIN_KEY`, verifieringskod, CLI).
 - `receiver` i händelser (`"0"` tills vidare); två köer i outboxen med väckning.
@@ -512,5 +512,5 @@ Det som återanvänds: outbox och kollaps (`event_store._queue`, `outbox_*`),
 - `rds.tuben.org` pekar i dag på satellitens gränssnitt. Det ska peka på aggregatorns
   webbport, som inte har inloggning för arkivet, precis som satellitens i dag. Ingest
   (8081) får en egen adress eller sökväg om vänner ska ansluta över internet.
-- Aggregatorns webbport är 8080. I den gemensamma compose-filen mappas den till 8022 som
-  standard (`WEB_UI_PORT`), så att bokmärken och proxyn på docker01 fungerar som förut.
+- Aggregatorns webbport är 8080, även i den gemensamma compose-filen (beslut i fas 3d:
+  proxyn och bokmärkena på docker01 pekas om från 8022 till 8080 vid uppgraderingen).

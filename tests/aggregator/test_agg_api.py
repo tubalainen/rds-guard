@@ -30,6 +30,7 @@ def event(agg_store, tmp_path):
     audio.mkdir(exist_ok=True)
     (audio / f"{UID}.ogg").write_bytes(b"OggS1234")
     agg_store.set_event_audio(node["id"], UID, f"{UID}.ogg", None)
+    agg_store.choose_audio(agg_store.get_event(UID)["id"], None, 10)
     agg_store.set_transcription(UID, "Olycka", "done", 1.5)
     return node
 
@@ -76,7 +77,7 @@ async def test_node_admin_flow(web, agg_store, monkeypatch):
     r = await web.post("/api/v1/nodes", json={"name": "Lisa, Luleå"})
     assert r.status == 201
     res = await r.json()
-    assert res["snippet"].startswith("UPLINK_URL=https://rds.example.com\n")
+    assert res["snippet"].startswith("AGGREGATOR_URL=https://rds.example.com\n")
     assert agg_store.authenticate(res["token"])["name"] == "Lisa, Luleå"
     node_id = res["node"]["id"]
 

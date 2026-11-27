@@ -61,7 +61,7 @@ def response(situations, lastchangeid="100"):
 
 @pytest.fixture
 def tstore(store):
-    """The satellite's TrvStore on a fresh database."""
+    """The TrvStore on a fresh database."""
     return store.trv
 
 
@@ -145,7 +145,7 @@ def test_new_deviation_and_its_updates_make_a_timeline(tstore):
     first, second = d["versions"]
     assert first["changes"]["severity_text"] == "Stor påverkan"
     assert set(second["changes"]) == {"message", "end_time"}
-    assert second["version_time"] == "2026-11-26T12:40:00"
+    assert second["version_time"] == "2026-11-26T12:40:00Z"   # the aggregator's form
 
 
 def test_removed_situation_and_vanished_deviation_are_marked_deleted(tstore):
@@ -265,18 +265,3 @@ def test_no_key_no_feed(tstore):
 
 # ------------------------------------------------------------------ API
 
-async def test_satellite_api_and_status(aiohttp_client, store, monkeypatch):
-    import rds_guard as rg
-    import web_server
-    store.trv.apply([situation()])
-    feed = trv.TrafikverketFeed("k", store.trv, lambda: [KARLSTAD],
-                                post=FakeApi())
-    monkeypatch.setattr(rg, "trv_feed", feed)
-    client = await aiohttp_client(web_server.create_app())
-    data = await (await client.get("/api/trafikverket")).json()
-    [d] = data["deviations"]
-    assert d["id"] == "D1" and d["versions"][0]["changes"]["road_number"] == "E18"
-    assert data["trafikverket"]["enabled"] is True
-    monkeypatch.setattr(rg, "trv_feed", None)
-    data = await (await client.get("/api/trafikverket")).json()
-    assert data["trafikverket"]["enabled"] is False

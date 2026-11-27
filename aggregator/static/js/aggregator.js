@@ -66,11 +66,29 @@ const Aggregator = (() => {
 
     function nodeCard(n) {
         const state = !n.enabled ? ['', 'Inaktiverad'] : (n.online ? ['ok', 'Online'] : ['warn', 'Offline']);
-        const stations = (n.stations || []).map((s) => [s.ps || s.pi || 'ingen station än',
+        const stationLine = (s) => [s.ps || s.pi || 'ingen station än',
             RDSUI.fmtFreq(s.frequency), s.pi && s.ps ? `PI ${s.pi}` : '',
             s.groups_per_sec != null ? `${s.groups_per_sec} grp/s` : '',
             s.ta ? 'TA pågår' : (s.tp ? 'TP' : '')]
-            .filter(Boolean).join(' · '));
+            .filter(Boolean).join(' · ');
+        const stations = (n.stations || []).map(stationLine);
+        const recState = { running: ['ok', 'kör'], starting: ['warn', 'startar'], paused: ['warn', 'kalibreras'],
+            error: ['bad', 'fel'], stopped: ['warn', 'stoppad'] };
+        const receivers = (n.receivers || []).map((r) => {
+            const [cls, label] = recState[r.state] || ['warn', r.state || '?'];
+            const tune = [r.gain != null ? `gain ${r.gain} dB${r.gain_mode === 'manual' ? ' (fast)' : ''}` : '',
+                r.ppm != null ? `${r.ppm} ppm${r.ppm_mode === 'manual' ? ' (fast)' : ''}` : '',
+                r.calibrated_at ? `kalibrerad ${ago(r.calibrated_at)}` : (r.calibration ? r.calibration : '')]
+                .filter(Boolean).join(' · ');
+            return `<div class="small" style="border-left:2px solid var(--border-strong);padding-left:8px;display:flex;flex-direction:column;gap:2px">
+                <div><span class="dot ${cls}"></span> <b>${esc(r.name || r.id || r.serial || 'mottagare')}</b>
+                    <span class="muted">${esc(r.serial ? `SN ${r.serial}` : '')} · ${esc(label)}</span></div>
+                ${tune ? `<div class="muted">${esc(tune)}</div>` : ''}
+                ${(r.stations || []).map((s) => `<div>${esc(stationLine(s))}</div>`).join('')}
+                ${r.error ? `<div style="color:var(--warn)">${esc(r.error)}</div>` : ''}
+                ${r.gain_mode !== 'manual' && r.serial ? `<div><button class="btn small" type="button" data-action="recalibrate" data-receiver="${esc(r.id || r.serial)}">Kalibrera om</button></div>` : ''}
+            </div>`;
+        });
         const located = n.located ? `${n.located.name} (${n.located.lat.toFixed(3)}, ${n.located.lon.toFixed(3)})` : '';
         const place = n.location
             ? (located ? `Plats: ${n.location} → ${located}` : `Plats: ${n.location} – hittades inte i ortregistret`)
@@ -94,7 +112,8 @@ const Aggregator = (() => {
             ? ` <span class="small muted">(${esc(n.reported_name)})</span>` : ''}</h2>
                 <span class="pill ${state[0]}">${state[1]}</span>
             </div>
-            <div class="small">${stations.length ? stations.map((s) => `<div>${esc(s)}</div>`).join('') : '<span class="muted">Inga stationer rapporterade än</span>'}</div>
+            ${receivers.length ? `<div style="display:flex;flex-direction:column;gap:8px">${receivers.join('')}</div>`
+        : `<div class="small">${stations.length ? stations.map((s) => `<div>${esc(s)}</div>`).join('') : '<span class="muted">Inga stationer rapporterade än</span>'}</div>`}
             <div class="small">${esc(place)}${placeFrom ? ` <span class="muted">(${placeFrom})</span>` : ''}</div>
             <div class="small muted">${esc(meta.join(' · '))}</div>
             ${warn.length ? `<div class="small" style="color:var(--warn)">${esc(warn.join(' · '))}</div>` : ''}
@@ -132,14 +151,85 @@ const Aggregator = (() => {
                     <button class="btn small" type="button" id="done">Klar</button></div>
             </section>
             <p class="error-text" id="err" role="alert" hidden></p>
+            <section id="pending" hidden style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px">
+                <h2>Väntar på godkännande</h2>
+                <p class="small muted" style="margin:0">En satellit utan token ber om att få ansluta. Jämför koden med den i satellitens logg
+                    (<code>docker compose logs rds-guard | grep -i join</code>) innan du godkänner.</p>
+                <div id="pending-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px"></div>
+            </section>
             <div id="list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px"></div>`;
         const list = root.querySelector('#list');
         const err = root.querySelector('#err');
         const fail = (e) => { err.textContent = e.message; err.hidden = false; };
 
+        let knownNodes = [];
+        function pendingCard(p) {
+            const st = (p.stations || []).map((x) => [x.ps || x.pi, RDSUI.fmtFreq(x.frequency)].filter(Boolean).join(' · '));
+            return `<article class="card" data-pending="${p.id}" data-name="${esc(p.node_name || '')}"
+                    data-location="${esc(p.suggested_location || '')}" style="display:flex;flex-direction:column;gap:8px">
+                <div style="display:flex;align-items:center;gap:8px">
+                    <span class="dot warn"></span>
+                    <h2 style="flex:1;min-width:0;overflow-wrap:anywhere">${esc(p.node_name || 'Namnlös satellit')}</h2>
+                    <span class="pill warn">Kod ${esc(p.verify)}</span>
+                </div>
+                <div class="small">${st.length ? st.map((x) => `<div>${esc(x)}</div>`).join('') : '<span class="muted">Inga stationer än</span>'}</div>
+                <div class="small">${p.suggested_location ? `Föreslagen plats: ${esc(p.suggested_location)}` : '<span class="muted">Ingen plats angiven</span>'}</div>
+                <div class="small muted">${esc([p.address, p.version, `frågade ${ago(p.last_seen_at)}`].filter(Boolean).join(' · '))}</div>
+                <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:4px">
+                    <button class="btn small primary" type="button" data-action="approve">Godkänn</button>
+                    <button class="btn small" type="button" data-action="replace">Ersätt befintlig nod</button>
+                    <button class="btn small danger" type="button" data-action="reject">Avvisa</button>
+                </div>
+            </article>`;
+        }
+
+        async function loadPending() {
+            try {
+                const data = await api('GET', '/nodes/pending');
+                if (!ctx.alive()) return;
+                const box = root.querySelector('#pending');
+                box.hidden = !data.pending.length;
+                root.querySelector('#pending-list').innerHTML = data.pending.map(pendingCard).join('');
+            } catch (e) { /* the node list shows the error */ }
+        }
+
+        root.querySelector('#pending-list').addEventListener('click', async (e) => {
+            const btn = e.target.closest('button[data-action]');
+            if (!btn) return;
+            const card = btn.closest('[data-pending]');
+            const id = card.dataset.pending;
+            err.hidden = true;
+            try {
+                if (btn.dataset.action === 'reject') {
+                    if (!window.confirm('Avvisa satelliten? Den får veta att den är nekad.')) return;
+                    await api('POST', `/nodes/pending/${id}/reject`, {});
+                } else if (btn.dataset.action === 'replace') {
+                    const names = knownNodes.map((n) => n.name);
+                    const which = window.prompt(`Vilken nod ska satelliten ersätta? Dess historik behålls och den gamla token slutar fungera.\n\nNoder: ${names.join(', ')}`, '');
+                    if (which === null) return;
+                    const target = knownNodes.find((n) => n.name.toLowerCase() === which.trim().toLowerCase());
+                    if (!target) { fail(new Error(`Ingen nod heter ”${which}”.`)); return; }
+                    await api('POST', `/nodes/pending/${id}/approve`, { replace_node_id: target.id });
+                    toast(`Satelliten rapporterar nu som ${target.name}`);
+                } else {
+                    const name = window.prompt('Namn på noden:', card.dataset.name || '');
+                    if (name === null) return;
+                    const location = window.prompt('Var står den? ”Ort, Län”, t.ex. ”Karlstad, Värmlands län” (tomt = ingen plats än):',
+                        card.dataset.location || '');
+                    if (location === null) return;
+                    await api('POST', `/nodes/pending/${id}/approve`, { name: name.trim(), location: location.trim() || null });
+                    toast('Satelliten är godkänd');
+                }
+                loadPending();
+                load();
+                poll();
+            } catch (x) { fail(x); }
+        });
+
         async function load() {
             try {
                 const data = await api('GET', '/nodes');
+                knownNodes = data.nodes;
                 if (!ctx.alive()) return;
                 list.innerHTML = data.nodes.length ? data.nodes.map(nodeCard).join('')
                     : '<div class="empty">Inga noder än. Lägg till en ovan och skicka dess token till den som kör satelliten.</div>';
@@ -181,6 +271,10 @@ const Aggregator = (() => {
                     if (value === null) return;
                     await api('PATCH', `/nodes/${id}`, { location: value.trim() || null });
                     toast('Platsen är sparad');
+                } else if (btn.dataset.action === 'recalibrate') {
+                    if (!window.confirm(`Kalibrera om gain och ppm för mottagaren ”${btn.dataset.receiver}”? Den är ur drift i ungefär en och en halv minut (aldrig mitt i en sändning).`)) return;
+                    await api('POST', `/nodes/${id}/recalibrate`, { receiver: btn.dataset.receiver });
+                    toast('Kalibreringen startar vid nodens nästa hjärtslag');
                 } else if (btn.dataset.action === 'toggle') {
                     await api('PATCH', `/nodes/${id}`, { enabled: btn.dataset.enabled !== 'true' });
                 } else if (btn.dataset.action === 'remove') {
@@ -192,7 +286,8 @@ const Aggregator = (() => {
             } catch (x) { fail(x); }
         });
         await load();
-        const timer = setInterval(() => { if (!document.hidden) load(); }, 10000);
+        loadPending();
+        const timer = setInterval(() => { if (!document.hidden) { load(); loadPending(); } }, 10000);
         ctx.cleanup = () => clearInterval(timer);
     }
 

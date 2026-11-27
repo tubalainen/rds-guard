@@ -114,3 +114,47 @@ def test_emergency_is_pushed_at_start_only_once(node, monkeypatch):
     p.on_event(row, prev)
     p.sweep(now=time.time() + 120)
     assert mqtt.topics().count("notify/vma") == 1
+
+
+async def test_default_rules_are_seeded_once(web, agg_store):
+    data = await (await web.get("/api/v1/notify")).json()
+    assert [r["name"] for r in data["rules"]] == ["VMA", "Trafik"]
+    # a deleted default does not come back on the next start
+    agg_store.delete_rule(data["rules"][1]["id"])
+    notifier.init()
+    assert [r["name"] for r in agg_store.list_rules()] == ["VMA"]
+
+
+async def test_search_is_case_insensitive_for_swedish_letters(web, node, agg_store):
+    for i, (rt, start, text) in enumerate((
+            ("Olycka vid Häggvik", "2026-11-24T06:48:00Z", None),
+            ("Halka på väg 73", "2026-11-24T14:40:00Z", "Ishalka söder om Handen"),
+            ("Vägarbete Essingeleden", "2026-11-20T10:00:00Z", None))):
+        uid = f"4444444{i}-4444-4444-8444-444444444444"
+        _store_event(node, uid=uid, radiotext=[rt], started_at=start, ended_at=start,
+                     pi=f"0x{i}")
+        if text:
+            agg_store.set_transcription(uid, text, "done")
+
+    async def search(**params):
+        resp = await web.get("/api/v1/events", params=params)
+        return [e["radiotext"][0] for e in (await resp.json())["events"]]
+
+    assert await search(q="HÄGGVIK") == ["Olycka vid Häggvik"]
+    assert await search(q="ishalka") == ["Halka på väg 73"]
+    assert await search(q="väg halka") == ["Halka på väg 73"]
+    assert await search(q="100%") == []
+    assert len(await search(**{"from": "2026-11-24T00:00:00Z",
+                               "to": "2026-11-25T00:00:00Z"})) == 2
+
+
+async def test_rule_validation_and_unknown_rule(web):
+    rule = {"name": "Pendling", "event_types": ["traffic"], "keywords": ["E4"],
+            "days": [0, 1, 2, 3, 4]}
+    saved = await (await web.post("/api/v1/notify/rules", json=rule)).json()
+    assert saved["topic"] == "pendling"
+    resp = await web.put(f"/api/v1/notify/rules/{saved['id']}", json=dict(rule, enabled=False))
+    assert (await resp.json())["enabled"] is False
+    resp = await web.post("/api/v1/notify/rules", json={"name": "", "event_types": []})
+    assert resp.status == 422
+    assert (await web.put("/api/v1/notify/rules/999", json=rule)).status == 404

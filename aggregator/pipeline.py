@@ -102,6 +102,7 @@ def alert_payload(row, transcription_status, locations=None):
             for loc in (locations or []) if loc.get("trafikverket")],
         "event_id": row["event_uid"],
         "node": {"name": row.get("node_name")},
+        "nodes": [{"name": n} for n in (row.get("node_names") or [row.get("node_name")])],
         "timestamp": store.now_iso(),
     }
 
@@ -147,8 +148,17 @@ class Pipeline(Hooks):
         self._wake.set()
 
     def on_audio(self, row):
-        self.enqueue_transcription(row)
+        # With one reception the recording is chosen (and transcribed) now;
+        # with several, once all have sent theirs or after a short wait
+        self._choose_audio(row["id"])
         self._wake.set()
+
+    def _choose_audio(self, event_id, now=None):
+        status = "queued" if self._transcriber is not None else None
+        chosen = store.choose_audio(event_id, status, config.BEST_AUDIO_WAIT_SEC, now)
+        if chosen is not None:
+            self.enqueue_transcription(chosen)
+        return chosen
 
     def on_delete(self, row):
         # A discarded (too short) announcement: clear the TA flag again
@@ -180,9 +190,22 @@ class Pipeline(Hooks):
         location = store.node_location(store.get_node(node_id))
         return self._geo.locate_node(location) if location else None
 
+    def place_of(self, row):
+        """(place, "Ort, Län") of a broadcast: the transcribed node's, else
+        that of another node that heard it; (None, None) if none has one."""
+        if self._geo is None:
+            return None, None
+        ids = [row["node_id"]] + [i for i in store.event_node_ids(row["id"])
+                                  if i != row["node_id"]]
+        for node_id in ids:
+            place = self.node_place(node_id)
+            if place is not None:
+                return place, store.node_location(store.get_node(node_id))
+        return None, None
+
     def _hints(self, row):
         """The reporting node's place names, for the transcriber."""
-        place = self.node_place(row["node_id"]) if self._geo else None
+        place = self.place_of(row)[0] if self._geo else None
         if place is None:
             return None
         try:
@@ -198,11 +221,10 @@ class Pipeline(Hooks):
             return
         uid = row["event_uid"]
         try:
-            place = self.node_place(row["node_id"])
+            place, location = self.place_of(row)
             if place is None:
                 store.save_geolocation(uid, None, "no_location")
                 return
-            location = store.node_location(store.get_node(row["node_id"]))
             result = self._geo.locate(text, place.point, location,
                                       row.get("radiotext"),
                                       store.open_incidents(place.point))
@@ -225,10 +247,9 @@ class Pipeline(Hooks):
     def _place_older(self, row):
         """Place one message stored before the map existed. No alert: it
         was broadcast long ago. None: its node has no location (yet)."""
-        place = self.node_place(row["node_id"])
+        place, location = self.place_of(row)
         if place is None:
             return None
-        location = store.node_location(store.get_node(row["node_id"]))
         result = self._geo.locate(row["transcription"], place.point, location,
                                   row.get("radiotext"),
                                   store.open_incidents(place.point, at=row["at"]))
@@ -392,12 +413,20 @@ class Pipeline(Hooks):
     def sweep(self, now=None):
         """One pass: alerts, node liveness, retention."""
         now = time.time() if now is None else now
+        for event_id in store.events_waiting_for_audio():
+            self._choose_audio(event_id, now)
+        for row in store.close_lingering_broadcasts(config.BROADCAST_END_GRACE_SEC):
+            log.info("Broadcast %s ended (a node never reported its end)",
+                     row["event_uid"])
+            if row["type"] == "traffic":
+                self._publish_ta(row, False)
         self._sweep_alerts(now)
         self._sweep_nodes(now)
         if now - self._last_purge >= 3600:
             self._last_purge = now
             remove_audio_files(store.purge_old_events(config.EVENT_RETENTION_DAYS))
             store.purge_notify_log(config.EVENT_RETENTION_DAYS)
+            store.purge_join_requests(config.JOIN_PENDING_HOURS)
 
     def _sweep_alerts(self, now):
         engine_on = self._transcriber is not None

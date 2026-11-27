@@ -149,7 +149,10 @@ class Importer:
             uid = event_uid(_RowView(row))
             when = row.get("started_at") or row.get("created_at")
             label = f"{i}/{total} #{row['id']} {when or '?'} {row.get('station_ps') or row['pi']}"
-            if conn.execute("SELECT 1 FROM events WHERE event_uid = ?", (uid,)).fetchone():
+            if conn.execute(
+                    "SELECT 1 FROM events WHERE event_uid = ? UNION ALL "
+                    "SELECT 1 FROM receptions WHERE reception_uid = ?",
+                    (uid, uid)).fetchone():
                 self.counts["skipped"] += 1
                 say(f"{label}: already here ({uid}), skipped")
                 continue
@@ -164,6 +167,7 @@ class Importer:
             self.uid_of[row["id"]] = uid
             self.counts["events"] += 1
             if not self.dry_run:
+                store.ensure_receptions(conn)   # every broadcast has its reception
                 conn.commit()     # one event at a time: the aggregator keeps running
             say(f"{label}: imported as {uid}{note}")
 

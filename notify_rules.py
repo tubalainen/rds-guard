@@ -254,8 +254,10 @@ def matches(rule, event, zone):
     if rule.get("stations") and norm_pi(event.get("pi")) not in rule["stations"]:
         return False
     if rule.get("nodes"):
-        node = (event.get("node_name") or "").casefold()
-        if node not in (n.casefold() for n in rule["nodes"]):
+        # Aggregator: heard by any of these nodes
+        heard = {(n or "").casefold() for n in
+                 (event.get("node_names") or [event.get("node_name")])}
+        if not heard & {n.casefold() for n in rule["nodes"]}:
             return False
     if rule.get("keywords") and not matched_keywords(rule, event):
         return False

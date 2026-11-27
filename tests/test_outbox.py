@@ -37,17 +37,6 @@ def test_lifecycle_is_queued_in_order(store):
     assert len(woke) == 4
 
 
-def test_transcription_and_housekeeping_not_queued(store):
-    store.enable_outbox()
-    event_id = _new_traffic(store)
-    base = store.outbox_depth()
-    store.update_event_transcription_status(event_id, "transcribing")
-    store.update_event_transcription(event_id, "text", status="done")
-    assert store.outbox_depth() == base
-    store.delete_all_events()
-    assert store.outbox_depth() == base
-
-
 def test_delete_is_queued_with_uid(store):
     store.enable_outbox()
     event_id = _new_traffic(store)
@@ -65,17 +54,6 @@ def test_close_stale_events_is_queued(store):
     assert store.close_stale_events() == 1
     assert _kinds(store) == ["event"]
     assert store.outbox_head()["event_id"] == event_id
-
-
-def test_rows_without_uid_are_skipped(store):
-    """Events from before the upgrade have no event_uid — nothing to send."""
-    event_id = _new_traffic(store)
-    conn = store._conn()
-    conn.execute("UPDATE events SET event_uid = NULL WHERE id = ?", (event_id,))
-    conn.commit()
-    store.enable_outbox()
-    store.end_event(event_id, "2026-11-25T10:01:00", 60)
-    assert store.outbox_depth() == 0
 
 
 def test_ack_event_collapses_snapshots(store):
