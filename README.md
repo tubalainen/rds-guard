@@ -247,6 +247,10 @@ Tips:
   [Transcribe the stored messages again](#transcribe-the-stored-messages-again)),
   do it on the satellite **before** the import; the new texts come along.
   The aggregator gets its own version of the tool in a later release.
+- The imported incidents are older than 12 hours, so the map shows them
+  only with **Visa historiska händelser** ticked (the button on an empty
+  map does it). That choice is remembered per web address, so the
+  aggregator's page starts without it even if the satellite's had it.
 - Imported pins stay where the satellite put them. **Admin → Karta → Bygg om
   kartan** in the aggregator places every message again, with the roads and
   Trafikverket's places (free with the rules engine, about 1.5 öre per
