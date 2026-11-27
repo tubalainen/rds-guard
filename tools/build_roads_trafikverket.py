@@ -112,8 +112,15 @@ def fetch_all(key, objecttype, filters, includes, cache, label):
 
 
 def wgs84(row):
+    """The WGS84 WKT of a row, whatever the field is called
+    (WGS84, WKT-WGS84-3D, …)."""
     g = row.get("Geometry") or {}
-    return g.get("WGS84") or ""
+    if isinstance(g, str):
+        return g
+    for name, value in g.items():
+        if "WGS84" in name.upper() and isinstance(value, str):
+            return value
+    return ""
 
 
 def wkt_lines(wkt):
@@ -161,9 +168,9 @@ def junction_names(row):
 
 
 ROAD_FIELDS = ("Huvudnummer", "Undernummer", "Europaväg", "Länstillhörighet",
-               "Geometry.WGS84", "Deleted", "Valid_To")
+               "Geometry", "Deleted", "Valid_To")
 JUNCTION_FIELDS = ("Trafikplatsnamn", "Trafikplatsnummer", "Namn",
-                   "Geometry.WGS84", "Deleted", "Valid_To")
+                   "Geometry", "Deleted", "Valid_To")
 JUNCTION_FILTER = ('<OR><EXISTS name="Trafikplatsnamn" value="true"/>'
                    '<EXISTS name="Namn" value="true"/></OR>')
 
@@ -178,7 +185,7 @@ def probe(key):
         for r in rows:
             r = dict(r)
             if "Geometry" in r:
-                r["Geometry"] = {k: (v[:160] + "…" if len(v) > 160 else v)
+                r["Geometry"] = {k: (v[:160] + "…" if isinstance(v, str) and len(v) > 160 else v)
                                  for k, v in r["Geometry"].items()}
             print(json.dumps(r, ensure_ascii=False))
 
