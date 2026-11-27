@@ -873,6 +873,16 @@ def _after_reception_removed(conn, event_id):
     left = conn.execute("SELECT COUNT(*) FROM receptions WHERE event_id = ?",
                         (event_id,)).fetchone()[0]
     if left == 0:
+        # The map is keyed by event uid, not by a foreign key: take the
+        # broadcast off it, and the incidents only it mentioned (left behind,
+        # a new import of the same history added them again)
+        uid = conn.execute("SELECT event_uid FROM events WHERE id = ?",
+                           (event_id,)).fetchone()
+        if uid is not None:
+            conn.execute("DELETE FROM incident_events WHERE event_key = ?", (uid[0],))
+            conn.execute("DELETE FROM area_warnings WHERE event_key = ?", (uid[0],))
+            conn.execute("DELETE FROM incidents WHERE id NOT IN "
+                         "(SELECT incident_id FROM incident_events)")
         conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
         return "deleted"
     ev = conn.execute("SELECT primary_reception_id, audio_path FROM events WHERE id = ?",

@@ -1,6 +1,6 @@
 # Plan: satellit + aggregator som enda arkitektur
 
-Status 2026-11-27: fas 0 klar (planen i repot), fas 1 byggd (v0.10.0: compose med båda, import, nodens plats i Admin, mätverktygen i aggregatorn). Fas 2–4 återstår. Kartändringarna på master samma dag (v0.9.0–v0.9.2) är införda, se "Kartan: ändringar efter att planen skrevs". v0.10.1: en tom karta erbjuder historiken (importen fungerade; valet att visa historiken sparas per adress). v0.10.2: aggregatorns karta får kartbilder från OSM igen (Referer skickas).
+Status 2026-11-27: fas 0 klar (planen i repot), fas 1 byggd (v0.10.0: compose med båda, import, nodens plats i Admin, mätverktygen i aggregatorn). Fas 2 byggd (v0.11.0: protokoll 2, anslutning genom godkännande och JOIN_KEY, två köer i outboxen, en sändning hörd av flera noder blir en händelse, aggregator.retranscribe, livscykeltest av RulesEngine). Fas 3–4 återstår. Kartändringarna på master samma dag (v0.9.0–v0.9.2) är införda, se "Kartan: ändringar efter att planen skrevs". v0.10.1: en tom karta erbjuder historiken (importen fungerade; valet att visa historiken sparas per adress). v0.10.2: aggregatorns karta får kartbilder från OSM igen (Referer skickas). v0.10.3: kartan dubbleras inte när en nod tas bort och historiken importeras igen.
 
 ## Bakgrund
 
@@ -393,7 +393,7 @@ med en statusrad överst som uppdateras efter varje fas (som `placering-v2.md`).
   historiken importeras, satelliten får `LOCAL_PROCESSING=false` och aggregatorns
   gränssnitt används. Det testar målbilden innan något tas bort.
 
-**Fas 2, v0.11.0: protokoll v2 och sammanslagning** (båda sidor samtidigt; vänners
+**Fas 2, v0.11.0 (byggd): protokoll v2 och sammanslagning** (båda sidor samtidigt; vänners
 satelliter måste uppdateras)
 - Anslutningsflödet (`join`, väntande noder, `JOIN_KEY`, verifieringskod, CLI).
 - `receiver` i händelser (`"0"` tills vidare); två köer i outboxen med väckning.

@@ -219,3 +219,41 @@ def test_an_event_merged_into_another_broadcast_is_not_imported_again(agg_store,
     agg_store.upsert_event(node["id"], satellite["uids"][a], dict(base, started_at="2026-11-20T10:00:05Z"))
     counts = _run(satellite, node)
     assert counts["skipped"] == 1 and counts["events"] == 2
+
+def test_deleting_the_node_takes_its_map_along(agg_store, satellite):
+    """Delete the node and import again: one copy of the map, not two."""
+    node, _ = agg_store.create_node("docker01")
+    _run(satellite, node)
+    agg_store.delete_node(node["id"])
+    conn = agg_store._conn()
+    assert conn.execute("SELECT COUNT(*) FROM incidents").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM area_warnings").fetchone()[0] == 0
+    node, _ = agg_store.create_node("docker01")
+    counts = _run(satellite, node)
+    assert counts["events"] == 3 and counts["incidents"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM incidents").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM area_warnings").fetchone()[0] == 1
+
+
+def test_messages_already_on_the_map_are_not_added_again(agg_store, satellite):
+    """Events gone but their map left behind (as before v0.10.3): a new
+    import does not add the incidents a second time."""
+    node, _ = agg_store.create_node("docker01")
+    _run(satellite, node)
+    conn = agg_store._conn()
+    conn.execute("DELETE FROM events")
+    conn.commit()
+    counts = _run(satellite, node)
+    assert counts["events"] == 3
+    assert counts["incidents"] == 0 and counts["areas"] == 0
+    assert conn.execute("SELECT COUNT(*) FROM incidents").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM area_warnings").fetchone()[0] == 1
+
+
+def test_deleting_a_node_keeps_the_other_nodes_map(agg_store, satellite):
+    node, _ = agg_store.create_node("docker01")
+    _run(satellite, node)
+    other, _ = agg_store.create_node("annan")
+    agg_store.delete_node(other["id"])
+    assert agg_store._conn().execute(
+        "SELECT COUNT(*) FROM incidents").fetchone()[0] == 1

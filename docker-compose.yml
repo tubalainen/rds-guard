@@ -3,14 +3,14 @@
 #
 #   docker compose up -d
 #
-# First start: the aggregator runs at once. The satellite reports to it as
-# soon as UPLINK_TOKEN is set in .env; create the node and get the token with
-#   docker compose exec aggregator python3 -m aggregator.nodes add "docker01"
-# or, to bring the satellite's history along at the same time, with the
-# import (see README, "Satellite and aggregator on one host"):
-#   docker compose exec aggregator python3 -m aggregator.import_satellite \
-#       /import/events.db /import/audio --node "docker01"
-# then put the printed UPLINK_TOKEN in .env and run docker compose up -d.
+# First start: put the same secret in .env for both, e.g.
+#   echo "JOIN_KEY=$(openssl rand -hex 16)" >> .env
+# and run docker compose up -d: the satellite asks to join and the shared
+# JOIN_KEY approves it at once. (Without JOIN_KEY or UPLINK_TOKEN the
+# satellite runs standalone, as before.)
+# Moving an existing installation and its history: see the README, "Moving
+# an existing installation to satellite + aggregator" (the import prints an
+# UPLINK_TOKEN, which works as well).
 #
 # Ports on this host:
 #   8022  the satellite's own web UI (WEB_UI_PORT)
@@ -27,9 +27,9 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      # The aggregator below. Once UPLINK_TOKEN is set in .env the satellite
-      # reports there and only records: the aggregator transcribes, maps and
-      # sends MQTT and push. Without a token it runs standalone as before.
+      # The aggregator below. With JOIN_KEY (or UPLINK_TOKEN) in .env the
+      # satellite reports there and only records: the aggregator transcribes,
+      # maps and sends MQTT and push. Without either it runs standalone.
       LOCAL_AGGREGATOR: "true"
       UPLINK_URL: http://aggregator:8081
     ports:

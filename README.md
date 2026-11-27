@@ -164,17 +164,25 @@ docker compose pull
 docker compose up -d
 ```
 
-4. Connect the satellite to the aggregator: create a node for it, and put
-   the printed `UPLINK_TOKEN=…` line in `.env` (the other printed lines are
-   not needed here; the compose file sets the address):
+4. Connect the satellite to the aggregator: put the same secret in `.env`
+   for both (any long random text) and a name for the node, then start
+   again. The satellite asks to join and the shared `JOIN_KEY` approves it
+   at once:
 
 ```bash
-docker compose exec aggregator python3 -m aggregator.nodes add "Hemma"
+echo "JOIN_KEY=$(openssl rand -hex 16)" >> .env
+```
+
+```bash
+echo "NODE_NAME=Hemma" >> .env
 ```
 
 ```bash
 docker compose up -d
 ```
+
+   Without `JOIN_KEY` the satellite still asks to join; approve it under
+   **Admin → Noder → Väntar på godkännande** in the aggregator's web UI.
 
 5. Open the aggregator's web UI at **http://your-host:8080**. The
    satellite's own web UI stays at **http://your-host:8022** until v1.0.
@@ -298,28 +306,39 @@ sent to the aggregator.
 1. Get the satellite working first: follow the [Quick start](#quick-start)
    but download `docker-compose.satellite.yml` as `docker-compose.yml` (a
    friend's satellite needs no aggregator of its own). The *Debug* page of the web UI (link in the footer) shows your station and a decode rate above 5 grp/s.
-2. Ask the aggregator's owner for three values: the aggregator address, a
-   node token, and the name to use for your node. They create the token in the
-   aggregator's web UI (*Admin → Noder → Lägg till nod*) and get the lines to send you.
+2. Ask the aggregator's owner for its address. That is all: your
+   satellite asks to join, and the owner approves it in the aggregator's web
+   UI (*Admin → Noder → Väntar på godkännande*). (A token from *Lägg till
+   nod* also still works, as `UPLINK_TOKEN`.)
 
 No ports need to be opened on your router: the satellite only makes outbound
 HTTPS requests.
 
 ### Connect
 
-1. Add the lines you received to `.env`, and where your receiver is:
+1. Add the aggregator's address to `.env`, with your node's name and
+   where your receiver is:
 
 ```bash
-UPLINK_URL=https://rds.example.com    # Aggregator address
-UPLINK_TOKEN=paste-your-token-here    # Node token (keep it secret)
-NODE_NAME=Kalle, Karlstad             # Shown on the aggregator
-NODE_LOCATION=Karlstad, Värmlands län # Ort, Län: places your messages on the map
+AGGREGATOR_URL=https://rds.example.com # Aggregator address
+NODE_NAME=Kalle, Karlstad              # Shown on the aggregator
+NODE_LOCATION=Karlstad, Värmlands län  # Ort, Län: suggested to the aggregator for the map
 ```
 
 2. Restart the container so it reads the new settings:
 
 ```bash
 docker compose up -d
+```
+
+3. The log (and the web UI's footer) shows a code, e.g. `K7Q-3PD`. Send
+   it to the aggregator's owner: the same code is shown next to your node
+   under *Väntar på godkännande*, so they approve the right one. Until then
+   your satellite records as usual and queues everything for the
+   aggregator; nothing is lost.
+
+```bash
+docker compose logs rds-guard | grep -i -E "join|code"
 ```
 
 ### Check that it works
@@ -519,11 +538,12 @@ Each transcription is logged with the engine that served it, e.g. `Transcription
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `UPLINK_URL` | | Aggregator address. Empty = standalone (see [Run as a satellite](#run-as-a-satellite)) |
-| `UPLINK_TOKEN` | | Node token from the aggregator's owner |
+| `AGGREGATOR_URL` (or `UPLINK_URL`) | | Aggregator address. Empty = standalone (see [Run as a satellite](#run-as-a-satellite)) |
+| `UPLINK_TOKEN` | | Optional node token from *Lägg till nod*. Empty = the satellite makes its own and asks to join |
+| `JOIN_KEY` | | The same secret as the aggregator's `JOIN_KEY` approves the join at once |
 | `NODE_NAME` | | Your name or place, shown on the aggregator |
 | `UPLINK_HEARTBEAT_SEC` | `30` | Seconds between status reports |
-| `UPLINK_MAX_AGE_HOURS` | `72` | Unsent items older than this are dropped |
+| `UPLINK_MAX_AGE_HOURS` | `168` | Unsent items older than this are dropped |
 
 ## Web UI
 
@@ -1206,7 +1226,8 @@ curl http://localhost:8022/api/status
 | Events show as "In progress" after restart | Normal — stale events from the previous run | They are automatically closed on startup. Do a clean rebuild with `-v` to clear old data |
 | MQTT not publishing | MQTT disabled or broker unreachable | Set `MQTT_ENABLED=true` in `.env` and verify broker IP/port. Check logs for MQTT connection errors |
 | Low decode rate (< 5 grp/s) | Weak signal or wrong frequency | Try increasing `RTL_GAIN`. Verify `FM_FREQUENCY` matches a nearby P4 transmitter |
-| Container keeps restarting; log shows `UPLINK_URL is set but UPLINK_TOKEN is empty` | Satellite settings incomplete | Add `UPLINK_TOKEN` from the aggregator's owner, or remove `UPLINK_URL` to run standalone |
+| Status bar shows `uplink väntar på godkännande (kod …)` | The aggregator's owner has not approved this satellite yet | Send them the code; they approve it under *Admin → Noder*. Everything is queued meanwhile |
+| Status bar shows `uplink nekad` | The owner rejected it, or `JOIN_KEY` differs from the aggregator's | Ask the owner; with `JOIN_KEY`, check that both have the same |
 | Status bar shows `uplink offline` | Aggregator unreachable, or a proxy/Cloudflare answered instead of it | Hover over the uplink status, or check `docker compose logs rds-guard \| grep -i uplink`. Data stays queued and is sent later |
 | Status bar shows `uplink: bad token` | Token wrong, rotated or node disabled | Ask the aggregator's owner for a new token and update `UPLINK_TOKEN` |
 | `queue_depth` in `/api/status` keeps growing | Uplink cannot deliver | See the two rows above; items older than `UPLINK_MAX_AGE_HOURS` are dropped |
