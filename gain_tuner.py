@@ -51,6 +51,7 @@ VERIFY_SEC = 8
 SWEEP_SEC = 1.0
 PPM_SEC = 3.0
 PPM_LIMIT = 150
+HEARD_PILOT_DB = 20           # a station counts as heard with a pilot this clear
 TIE = 0.05                    # within 5 %: the lower gain
 LOW_QUALITY = 0.6             # of the calibrated rate …
 LOW_FOR_SEC = 15 * 60         # … for this long: calibrate again
@@ -203,16 +204,27 @@ def calibrate(receiver, index, gains, capture_fn=capture, quality_fn=redsea_qual
     if want_ppm:
         mid = dongles.nearest([g for g in gains if g > 0], START_GAIN) if gains else START_GAIN
         raw = capture_fn(index, center, mid, 0, PPM_SEC)
-        values = [ppm_from_mpx(m, dict(freqs)[f]) for f, m in mpx_of(raw).items()]
-        values = sorted(v for v in values if v is not None)
-        measured = values[len(values) // 2] if values else 0.0
-        if abs(measured) > PPM_LIMIT:
+        per = {}
+        for f, m in mpx_of(raw).items():
+            pilot = tone_snr_db(m)[0]
+            v = ppm_from_mpx(m, dict(freqs)[f])
+            if v is not None and pilot >= HEARD_PILOT_DB:
+                per[f] = v
+            else:
+                progress(f"[{rid}] {f}: pilot {pilot:.0f} dB, too weak to measure ppm on")
+        values = sorted(per.values())
+        k = len(values)
+        measured = (values[k // 2] if k % 2 else (values[k // 2 - 1] + values[k // 2]) / 2) if k else 0.0
+        if not k:
+            progress(f"[{rid}] no station clear enough to measure ppm: using 0")
+            ppm = 0
+        elif abs(measured) > PPM_LIMIT:
             progress(f"[{rid}] ppm {measured:.0f} is not believable: using 0")
             ppm = 0
         else:
             ppm = int(round(measured))
             progress(f"[{rid}] ppm {ppm} (per station: "
-                     + ", ".join(f"{v:.1f}" for v in values) + ")")
+                     + ", ".join(f"{f} {v:.1f}" for f, v in per.items()) + ")")
     ppm = ppm or 0
     if not want_gain:
         return {"gain": gain, "ppm": ppm, "stations": {}, "steps": []}
@@ -224,14 +236,19 @@ def calibrate(receiver, index, gains, capture_fn=capture, quality_fn=redsea_qual
         raw = capture_fn(index, center, g, ppm, SWEEP_SEC)
         clip = clip_fraction(raw)
         snrs = {f: tone_snr_db(m) for f, m in mpx_of(raw).items()}
-        worst_rds = min(s[1] for s in snrs.values())
-        steps.append({"gain": g, "clip": clip, "snr": snrs, "worst_rds": worst_rds,
+        steps.append({"gain": g, "clip": clip, "snr": snrs,
                       "level": round(level_dbfs(iq_from_u8(raw)), 1)})
         progress(f"[{rid}] {i}/{len(gains)} gain {g:4.1f} dB: clip {clip * 100:.3f} %, "
                  + ", ".join(f"{f} pilot {s[0]:.0f} dB RDS {s[1]:.0f} dB"
                              for f, s in snrs.items()))
 
-    # 3. verify the best with redsea
+    # 3. verify the best with redsea. Ranked by the worst station that is
+    # heard at all (a clear pilot at some step): a station too far away to
+    # hear would make every step equally bad
+    heard = [f for f, _ in freqs
+             if max(s["snr"][f][0] for s in steps) >= HEARD_PILOT_DB] or [f for f, _ in freqs]
+    for s in steps:
+        s["worst_rds"] = min(s["snr"][f][1] for f in heard)
     clean = [s for s in steps if s["clip"] <= CLIP_LIMIT] or steps
     best = sorted(clean, key=lambda s: (-s["worst_rds"], s["gain"]))[:VERIFY_STEPS]
     results = []
