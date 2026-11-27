@@ -54,6 +54,7 @@ TIE = 0.05                    # within 5 %: the lower gain
 LOW_QUALITY = 0.6             # of the calibrated rate …
 LOW_FOR_SEC = 15 * 60         # … for this long: calibrate again
 MIN_BETWEEN_SEC = 6 * 3600
+RETRY_AFTER_FAIL_SEC = 3 * 3600
 FALLBACK_GAINS = [0.0, 0.9, 1.4, 2.7, 3.7, 7.7, 8.7, 12.5, 14.4, 15.7, 16.6, 19.7,
                   20.7, 22.9, 25.4, 28.0, 29.7, 32.8, 33.8, 36.4, 37.2, 38.6, 40.2,
                   42.1, 43.4, 43.9, 44.5, 48.0, 49.6]     # R820T
@@ -192,7 +193,7 @@ def calibrate(receiver, index, gains, capture_fn=capture, quality_fn=redsea_qual
 
     # 1. ppm, at a middle gain without correction
     if want_ppm:
-        mid = dongles.nearest(gains, 20.0) if gains else DEFAULT_GAIN
+        mid = dongles.nearest([g for g in gains if g > 0], 20.0) if gains else DEFAULT_GAIN
         raw = capture_fn(index, center, mid, 0, PPM_SEC)
         values = [ppm_from_mpx(m, dict(freqs)[f]) for f, m in mpx_of(raw).items()]
         values = sorted(v for v in values if v is not None)
@@ -208,7 +209,8 @@ def calibrate(receiver, index, gains, capture_fn=capture, quality_fn=redsea_qual
     if not want_gain:
         return {"gain": gain, "ppm": ppm, "stations": {}, "steps": []}
 
-    # 2. sweep
+    # 2. sweep (rtl_sdr takes -g 0 as the tuner's automatic gain: never)
+    gains = [g for g in gains if g > 0] or [DEFAULT_GAIN]
     steps = []
     for i, g in enumerate(gains, 1):
         raw = capture_fn(index, center, g, ppm, SWEEP_SEC)
@@ -266,6 +268,7 @@ class Tuner:
         self._seen_commands = set()
         self._low_since = {}         # (receiver id, freq) -> time
         self._busy = {}              # receiver id -> status text
+        self._failed = {}            # receiver id -> (time, error)
         self._lock = threading.Lock()
 
     # -- what the pipeline uses ---------------------------------------------
@@ -295,8 +298,9 @@ class Tuner:
             "gain": gain, "gain_mode": "manual" if r.gain != "auto" else "auto",
             "ppm": ppm, "ppm_mode": "manual" if r.ppm != "auto" else "auto",
             "calibrated_at": cal["calibrated_at"] + "Z" if cal else None,
-            "calibration": self._busy.get(r.id) or (None if cal or not self._auto(r)
-                                                    else "väntar"),
+            "calibration": self._busy.get(r.id) or (
+                f"misslyckades: {self._failed[r.id][1]}"[:64] if r.id in self._failed
+                else None if cal or not self._auto(r) else "väntar"),
             "quality": result.get("stations") or {},
         }
 
@@ -330,6 +334,9 @@ class Tuner:
         with self._lock:
             if r.id in self._requests:
                 return self._requests[r.id]
+        failed = self._failed.get(r.id)
+        if failed and self._now() - failed[0] < RETRY_AFTER_FAIL_SEC:
+            return None              # keep the default; try again later
         cal = self._stored(r)
         if cal is None:
             return "first start" if not self._any_stored(r) else "new frequencies"
@@ -400,8 +407,11 @@ class Tuner:
                 {"stations": res.get("stations") or {}, "steps": res.get("steps") or []},
                 why, at=self._now())
             log.info("[%s] calibrated: gain %s, ppm %s", r.id, res.get("gain"), res.get("ppm"))
-        except Exception:
-            log.exception("[%s] calibration failed; keeping the earlier settings", r.id)
+            self._failed.pop(r.id, None)
+        except Exception as e:
+            log.exception("[%s] calibration failed; keeping the earlier settings and "
+                          "trying again in %d hours", r.id, RETRY_AFTER_FAIL_SEC // 3600)
+            self._failed[r.id] = (self._now(), str(e) or type(e).__name__)
         finally:
             with self._lock:
                 self._requests.pop(r.id, None)

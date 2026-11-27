@@ -10,7 +10,7 @@ DSP chain per station (numpy only, no scipy):
 
 Key parameters:
   RTL sample rate: 2 394 000 S/s  (= 171 000 × 14, exact integer ratio)
-  Block size:      16 384 complex samples per RTL IQ chunk (~6.8 ms latency)
+  Block size:      16 380 complex samples per RTL IQ chunk (~6.8 ms latency)
   Decimation:      14  → output 171 000 Hz per station
   LPF cutoff:      80 kHz  (FM channel half-width is 100 kHz)
   Filter length:   127 taps (Blackman-windowed sinc)
@@ -27,7 +27,9 @@ log = logging.getLogger("rds-guard")
 _FS = 2_394_000           # RTL-SDR sample rate
 _OUTPUT_RATE = 171_000    # redsea expected input rate
 _DECIMATION = _FS // _OUTPUT_RATE   # = 14
-_BLOCK = 16_384           # complex samples per IQ block
+# A multiple of the decimation (14), so every block keeps the same 14-sample
+# spacing: with 16 384 every block began 4 samples off (a click per block)
+_BLOCK = 16_380           # complex samples per IQ block
 _NTAPS = 127              # FIR filter length
 _LPF_CUTOFF = 80_000      # LPF cutoff in Hz
 

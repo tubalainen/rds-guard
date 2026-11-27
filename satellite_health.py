@@ -35,7 +35,8 @@ def check(path, now=None):
     if age > MAX_AGE_SEC:
         return False, f"health file is {age:.0f} s old: the satellite has stopped"
     recs = snap.get("receivers") or []
-    running = [r for r in recs if r.get("state") == "running"]
+    # A receiver paused while its gain is calibrated is fine too
+    running = [r for r in recs if r.get("state") in ("running", "paused")]
     if not running:
         why = (snap.get("pipeline") or {}).get("error") or "no receiver is running"
         return False, why

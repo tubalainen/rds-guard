@@ -164,12 +164,10 @@ def load(path=None, dongles=None):
                 + "): say which listens to what in receivers.yml (see "
                 "receivers.example.yml)")
         serial = dongles[0].serial
-    r = Receiver(serial=serial, frequencies=[_freq(f, "FM_FREQUENCY") for f in freqs],
-                 gain=_auto_or(config.RTL_GAIN or None, float, "RTL_GAIN"),
-                 ppm=_auto_or(config.PPM_CORRECTION or None, int, "PPM_CORRECTION"))
+    r = Receiver(serial=serial, frequencies=[_freq(f, "FM_FREQUENCY") for f in freqs])
     check(r, "FM_FREQUENCIES")
-    if config.RTL_GAIN:
-        r.warnings.append("RTL_GAIN is read as a fixed gain for this dongle; remove "
-                          "it to let RDS Guard find the best gain, or move it to "
-                          "receivers.yml")
+    if config.RTL_GAIN or config.PPM_CORRECTION:
+        r.warnings.append("RTL_GAIN and PPM_CORRECTION in .env are not used any more: "
+                          "RDS Guard finds the best gain and ppm itself. To fix them, "
+                          "put gain:/ppm: in receivers.yml (see receivers.example.yml)")
     return [r]

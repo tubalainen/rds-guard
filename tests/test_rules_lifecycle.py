@@ -74,3 +74,15 @@ def test_repeated_flags_change_nothing(store, engine):
         group(engine, f"2026-11-27T10:00:{s:02d}", ta=True)
     assert store._conn().execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
     assert len(outbox(store)) == 1
+
+
+def test_the_same_radiotext_in_the_next_announcement_is_kept(store, engine):
+    for ts, fields in (("10:00:00", {"ta": False}), ("10:00:05", {"ta": True}),
+                       ("10:00:10", {"group": "2A", "radiotext": "Olycka E18"}),
+                       ("10:01:05", {"ta": False}), ("10:05:00", {"ta": True}),
+                       ("10:05:10", {"group": "2A", "radiotext": "Olycka E18"}),
+                       ("10:06:05", {"ta": False})):
+        group(engine, f"2026-11-27T{ts}", **fields)
+    import json
+    rows, _ = store.query_events()
+    assert [json.loads(r["radiotext"]) for r in rows] == [["Olycka E18"], ["Olycka E18"]]

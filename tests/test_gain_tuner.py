@@ -127,8 +127,9 @@ def test_a_whole_calibration_with_a_fake_dongle():
     assert res["ppm"] == pytest.approx(12, abs=2)
     assert 15 <= res["gain"] <= 30
     assert set(res["stations"]) == {"103.5M", "102.9M"}
-    # A line per step, the checks and the choice
-    assert sum("gain" in line and "clip" in line for line in lines) == 6
+    # A line per step (0.0 dB is rtl_sdr's automatic gain: never), the checks
+    # and the choice
+    assert sum("gain" in line and "clip" in line for line in lines) == 5
     assert any(line.startswith("[1] chosen") for line in lines)
     # The sweep ran with the measured ppm; overloaded steps were not checked
     sweep = [c for c in dongle.calls if c[2] == gt.SWEEP_SEC]
@@ -252,3 +253,35 @@ def test_a_lasting_drop_calibrates_again_but_not_too_often(setup):
     tuner.due(p)
     clock[0] += gt.LOW_FOR_SEC + 60
     assert tuner.due(p) is None
+
+
+def test_blocks_keep_the_sample_spacing():
+    """A tone demodulates smoothly across the channelizer's blocks."""
+    z = fm_station(int(FS * 0.2), 250_000, rds=False, pilot=False, dev=10_000)
+    m = demod_all(iq_from_u8(to_u8(z, 0.4, noise=0.0)), 250_000)[10:]
+    d = np.abs(np.diff(m))
+    assert d.max() < 4 * np.median(d)
+
+
+def test_gain_zero_is_never_used():
+    import pipeline
+    assert "-g" in (cmd := pipeline.rtl_sdr_cmd(100_000_000, 0, 0.0, 0)) and cmd[cmd.index("-g") + 1] == "0.9"
+    r = receivers.parse({"receivers": [{"serial": "1", "frequencies": ["103.5M"]}]})[0]
+    dongle = FakeDongle(r)
+    gt.calibrate(r, 0, [0.0, 19.7], capture_fn=dongle.capture,
+                 quality_fn=lambda pcm, s: (5.0, 0), progress=lambda m: None)
+    assert 0.0 not in {c[0] for c in dongle.calls}
+
+
+def test_a_failed_calibration_waits_hours(setup):
+    tuner, p, st, clock, runs = setup
+
+    def broken(rec, want_gain=True, want_ppm=True):
+        raise RuntimeError("rtl_sdr gave no samples")
+    tuner._calibrate = broken
+    assert tuner.step(p) == "calibrated"            # tried, failed
+    assert p.resumed == 1
+    assert tuner.due(p) is None                     # not again at once
+    assert tuner.describe(p)["calibration"].startswith("misslyckades: rtl_sdr")
+    clock[0] += gt.RETRY_AFTER_FAIL_SEC + 1
+    assert tuner.due(p) == "first start"

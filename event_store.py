@@ -337,6 +337,14 @@ def migrate_from(old_db, old_audio_dir, spool_dir):
         if "outbox" in tables:
             pending = old.execute(
                 "SELECT kind, event_id, event_uid FROM outbox ORDER BY id").fetchall()
+            # Events still open when the old satellite stopped: their end is
+            # owed too (close_stale_events ends and queues them here)
+            pending += [{"kind": OUTBOX_EVENT, "event_id": r["id"], "event_uid": r["event_uid"]}
+                        for r in old.execute(
+                            "SELECT id, event_uid FROM events WHERE state IN "
+                            "('start', 'update', 'active') AND ended_at IS NULL "
+                            "AND event_uid IS NOT NULL AND id NOT IN "
+                            "(SELECT event_id FROM outbox WHERE event_id IS NOT NULL)")]
             ids = {}
             for item in pending:
                 ev = old.execute("SELECT * FROM events WHERE id = ?",

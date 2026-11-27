@@ -50,7 +50,8 @@ FM_FREQUENCY = os.environ.get("FM_FREQUENCY", "103.5M")
 # Comma-separated, up to 4 within 2 MHz: one dongle, several stations
 FM_FREQUENCIES = [f.strip() for f in os.environ.get("FM_FREQUENCIES", "").split(",")
                   if f.strip()]
-# Older settings, read as overrides for that one dongle
+# Older settings: no longer used (the calibration finds gain and ppm; fixed
+# values go in receivers.yml); only read to say so in the log
 RTL_GAIN = os.environ.get("RTL_GAIN", "").strip()
 PPM_CORRECTION = os.environ.get("PPM_CORRECTION", "").strip()
 RTL_DEVICE_SERIAL = os.environ.get("RTL_DEVICE_SERIAL", "").strip()
@@ -81,13 +82,12 @@ UPLINK_MAX_AGE_HOURS = max(1, _int(os.environ.get("UPLINK_MAX_AGE_HOURS"), 168))
 
 UPLINK_ENABLED: bool = bool(UPLINK_URL)
 
-# Settings of the satellite before v1.0 that the aggregator now handles
+# Settings only the satellite had before v1.0 and no longer uses (those the
+# aggregator reads, e.g. MQTT_* in a shared .env, are not named)
 RETIRED = (
-    "MQTT_ENABLED", "MQTT_HOST", "MQTT_TOPIC_PREFIX", "PUBLISH_MODE", "PUBLISH_RAW",
-    "WEB_UI_URL", "ADMIN_PASSWORD", "NOTIFY_TIMEZONE", "TRANSCRIPTION_ENGINE",
-    "ELEVENLABS_API_KEY", "GEO_ENGINE", "ANTHROPIC_API_KEY", "TRAFIKVERKET_API_KEY",
-    "LOCAL_PROCESSING", "SATELLITE_MQTT_ENABLED", "EVENT_RETENTION_DAYS",
-    "STATUS_INTERVAL", "AUDIO_FORMAT", "RTL_DEVICE_INDEX", "RTL_CENTER_FREQ",
+    "PUBLISH_MODE", "PUBLISH_RAW", "STATUS_INTERVAL", "LOCAL_PROCESSING",
+    "SATELLITE_MQTT_ENABLED", "AUDIO_FORMAT", "RTL_DEVICE_INDEX", "RTL_CENTER_FREQ",
+    "RTL_GAIN", "PPM_CORRECTION", "LOCAL_AGGREGATOR",
 )
 
 

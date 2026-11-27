@@ -68,8 +68,9 @@ class PipelineStatus:
 
 def rtl_sdr_cmd(center_hz, device_index, gain, ppm):
     cmd = ["rtl_sdr", "-f", str(center_hz), "-s", str(config.RTL_SAMPLE_RATE)]
-    if gain is not None:
-        cmd += ["-g", f"{gain:g}" if isinstance(gain, float) else str(gain)]
+    # -g 0 would be the tuner's own automatic gain, which overloads on FM
+    gain = max(float(gain), 0.9) if gain is not None else 20.0
+    cmd += ["-g", f"{gain:g}"]
     if ppm:
         cmd += ["-p", str(ppm)]
     return cmd + ["-d", str(device_index), "-"]

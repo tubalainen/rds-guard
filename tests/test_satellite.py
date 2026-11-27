@@ -48,6 +48,19 @@ def test_identity_and_undelivered_events_move_over(store, legacy_db, tmp_path):
     assert done
 
 
+def test_an_event_open_in_the_old_database_is_ended_and_sent(store, legacy_db, tmp_path):
+    """Its start reached the aggregator; its end never did."""
+    open_id = legacy_db.insert_event("traffic", "warning", "start", "0x1", {},
+                                     started_at="2026-11-27T10:00:00")
+    store.migrate_from(legacy_db.path, tmp_path, tmp_path / "spool")
+    store.enable_outbox()
+    assert store.close_stale_events() == 1
+    [row], _ = store.query_events()
+    assert row["state"] == "end"
+    assert [r["kind"] for r in store._conn().execute("SELECT kind FROM outbox")] == ["event", "event"]
+    assert open_id
+
+
 def test_no_old_database_is_fine(store, tmp_path):
     assert store.migrate_from(str(tmp_path / "nope.db"), tmp_path, tmp_path / "spool") == 0
 
@@ -84,6 +97,8 @@ def test_health_file(tmp_path):
     assert ok and "1/2 receivers running" in msg
     ok, msg = satellite_health.check(path, now=time.time() + 120)
     assert not ok and "old" in msg
+    satellite_health.write(path, {"receivers": [{"state": "paused", "stations": []}]})
+    assert satellite_health.check(path)[0]            # calibrating its gain
     satellite_health.write(path, {"receivers": [], "pipeline": {"error": "No RTL-SDR dongle found"}})
     ok, msg = satellite_health.check(path)
     assert not ok and msg == "No RTL-SDR dongle found"
@@ -114,9 +129,11 @@ def test_main_exits_with_the_reason(tmp_path):
 
 
 def test_retired_settings_are_named(monkeypatch):
-    monkeypatch.setenv("MQTT_ENABLED", "true")
-    monkeypatch.setenv("TRANSCRIPTION_ENGINE", "local")
-    assert {"MQTT_ENABLED", "TRANSCRIPTION_ENGINE"} <= set(config.retired_in_use())
+    monkeypatch.setenv("PUBLISH_MODE", "all")
+    monkeypatch.setenv("LOCAL_PROCESSING", "false")
+    monkeypatch.setenv("MQTT_ENABLED", "true")       # the aggregator's, in a shared .env
+    named = set(config.retired_in_use())
+    assert {"PUBLISH_MODE", "LOCAL_PROCESSING"} <= named and "MQTT_ENABLED" not in named
 
 
 def test_recording_is_capped():
@@ -174,7 +191,7 @@ def test_without_receivers_yml_one_dongle_uses_fm_frequency(tmp_path, monkeypatc
         receivers.load(str(tmp_path / "none.yml"), dongles=[])
     monkeypatch.setattr(config, "RTL_GAIN", "8")
     [r] = receivers.load(str(tmp_path / "none.yml"), dongles=one)
-    assert r.gain == 8.0 and "RTL_GAIN" in r.warnings[0]
+    assert r.gain == "auto" and "not used any more" in r.warnings[0]
 
 
 def test_receivers_file_is_read(tmp_path):

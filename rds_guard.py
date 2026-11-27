@@ -60,6 +60,9 @@ class StationState:
     def is_known(self, pi, key):
         return f"{pi}/{key}" in self._state
 
+    def forget(self, pi, key):
+        self._state.pop(f"{pi}/{key}", None)
+
 
 class Stats:
     def __init__(self):
@@ -316,6 +319,10 @@ def process_group(station, data):
         known = state.is_known(pi, "ta")
         if state.changed(pi, "ta", data["ta"]) and (known or data["ta"]):
             engine.on_ta_change(pi, data["ta"], data)
+            if data["ta"]:
+                # A new announcement takes the RadioText on air now, even
+                # if the same text was sent before
+                state.forget(pi, "rt")
 
     if group in ("2A", "2B"):
         rt = data.get("radiotext")      # complete RadioText only
