@@ -26,7 +26,14 @@ import urllib.request
 sys.path.insert(0, "/app")
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-import config  # noqa: E402
+try:   # the satellite's settings (repository or satellite image) …
+    import config  # noqa: E402
+    _HOST = f"http://127.0.0.1:{config.WEB_UI_PORT}"
+    _EVENTS = "/api/events"
+except ImportError:   # … or the aggregator's (aggregator image)
+    from aggregator import config  # noqa: E402
+    _HOST = f"http://127.0.0.1:{config.WEB_PORT}"
+    _EVENTS = "/api/v1/events"
 import geo_service  # noqa: E402
 import geolocate  # noqa: E402
 
@@ -53,9 +60,10 @@ def describe(placements):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--limit", type=int, default=40)
-    ap.add_argument("--location", default=config.NODE_LOCATION,
+    ap.add_argument("--location", default=getattr(config, "NODE_LOCATION", ""),
                     help="'Ort, Län' (default: NODE_LOCATION)")
-    ap.add_argument("--api", default=f"http://127.0.0.1:{config.WEB_UI_PORT}")
+    ap.add_argument("--api", default=_HOST,
+                    help="the installation's web address (default: this container)")
     ap.add_argument("--keyterms", action="store_true",
                     help="also re-transcribe with ElevenLabs, with and without place names")
     args = ap.parse_args()
@@ -74,16 +82,17 @@ def main():
     else:
         print("ANTHROPIC_API_KEY saknas: bara regelmotorn körs.\n")
 
-    events = get(f"{args.api}/api/events?type=traffic&limit={args.limit}")["events"]
+    events = get(f"{args.api}{_EVENTS}?type=traffic&limit={args.limit}")["events"]
     report, tokens_in, tokens_out = [], 0, 0
     for ev in events:
         text = ev.get("transcription")
         if not text:
             continue
         print("=" * 78)
-        print(f"#{ev['id']}  {ev.get('started_at')}  {ev.get('station_ps')}")
+        ev_id = ev.get("id", ev.get("event_uid"))
+        print(f"#{ev_id}  {ev.get('started_at')}  {ev.get('station_ps')}")
         print(text)
-        row = {"id": ev["id"], "text": text}
+        row = {"id": ev_id, "text": text}
         r = rules.locate(text, area, node.point, args.location)
         print("Regler:")
         print(describe(r.placements))

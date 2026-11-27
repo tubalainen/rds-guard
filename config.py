@@ -174,6 +174,22 @@ UPLINK_HEARTBEAT_SEC = max(10, _int(os.environ.get("UPLINK_HEARTBEAT_SEC"), 30))
 # Queued items older than this are dropped instead of delivered late
 UPLINK_MAX_AGE_HOURS = max(1, _int(os.environ.get("UPLINK_MAX_AGE_HOURS"), 72))
 
+# Set by docker-compose.yml when the aggregator runs in the same compose
+# project: UPLINK_URL then points at it, and until UPLINK_TOKEN is set this
+# installation runs standalone instead of refusing to start.  Once it reports
+# there, the aggregator transcribes, maps and publishes MQTT/push, so this
+# installation only records (unless LOCAL_PROCESSING / SATELLITE_MQTT_ENABLED
+# say otherwise).
+LOCAL_AGGREGATOR = _bool(os.environ.get("LOCAL_AGGREGATOR", "false"))
+if LOCAL_AGGREGATOR and not UPLINK_TOKEN:
+    if UPLINK_URL:
+        print("NOTE: the aggregator in this compose project is not used yet: "
+              "set UPLINK_TOKEN in .env (docker compose exec aggregator "
+              "python3 -m aggregator.nodes add \"<name>\") and run "
+              "docker compose up -d. Running standalone until then.",
+              file=sys.stderr)
+    UPLINK_URL = ""
+
 UPLINK_ENABLED: bool = bool(UPLINK_URL)
 
 # --- Location and map (geolocation of traffic messages) ---
@@ -183,7 +199,17 @@ NODE_LOCATION = os.environ.get("NODE_LOCATION", "").strip()
 # Process recordings here (transcription and map)? Only a satellite can turn
 # this off: it then records and forwards raw audio, and the aggregator does
 # all processing. A standalone installation always processes.
-LOCAL_PROCESSING = _bool(os.environ.get("LOCAL_PROCESSING", "true"))
+LOCAL_PROCESSING = _bool(os.environ.get(
+    "LOCAL_PROCESSING",
+    "false" if LOCAL_AGGREGATOR and UPLINK_ENABLED else "true"))
+# Hand MQTT (alerts, push) over to the aggregator in the same compose
+# project, so nothing is published twice
+if LOCAL_AGGREGATOR and UPLINK_ENABLED and MQTT_ENABLED:
+    MQTT_ENABLED = _bool(os.environ.get("SATELLITE_MQTT_ENABLED", "false"))
+    if not MQTT_ENABLED:
+        print("NOTE: MQTT and push come from the aggregator in this compose "
+              "project; this satellite does not publish to MQTT "
+              "(SATELLITE_MQTT_ENABLED=true turns it on).", file=sys.stderr)
 # "claude" = the Claude API reads the transcription, corrects misheard words
 #            and finds the places (rules engine as fallback); without
 #            ANTHROPIC_API_KEY it runs as "rules"

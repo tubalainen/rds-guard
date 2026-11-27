@@ -37,6 +37,15 @@ local events, transcriptions, web UI and MQTT. The protocol is in
 - Read API for other programs
 - Keeps 90 days of events by default
 
+## On the same host as your satellite
+
+For one receiver at home you do not need this folder: the repository's main
+`docker-compose.yml` runs the satellite and the aggregator together, without
+a reverse proxy, and can import the satellite's history. See the main
+README's [Quick start](../README.md#quick-start). The steps below are for an
+aggregator on its own host that friends' satellites report to over the
+internet.
+
 ## Quick start
 
 You need a Linux host with Docker, and a way to publish one port over HTTPS:
@@ -242,6 +251,8 @@ NODE_LOCATION=Karlstad, Värmlands län
 
    `NODE_LOCATION` ("Ort, Län") is how the aggregator knows where the
    node's messages are from; without it they are not placed on the map.
+   You can also set or correct it yourself under **Admin → Noder → Ändra
+   plats**; that place wins over the one the node reports.
    The owner can also choose `LOCAL_PROCESSING=false`: the satellite then
    only records and sends, and this aggregator does all transcription and
    mapping (see [Who processes the recordings](../README.md#who-processes-the-recordings-your-choice)).
@@ -363,6 +374,21 @@ browser, come from the same origin.
 - The server runs as an unprivileged user. The container starts as root
   only to make the `aggregator-data` folder writable for that user, and drops
   root before it opens the database or listens on a port.
+
+## Importing a satellite's history
+
+A standalone RDS Guard's events, audio, transcriptions, map and push rules
+can be copied into the aggregator, as the events of one node:
+
+```bash
+docker compose exec aggregator python3 -m aggregator.import_satellite /import/events.db /import/audio --node "Kalle, Karlstad"
+```
+
+Mount the satellite's data folder read-only at `/import` (the main
+`docker-compose.yml` does). The node is created if it does not exist, and its
+setup lines are printed. Nothing is transcribed or pushed again; events the
+aggregator already has (for example from the uplink) are skipped, so it can
+run again; `--dry-run` shows what it would do.
 
 ## Operations
 

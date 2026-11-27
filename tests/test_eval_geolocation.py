@@ -137,6 +137,30 @@ def test_stored_incidents_are_scored_without_placing_again(reg):
     assert (s["found"], s["precise"], s["linked_ok"]) == (2, 2, 1)
 
 
+
+def test_aggregator_events_are_found_by_broadcast_time(reg):
+    """After the move to the aggregator the corpus's satellite ids are gone;
+    the events are matched by when they started."""
+    c = corpus(
+        {"id": "ev1", "event_id": 1, "at": "2026-11-26T10:00:00", "text": "x",
+         "expect": [item("berg", "new", ["Bergviksmotet"])]},
+        {"id": "ev2", "event_id": 2, "at": "2026-11-26T10:30:00", "text": "y",
+         "expect": [item("berg", "update", ["Bergviksmotet"])]},
+    )
+    inc = {"id": 81, "label": "E18 Bergviksmotet", "lat": 59.379,
+           "lon": 13.43247, "radius_m": 500}
+    runs = ev.stored_runs(c, [
+        {"event_uid": "bbbb", "started_at": "2026-11-26T10:30:00Z", "incidents": [inc]},
+        {"event_uid": "aaaa", "started_at": "2026-11-26T10:00:00Z", "incidents": [inc]}])
+    assert [p.group for r in runs for p in r.predicted] == ["new", "linked"]
+    # Importing an aggregator's answer adds only messages not in the set yet
+    added = ev.import_events(c, [
+        {"event_uid": "aaaa", "started_at": "2026-11-26T10:00:00Z", "transcription": "x"},
+        {"event_uid": "cccc1234-x", "started_at": "2026-11-26T11:00:00Z",
+         "transcription": "z", "station_ps": "P4"}])
+    assert added == 1 and c["cases"][-1]["id"] == "evcccc1234"
+
+
 class FakeClaude:
     """Answers like ClaudeReader, from a fixed list of items per text."""
 

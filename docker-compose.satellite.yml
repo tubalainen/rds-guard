@@ -1,0 +1,24 @@
+# RDS Guard satellite on its own: the radio, recordings and (until v1.0) its
+# own web UI on port 8022. Use this file on a host where no aggregator runs,
+# e.g. a friend's Raspberry Pi that reports to someone else's aggregator
+# (set UPLINK_URL / UPLINK_TOKEN in .env).
+#
+#   docker compose -f docker-compose.satellite.yml up -d
+#
+# To run the satellite and the aggregator together on one host, use
+# docker-compose.yml instead.
+
+services:
+  rds-guard:
+    image: ghcr.io/tubalainen/rds-guard:latest
+    # To build locally instead of pulling, comment out 'image' and uncomment:
+    # build: .
+    container_name: rds-guard
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "${WEB_UI_PORT:-8022}:8022"
+    volumes:
+      - ./rds-data:/data
+    devices:
+      - /dev/bus/usb:/dev/bus/usb

@@ -169,3 +169,47 @@ async def test_rebuild_places_everything_again(aiohttp_client, agg_store, event,
     [after] = agg_store.incidents_for_events([UID])[UID]
     assert after["id"] != before["id"] and after["label"] == "E18 Bergviksmotet"
     assert agg_store.get_event(UID)["geo_status"] == "done"
+
+
+def test_location_set_in_admin_overrides_the_reported_one(agg_store, event, geo):
+    pipe = Pipeline(transcriber=None, mqtt=None, geo=geo)
+    agg_store.record_heartbeat(event["id"], "Kalle", "1.0", {"location": None}, 0)
+    assert pipe.node_place(event["id"]) is None
+    assert agg_store.set_node_location(event["id"], "Grums, Värmlands län")
+    assert pipe.node_place(event["id"]).name == "Grums"
+    # The reported location no longer wins once the owner set one
+    agg_store.record_heartbeat(event["id"], "Kalle", "1.0",
+                               {"location": "Karlstad, Värmlands län"}, 0)
+    assert pipe.node_place(event["id"]).name == "Grums"
+    # Cleared: back to what the node reports
+    agg_store.set_node_location(event["id"], None)
+    assert pipe.node_place(event["id"]).name == "Karlstad"
+
+
+async def test_location_can_be_edited_in_admin(aiohttp_client, agg_store, event,
+                                               geo, monkeypatch):
+    pipe = Pipeline(transcriber=None, mqtt=None, geo=geo)
+    monkeypatch.setattr(config, "ADMIN_PASSWORD", "hemligt")
+    web = await aiohttp_client(api.create_web_app(pipe))
+    r = await web.patch(f"/api/v1/nodes/{event['id']}", json={"location": "Grums"})
+    assert r.status == 401
+    await web.post("/api/v1/admin/login", json={"password": "hemligt"})
+    r = await web.patch(f"/api/v1/nodes/{event['id']}",
+                        json={"location": "  Grums,   Värmlands län "})
+    node = (await r.json())["node"]
+    assert node["location"] == node["location_set"] == "Grums, Värmlands län"
+    assert node["location_reported"] == "Karlstad, Värmlands län"
+    assert node["located"]["name"] == "Grums"
+    assert node["enabled"] is True
+    for bad in ({"location": 5}, {"location": "x" * 81}, {}):
+        r = await web.patch(f"/api/v1/nodes/{event['id']}", json=bad)
+        assert r.status == 422, bad
+    r = await web.patch(f"/api/v1/nodes/{event['id']}", json={"location": None})
+    assert (await r.json())["node"]["location"] == "Karlstad, Värmlands län"
+    # Messages that waited for a location are placed after it was set
+    agg_store.record_heartbeat(event["id"], "Kalle", "1.0", {"location": None}, 0)
+    row = agg_store.get_event(UID)
+    pipe._on_transcribed(row["id"], TEXT, None, 2.0)
+    assert agg_store.get_event(UID)["geo_status"] == "no_location"
+    await web.patch(f"/api/v1/nodes/{event['id']}", json={"location": "Karlstad, Värmlands län"})
+    assert pipe._placeable_count() == 1

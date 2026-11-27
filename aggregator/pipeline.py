@@ -173,11 +173,11 @@ class Pipeline(Hooks):
     # -- geolocation --------------------------------------------------------
 
     def node_place(self, node_id):
-        """Where a node is, from the NODE_LOCATION it reports, or None."""
+        """Where a node is (set in Admin, else the NODE_LOCATION it
+        reports), or None."""
         if self._geo is None:
             return None
-        node = store.get_node(node_id) or {}
-        location = (node.get("status") or {}).get("location")
+        location = store.node_location(store.get_node(node_id))
         return self._geo.locate_node(location) if location else None
 
     def _hints(self, row):
@@ -202,8 +202,7 @@ class Pipeline(Hooks):
             if place is None:
                 store.save_geolocation(uid, None, "no_location")
                 return
-            location = ((store.get_node(row["node_id"]) or {}).get("status")
-                        or {}).get("location")
+            location = store.node_location(store.get_node(row["node_id"]))
             result = self._geo.locate(text, place.point, location,
                                       row.get("radiotext"),
                                       store.open_incidents(place.point))
@@ -229,8 +228,7 @@ class Pipeline(Hooks):
         place = self.node_place(row["node_id"])
         if place is None:
             return None
-        location = ((store.get_node(row["node_id"]) or {}).get("status")
-                    or {}).get("location")
+        location = store.node_location(store.get_node(row["node_id"]))
         result = self._geo.locate(row["transcription"], place.point, location,
                                   row.get("radiotext"),
                                   store.open_incidents(place.point, at=row["at"]))
