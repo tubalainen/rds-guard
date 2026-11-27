@@ -80,6 +80,9 @@ def open_source(path):
         # as it is (stop the satellite first for a consistent copy)
         conn = sqlite3.connect(uri + "?immutable=1", uri=True)
         conn.execute("SELECT 1 FROM events LIMIT 1").fetchall()
+        say("Note: the database is read as the file stands (read-only mount). "
+            "Events the running satellite has not written to the file yet are "
+            "not seen; run the import again later, or stop the satellite first.")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -122,7 +125,9 @@ class Importer:
         self.dry_run = dry_run
         self.src_tables = _tables(src)
         self.uid_of = {}          # satellite event id -> uid (imported only)
-        self.counts = {"events": 0, "skipped": 0, "audio": 0, "audio_missing": 0,
+        self.cutoff = store.iso_ago(config.EVENT_RETENTION_DAYS * 86400)
+        self.counts = {"events": 0, "skipped": 0, "too_old": 0, "audio": 0,
+                       "audio_missing": 0,
                        "incidents": 0, "areas": 0, "notify_log": 0, "rules": 0,
                        "trv": 0}
 
@@ -148,12 +153,19 @@ class Importer:
                 self.counts["skipped"] += 1
                 say(f"{label}: already here ({uid}), skipped")
                 continue
+            received = z(row.get("created_at")) or z(when)
+            if received and received < self.cutoff:
+                # The aggregator's retention would delete it within the hour
+                self.counts["too_old"] += 1
+                say(f"{label}: older than the aggregator keeps events "
+                    f"({config.EVENT_RETENTION_DAYS} days), skipped")
+                continue
             note = self._insert_event(conn, row, uid)
             self.uid_of[row["id"]] = uid
             self.counts["events"] += 1
+            if not self.dry_run:
+                conn.commit()     # one event at a time: the aggregator keeps running
             say(f"{label}: imported as {uid}{note}")
-        if not self.dry_run:
-            conn.commit()
 
     def _insert_event(self, conn, row, uid):
         data = _json(row.get("data"), {})
@@ -379,7 +391,11 @@ class Importer:
         say(("Dry run, nothing written: " if self.dry_run else "Done: ")
             + f"{c['events']} events imported ({c['audio']} with audio"
             + (f", {c['audio_missing']} without their audio file" if c["audio_missing"] else "")
-            + f"), {c['skipped']} already here; {c['incidents']} map incidents, "
+            + f"), {c['skipped']} already here"
+            + (f", {c['too_old']} older than the {config.EVENT_RETENTION_DAYS} days the "
+               "aggregator keeps (raise AGGREGATOR_RETENTION_DAYS to bring them)"
+               if c["too_old"] else "")
+            + f"; {c['incidents']} map incidents, "
             f"{c['areas']} area warnings, {c['trv']} Trafikverket deviations, "
             f"{c['notify_log']} push log entries, {c['rules']} push rules")
         return c

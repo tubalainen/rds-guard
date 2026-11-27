@@ -243,15 +243,24 @@ docker compose up -d
 
 The satellite's own data is not changed. Your push rules are copied.
 
-**MQTT and Home Assistant:** in this setup only the aggregator publishes, under
-the same prefix as before (`MQTT_TOPIC_PREFIX`, default `rds`), so
-`rds/alert`, `rds/notify/…`, `rds/{pi}/traffic/ta` and
-`rds/{pi}/{type}/transcription` keep working, with the same fields plus the
-node. The satellite's other topics (`rds/{pi}/programme/rt`, `station/pty`,
-`traffic/tp`, `system/status` and everything from `PUBLISH_MODE=all`) are no
-longer sent. `SATELLITE_MQTT_ENABLED=true` turns the satellite's own MQTT on
-again until v1.0, but then pushes come twice; `AGGREGATOR_MQTT_TOPIC_PREFIX`
-gives the aggregator another prefix.
+**MQTT and Home Assistant:** once the satellite reports to the aggregator,
+only the aggregator publishes, under the same prefix (`MQTT_TOPIC_PREFIX`,
+default `rds`). `rds/alert`, `rds/notify/…`, `rds/{pi}/traffic/ta` and
+`rds/{pi}/{type}/transcription` keep their names and fields, with three
+differences: `event_id` is now a text id (the event's uid) instead of a
+number, times end in `Z`, and the alert also has `node` (who heard it) and the
+map's `locations`. Push messages link to the event only if
+`AGGREGATOR_WEB_UI_URL` is set (the aggregator's address). The satellite's
+other topics (`rds/{pi}/programme/rt`, `station/pty`, `traffic/tp`,
+`system/status` and everything from `PUBLISH_MODE=all`) are no longer sent.
+`SATELLITE_MQTT_ENABLED=true` turns the satellite's own MQTT on again until
+v1.0, but then pushes come twice; `AGGREGATOR_MQTT_TOPIC_PREFIX` gives the
+aggregator another prefix. Before `UPLINK_TOKEN` is set, the satellite runs
+standalone with its own MQTT and push, exactly as before.
+
+**Retention:** the aggregator keeps `AGGREGATOR_RETENTION_DAYS` (default 90)
+days. The import skips older events and says how many; raise the setting
+first to bring them.
 
 ## Run as a satellite
 

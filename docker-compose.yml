@@ -27,12 +27,11 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      # Report to the aggregator below once a token is set
-      UPLINK_URL: ${UPLINK_TOKEN:+http://aggregator:8081}
-      # The aggregator transcribes and maps; the satellite only records
-      LOCAL_PROCESSING: ${LOCAL_PROCESSING:-false}
-      # MQTT and push come from the aggregator, so nothing is sent twice
-      MQTT_ENABLED: ${SATELLITE_MQTT_ENABLED:-false}
+      # The aggregator below. Once UPLINK_TOKEN is set in .env the satellite
+      # reports there and only records: the aggregator transcribes, maps and
+      # sends MQTT and push. Without a token it runs standalone as before.
+      LOCAL_AGGREGATOR: "true"
+      UPLINK_URL: http://aggregator:8081
     ports:
       - "${WEB_UI_PORT:-8022}:8022"
     volumes:
@@ -53,9 +52,9 @@ services:
     environment:
       # Settings the two would otherwise share from .env but must not
       MQTT_CLIENT_ID: rds-guard-aggregator
-      # The topics the satellite used (rds/alert, rds/notify/…), so Home
-      # Assistant keeps working
-      MQTT_TOPIC_PREFIX: ${AGGREGATOR_MQTT_TOPIC_PREFIX:-${MQTT_TOPIC_PREFIX:-rds}}
+      # MQTT_TOPIC_PREFIX comes from .env: the topics the satellite used
+      # (rds/alert, rds/notify/…), so Home Assistant keeps working.
+      # AGGREGATOR_MQTT_TOPIC_PREFIX in .env gives the aggregator another one.
       WEB_UI_URL: ${AGGREGATOR_WEB_UI_URL:-}
       EVENT_RETENTION_DAYS: ${AGGREGATOR_RETENTION_DAYS:-90}
       PUBLIC_URL: ${PUBLIC_URL:-http://aggregator:8081}

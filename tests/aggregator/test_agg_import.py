@@ -176,3 +176,18 @@ def test_command_line(agg_store, satellite, monkeypatch, capsys):
     assert "1/3 #" in out.err and "Done: 3 events imported" in out.err
     assert agg_store.get_node_by_name("docker01") is not None
     json.dumps(agg_store.list_nodes())          # serialisable as before
+
+
+def test_events_older_than_the_retention_are_skipped(agg_store, satellite, monkeypatch):
+    from aggregator import config
+    conn = event_store._conn()
+    a = satellite["ids"][0]
+    conn.execute("UPDATE events SET created_at = '2020-01-01T00:00:00' WHERE id = ?", (a,))
+    conn.commit()
+    monkeypatch.setattr(config, "EVENT_RETENTION_DAYS", 90)
+    node, _ = agg_store.create_node("docker01")
+    counts = _run(satellite, node)
+    assert counts["too_old"] == 1 and counts["events"] == 2
+    assert agg_store.get_event(satellite["uids"][a]) is None
+    # Its incident is not brought either
+    assert counts["incidents"] == 0

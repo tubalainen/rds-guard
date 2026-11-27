@@ -69,7 +69,10 @@ MQTT_HOST = os.environ.get("MQTT_HOST", "")
 MQTT_PORT = _int(os.environ.get("MQTT_PORT"), 1883)
 MQTT_USER = os.environ.get("MQTT_USER", "")
 MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "")
-MQTT_TOPIC_PREFIX = os.environ.get("MQTT_TOPIC_PREFIX", "rds-aggregator")
+# AGGREGATOR_MQTT_TOPIC_PREFIX: for a .env shared with a satellite
+# (docker-compose.yml), where MQTT_TOPIC_PREFIX is the satellite's
+MQTT_TOPIC_PREFIX = (os.environ.get("AGGREGATOR_MQTT_TOPIC_PREFIX", "").strip()
+                     or os.environ.get("MQTT_TOPIC_PREFIX", "rds-aggregator"))
 MQTT_CLIENT_ID = os.environ.get("MQTT_CLIENT_ID", "rds-guard-aggregator")
 
 # --- Transcription (same settings as the satellite) ---
