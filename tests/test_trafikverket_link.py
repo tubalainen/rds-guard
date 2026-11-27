@@ -311,6 +311,43 @@ def test_current_deviation_keeps_the_incident_on_the_map(store):
     assert store.trv.touch_linked() == 0
 
 
+def _heard_days_ago(store, inc_id, days, last_seen=None):
+    """Make the radio's mention of an incident days old."""
+    old = iso(-days * 1440)
+    conn = store._conn()
+    conn.execute("UPDATE incident_events SET seen_at = ? WHERE incident_id = ?",
+                 (old, inc_id))
+    conn.execute("UPDATE incidents SET first_seen = ?, last_seen = ? WHERE id = ?",
+                 (old, last_seen or old, inc_id))
+    conn.commit()
+    return old
+
+
+def test_an_old_message_is_not_moved_to_now(store):
+    """A message from days ago (a rebuild of the map places it again),
+    linked to a deviation that is still current, keeps its own time."""
+    store.trv.apply([situation()])
+    [inc_id] = place(store, radio_event(store))
+    old = _heard_days_ago(store, inc_id, 5)
+    assert store.trv.touch_linked() == 0
+    assert store.incident(inc_id)["last_seen"] == old
+    # Nor when Trafikverket changes the deviation, or ends it
+    store.trv_relink(store.trv.apply([situation(devs=[deviation(Message="Ny text.")])]))
+    assert store.incident(inc_id)["last_seen"] == old
+    store.trv_relink(store.trv.apply([situation(deleted=True)]))
+    inc = store.incident(inc_id)
+    assert inc["status"] == "cleared" and inc["last_seen"] == old
+
+
+def test_an_old_message_moved_to_now_gets_its_time_back(store):
+    """Repairs incidents moved to now before v0.10.1."""
+    store.trv.apply([situation()])
+    [inc_id] = place(store, radio_event(store))
+    old = _heard_days_ago(store, inc_id, 5, last_seen=NOW)
+    store.trv.touch_linked()
+    assert store.incident(inc_id)["last_seen"] == old
+
+
 # ---------------------------------------------------------------- why not
 
 def test_reasons():

@@ -494,19 +494,38 @@ class TrvStore:
 
     def touch_linked(self, every_sec=3600):
         """Keep radio incidents on the map while their deviation is still
-        current at Trafikverket: their last_seen moves up once an hour.
+        current at Trafikverket: their last_seen moves up once an hour, for
+        KEEP_ALIVE_HOURS after the radio last spoke of them.
         Returns the number of incidents moved."""
         now = self.now()
         with self._lock:
             conn = self._conn()
-            cur = conn.execute(
-                "UPDATE incidents SET last_seen = ? WHERE status = 'active' "
+            self._repair_kept_alive(conn, now)
+            ids = [r[0] for r in conn.execute(
+                "SELECT id FROM incidents WHERE status = 'active' "
                 "AND last_seen < ? AND trv_id IN (SELECT id FROM trv_deviations "
                 "WHERE status = ? AND (end_time IS NULL OR "
                 "until_further_notice = 1 OR end_time >= ?))",
-                (now, self.ago(every_sec), STATUS_ACTIVE, now))
+                (self.ago(every_sec), STATUS_ACTIVE, now))]
+            ids = [i for i in ids if heard_recently(conn, i, now)]
+            for inc_id in ids:
+                conn.execute("UPDATE incidents SET last_seen = ? WHERE id = ?",
+                             (now, inc_id))
             conn.commit()
-        return cur.rowcount
+        return len(ids)
+
+    @staticmethod
+    def _repair_kept_alive(conn, now):
+        """Before v0.10.1 an old message linked to a current deviation (after
+        a rebuild of the map, say) was moved to now and shown as just heard.
+        Give such incidents back the time the radio last spoke of them."""
+        limit = (KEEP_ALIVE_HOURS + 2) * 3600
+        for inc_id, seen in conn.execute(
+                "SELECT id, last_seen FROM incidents WHERE trv_id IS NOT NULL").fetchall():
+            heard = last_heard(conn, inc_id)
+            if heard and (_epoch(seen) or 0) - (_epoch(heard) or 0) > limit:
+                conn.execute("UPDATE incidents SET last_seen = ? WHERE id = ?",
+                             (heard, inc_id))
 
     def last_version_id(self):
         """The newest version's number: versions after it are new."""
@@ -598,6 +617,8 @@ MATCH_SLACK_KM = 1.5        # a deviation this far outside the circle may match
 RADIO_BEFORE_MIN = 45       # Trafikverket may publish this long after the radio
 ENDED_BEFORE_MIN = 30       # a deviation that ended this long before: no match
 PLANNED_DAYS = 2            # works created this long before are planned works
+KEEP_ALIVE_HOURS = 24       # Trafikverket keeps a radio incident current this
+                            # long after the radio last spoke of it
 MIN_SCORE = 1.0
 
 LAYER_TYPES = ("Olycka", "Hinder", "Viktig trafikinformation")
@@ -639,6 +660,24 @@ def distance_km(dev, lat, lon):
         d = _km_to_segment(p, tuple(a), tuple(b))
         best = d if best is None else min(best, d)
     return best
+
+
+def last_heard(conn, inc_id):
+    """When the radio last spoke of an incident (ISO), or None."""
+    row = conn.execute("SELECT MAX(seen_at) FROM incident_events "
+                       "WHERE incident_id = ?", (inc_id,)).fetchone()
+    return row[0] if row else None
+
+
+def heard_recently(conn, inc_id, now_iso):
+    """Whether the radio spoke of the incident within KEEP_ALIVE_HOURS.
+
+    Only then may Trafikverket move its last_seen to now: an old message
+    linked to a long-running deviation (road works, or a rebuild of the map
+    that places last week's messages again) keeps its own time."""
+    heard, now = _epoch(last_heard(conn, inc_id)), _epoch(now_iso)
+    return (heard is not None and now is not None
+            and heard >= now - KEEP_ALIVE_HOURS * 3600)
 
 
 def deviation_ended(dev, now_iso):
@@ -830,15 +869,19 @@ def relink_deviations(conn, dev_ids, now_iso, since_iso):
         ended = deviation_ended(dev, now_iso)
         for inc in conn.execute("SELECT * FROM incidents WHERE trv_id = ?",
                                 (dev_id,)).fetchall():
+            # Only a recent radio incident is moved to now (heard_recently)
+            seen = now_iso if heard_recently(conn, inc["id"], now_iso) \
+                else inc["last_seen"]
             if ended and inc["status"] != "cleared":
                 conn.execute("UPDATE incidents SET status = 'cleared', "
-                             "last_seen = ? WHERE id = ?", (now_iso, inc["id"]))
+                             "last_seen = MAX(last_seen, ?) WHERE id = ?",
+                             (seen, inc["id"]))
                 updated.append(inc["id"])
             elif not ended:
                 conn.execute(
                     "UPDATE incidents SET last_seen = MAX(last_seen, ?), "
                     "lat = ?, lon = ? WHERE id = ?",
-                    (now_iso, dev["lat"], dev["lon"], inc["id"]))
+                    (seen, dev["lat"], dev["lon"], inc["id"]))
                 updated.append(inc["id"])
         if ended or dev.get("lat") is None:
             continue
