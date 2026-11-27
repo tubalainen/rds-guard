@@ -414,9 +414,14 @@ class Tuner:
         if getattr(p, "gain", None) is not None:      # what the pipeline runs with
             gain, ppm = p.gain, p.ppm
         result = (cal or {}).get("result") or {}
+        has_ppm = getattr(p, "has_ppm", True)
         return {
             "gain": gain, "gain_mode": "manual" if _gain_fixed(r) else "auto",
-            "ppm": ppm, "ppm_mode": "manual" if r.ppm != "auto" else "auto",
+            # "28 dB", or an Airspy's "LNA 4, Mixer 4, VGA 5 (by hand)"
+            "gain_text": getattr(p, "gain_text", None),
+            # An Airspy has no ppm (TCXO): none to show
+            "ppm": ppm if has_ppm else None,
+            "ppm_mode": ("manual" if r.ppm != "auto" else "auto") if has_ppm else None,
             "calibrated_at": cal["calibrated_at"] + "Z" if cal else None,
             "calibration": self._busy.get(r.id) or (
                 f"misslyckades: {self._failed[r.id][1]}"[:64] if r.id in self._failed

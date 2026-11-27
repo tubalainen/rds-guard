@@ -307,3 +307,26 @@ def test_station_reports_how_long_since_its_last_group():
     assert st.snapshot()["last_group_age_sec"] is None
     st.stats.inc()
     assert st.snapshot()["last_group_age_sec"] == 0
+
+
+def test_the_af_list_is_kept_per_station():
+    """The AF list tells P4 regions apart even when they all send the shared
+    PI 0xE224 (docker01: 100.3, 102.8 and 103.5 all 0xE224 "P4 SR")."""
+    import rds_guard
+    st = rds_guard.Station("r", "103.5M")
+    # Method A: a plain list (redsea writes kHz)
+    st.update_info("0xE224", {"pi": "0xE224", "alt_frequencies_a": [103500, 101800, 99200]})
+    # Method B: same programme and regional variants
+    st.update_info("0xE224", {"pi": "0xE224", "alt_frequencies_b": {
+        "tuned_frequency": 103500, "same_programme": [100800],
+        "regional_variants": [102800]}})
+    snap = st.snapshot()
+    assert snap["af"] == ["99.2M", "100.8M", "101.8M", "103.5M"]
+    assert snap["af_regional"] == ["102.8M"]
+
+
+def test_af_values_are_read_in_khz_or_mhz_and_nonsense_is_dropped():
+    import rds_guard
+    same, regional = rds_guard.alternative_frequencies(
+        {"alt_frequencies_a": [103.5, 87600, "x", 2000, None], "pi": "0xE224"})
+    assert same == ["103.5M", "87.6M"] and regional == []

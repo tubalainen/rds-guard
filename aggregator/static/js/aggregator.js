@@ -80,7 +80,10 @@ const Aggregator = (() => {
             error: ['bad', 'fel'], stopped: ['warn', 'stoppad'] };
         const receivers = (n.receivers || []).map((r) => {
             const [cls, label] = recState[r.state] || ['warn', r.state || '?'];
-            const tune = [r.gain != null ? `gain ${r.gain} dB${r.gain_mode === 'manual' ? ' (fast)' : ''}` : '',
+            const tune = [r.gain_text
+                    ? `gain ${r.gain_text.replace('(by hand)', '(för hand)').replace(/\(linearity (\d+)\)/, '(linjäritet $1)')}`
+                      + (r.gain_mode === 'manual' && !r.gain_text.includes('(') ? ' (fast)' : '')
+                    : (r.gain != null ? `gain ${r.gain} dB${r.gain_mode === 'manual' ? ' (fast)' : ''}` : ''),
                 r.ppm != null ? `${r.ppm} ppm${r.ppm_mode === 'manual' ? ' (fast)' : ''}` : '',
                 r.calibrated_at ? `kalibrerad ${ago(r.calibrated_at)}` : (r.calibration ? r.calibration : '')]
                 .filter(Boolean).join(' · ');

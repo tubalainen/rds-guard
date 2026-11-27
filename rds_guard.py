@@ -92,7 +92,39 @@ class Stats:
                                            if self.last_at is not None else None)}
 
 
-_INFO_KEYS = ("ps", "long_ps", "prog_type", "tp", "ta", "country", "radiotext")
+_INFO_KEYS = ("ps", "long_ps", "prog_type", "tp", "ta", "country", "radiotext",
+              "af", "af_regional")
+
+
+def _mhz(value):
+    """An AF as redsea writes it (kHz, or MHz in older versions) -> '103.5M'."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    mhz = v / 1000 if v > 1000 else v
+    return f"{mhz:g}M" if 64 <= mhz <= 110 else None
+
+
+def alternative_frequencies(data):
+    """(same programme, regional variants) from a redsea group: the AF list
+    the transmitter sends (method A: a list; method B: an object with the
+    tuned frequency and, per frequency, whether it is the same programme or a
+    regional variant). Lists of '103.5M', possibly empty."""
+    same, regional = [], []
+    for key, value in data.items():
+        if not key.startswith("alt_"):
+            continue
+        if isinstance(value, dict):
+            for sub, freqs in value.items():
+                target = regional if "regional" in sub else same
+                for f in (freqs if isinstance(freqs, list) else [freqs]):
+                    m = _mhz(f)
+                    if m:
+                        target.append(m)
+        elif isinstance(value, list):
+            same += [m for m in (_mhz(f) for f in value) if m]
+    return same, regional
 
 
 class Station:
@@ -130,6 +162,16 @@ class Station:
             for key in ("prog_type", "tp", "ta", "country"):
                 if key in data:
                     self.info[key] = data[key]
+            # The AF list: the frequencies this transmitter says carry the
+            # same programme (and its regional variants). It tells regions
+            # apart even when they all send the shared PI 0xE224
+            same, regional = alternative_frequencies(data)
+            for key, found in (("af", same), ("af_regional", regional)):
+                if found:
+                    have = set(self.info.get(key) or ())
+                    if not set(found) <= have:
+                        self.info[key] = sorted(have | set(found),
+                                                key=lambda f: float(f[:-1]))
             if not had_ps and "ps" in self.info:
                 log.info("[%s %s] Locked on to %s (PI %s, PTY %s, TP %s)",
                          self.receiver_id, self.frequency, self.info["ps"], pi,
