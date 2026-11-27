@@ -95,6 +95,9 @@ def main(argv=None):
                     help="dB (RTL-SDR, default 20) or linearity 0-21 (Airspy, default 8)")
     ap.add_argument("--index", type=int, default=None, help="rtl_sdr device index")
     ap.add_argument("--serial", help="the dongle's serial number (looked up as the satellite does)")
+    for stage, top in (("lna", 14), ("mixer", 15), ("vga", 15)):
+        ap.add_argument(f"--{stage}", type=int, default=None,
+                        help=f"Airspy {stage.upper()} by hand, 0-{top} (as in receivers.yml)")
     args = ap.parse_args(argv)
     f = hz(args.frequency)
     index = args.index
@@ -112,9 +115,13 @@ def main(argv=None):
             print("  WARNING: " + dongles.duplicate_help(found_dongles, serial))
         if args.serial and dongles.is_airspy_serial(args.serial):
             import sdr
-            RADIO = sdr.open(args.serial)
+            stages = {k: getattr(args, k) for k in ("lna", "mixer", "vga")
+                      if getattr(args, k) is not None}
+            RADIO = sdr.open(args.serial, stages or None)
+            if stages:
+                RADIO.prepare()          # the AGCs off, as the satellite does
             FS = RADIO.fs
-            print(f"  serial {args.serial} is an {RADIO.model}, {FS / 1e6:g} MS/s")
+            print(f"  serial {args.serial} is an {RADIO.model}, {FS / 1e6:g} MS/s, gain {RADIO.describe_gain(args.gain)}")
         elif args.serial:
             index = dongles.index_of(args.serial, found_dongles)
             print(f"  serial {args.serial} is index {index}")

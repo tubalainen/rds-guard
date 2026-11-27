@@ -65,7 +65,8 @@ class Probe:
         self.fs = fs
         self.on_done = on_done
         self.done = False
-        self._t0 = None
+        self._t0 = None          # first block
+        self._t1 = None          # first block after settling: the rate counts from here
         self._nbytes = 0
         self._kept = []
         self._kept_n = 0
@@ -76,13 +77,19 @@ class Probe:
         now = self._clock()
         if self._t0 is None:
             self._t0 = now
-        self._nbytes += nbytes
-        elapsed = now - self._t0
-        if elapsed >= SETTLE_SEC and self._kept_n < KEEP_SEC * self.fs:
+        if now - self._t0 < SETTLE_SEC:
+            return                       # the dongle is still starting up
+        # The rate is measured from the first block after settling: what
+        # arrives while the dongle starts must not pull the average down
+        if self._t1 is None:
+            self._t1 = now
+        else:
+            self._nbytes += nbytes
+        if self._kept_n < KEEP_SEC * self.fs:
             self._kept.append(np.array(z, copy=True))
             self._kept_n += len(z)
-        if elapsed >= PROBE_SEC:
-            self.finish(elapsed)
+        if now - self._t0 >= PROBE_SEC:
+            self.finish(now - self._t1)
 
     def finish(self, elapsed=None):
         """Also called when the stream ends early."""
@@ -90,6 +97,6 @@ class Probe:
             return
         self.done = True
         if elapsed is None:
-            elapsed = (self._clock() - self._t0) if self._t0 is not None else 0.0
+            elapsed = (self._clock() - self._t1) if self._t1 is not None else 0.0
         iq = np.concatenate(self._kept) if self._kept else np.zeros(0, np.complex64)
         self.on_done(iq, self._nbytes, elapsed)
