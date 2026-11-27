@@ -24,6 +24,10 @@ def trv_time(offset_min=0):
 
 
 BERGVIK = (59.379, 13.43247)
+# One expected end for every version of a deviation: computed afresh, it
+# changes when a second passes between two apply() calls, and a changed end
+# is pushed as news ("Beräknas klart …")
+END_TIME = trv_time(90)
 
 
 def deviation(dev_id="D1", **kw):
@@ -36,7 +40,7 @@ def deviation(dev_id="D1", **kw):
         "TrafficRestrictionType": "Körfält blockerat",
         "AffectedDirectionValue": "OneDirection",
         "StartTime": trv_time(-10), "CreationTime": trv_time(-8),
-        "EndTime": trv_time(90), "VersionTime": trv_time(-8),
+        "EndTime": END_TIME, "VersionTime": trv_time(-8),
         "Geometry": {"Point": {"WGS84": f"POINT ({BERGVIK[1]} {BERGVIK[0]} 0)"},
                      "Line": {"WGS84": "LINESTRING (13.42 59.3785 0, 13.44 59.3795 0)"}},
     }
