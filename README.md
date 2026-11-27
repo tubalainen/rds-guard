@@ -237,6 +237,11 @@ docker compose exec rds-guard python3 -m dongles
   how to give one a new number with `rtl_eeprom -d <index> -s <new>` (run
   it with only that dongle in use, then replug it).
 - Up to 4 stations per dongle, all within 2 MHz of each other.
+- The dongle is tuned so that no station sits on another's mirror: every
+  receiver leaves a weak mirror image of each station on the other side of
+  the centre, and a weak or absent station's channel would decode its
+  neighbour's mirror instead (the same PI and PS on both). Stations that
+  cannot be kept apart that way get a warning in the log.
 - The same frequency on two dongles is allowed (a warning): the aggregator
   merges what both hear into one event.
 - A connected dongle that is not in the file is left alone; one in the file
@@ -270,6 +275,23 @@ receivers:
 - Check that I/Q is the right way round once, with the satellite stopped:
   `docker compose run --rm rds-guard python3 iq_side.py 103.5M
   --serial 0x…` (a normal result is what the satellite expects).
+- **Wider: `sample_rate:` (optional).** By default an Airspy covers 2 MHz
+  like a dongle. With `sample_rate: 10M` (R2) or `sample_rate: 6M` (Mini)
+  its stations may be up to 7.8 MHz or 4.6 MHz apart, and up to 8 of them:
+
+  ```yaml
+    - serial: "0x62CC68FF3584805B"
+      sample_rate: 10M
+      frequencies: [99.5M, 102.8M, 106.9M]
+  ```
+
+  At these rates one FFT is shared by all stations: on a test machine the
+  satellite's own processing of 10 MS/s with four stations took about half
+  as long as an RTL-SDR's 2.4 MS/s, not counting `airspy_rx` itself and
+  the 40 MB/s it passes over USB and the pipe. If the host cannot keep up,
+  the log says so (`Streaming at … MSPS, not 10: samples are lost`). The
+  calibration decodes each capture as it comes in. Changing
+  `sample_rate:` calibrates the receiver again.
 - **LNA, Mixer and VGA by hand (optional).** Each linearity step is a
   fixed set of the three (with both AGCs off), e.g. step 8 is LNA 3,
   Mixer 0, VGA 10. To set them yourself, add any of `lna:` (0–14),

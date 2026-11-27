@@ -31,6 +31,9 @@ receivers:
   #   name: mast
   #   frequencies: [103.5M, 102.9M]
   #   gain: 10                      # linearity 0-21; or leave it out (auto)
+  #   # Optional, an Airspy only: a wider capture. 10M (R2) or 6M (Mini):
+  #   # up to 8 stations, 7.8 / 4.6 MHz apart (default: 2 MHz, 4 stations)
+  #   sample_rate: 10M
   #   # Optional, an Airspy only: its stages by hand. All three: no gain
   #   # calibration; one or two: those fixed, the others calibrated.
   #   lna: 4                        # 0-14

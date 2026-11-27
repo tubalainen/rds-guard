@@ -18,6 +18,7 @@ stderr goes to the log.
 
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
@@ -85,16 +86,29 @@ def redsea_cmd():
     return cmd + ["-E"]
 
 
-# airspy_rx says this every second
+# airspy_rx says this every second: only logged when samples go missing
 _QUIET = ("Streaming at",)
+_STREAMING_RE = re.compile(r"Streaming at\s+([\d.]+)\s*MSPS")
+SHORT_RATE = 0.97             # below this share of the rate: a warning …
+SHORT_EVERY_SEC = 60          # … at most this often
 
 
-def _stderr_reader(stream, prefix):
+def _stderr_reader(stream, prefix, expected_sps=None):
+    last_warned = None           # (monotonic time can be under a minute after boot)
     try:
         for raw in iter(stream.readline, b""):
             text = raw.decode("utf-8", errors="replace").rstrip()
             if text and text.startswith(_QUIET):
-                log.debug("[%s] %s", prefix, text)
+                m = _STREAMING_RE.search(text)
+                rate = float(m.group(1)) * 1e6 if m else None
+                if (expected_sps and rate is not None and rate < SHORT_RATE * expected_sps
+                        and (last_warned is None
+                             or time.monotonic() - last_warned >= SHORT_EVERY_SEC)):
+                    last_warned = time.monotonic()
+                    log.warning("[%s] %s, not %g: samples are lost (USB, CPU or the "
+                                "pipe cannot keep up)", prefix, text, expected_sps / 1e6)
+                else:
+                    log.debug("[%s] %s", prefix, text)
             elif text:
                 log.info("[%s] %s", prefix, text)
     except Exception:
@@ -225,18 +239,19 @@ class ReceiverPipeline:
         self.check = None
         try:
             self.status.set_starting()
-            radio = sdr.open(self.receiver.serial, getattr(self.receiver, "stages", None))
+            radio = sdr.for_receiver(self.receiver)
             self.model = radio.model
             self.gain, self.ppm = self._settings(radio)
             if not radio.has_ppm:
                 self.ppm = 0
             cmd = radio.stream_cmd(self.receiver.center_hz, self.gain, self.ppm)
             radio.prepare()
-            log.info("[%s] starting (%s, gain %s): %s on %s", rid, radio.model,
-                     radio.describe_gain(self.gain), " ".join(cmd),
+            log.info("[%s] starting (%s, %g MS/s, gain %s): %s on %s", rid, radio.model,
+                     radio.fs / 1e6, radio.describe_gain(self.gain), " ".join(cmd),
                      ", ".join(self.receiver.frequencies))
             rtl = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            threading.Thread(target=_stderr_reader, args=(rtl.stderr, f"{radio.tool} {rid}"),
+            threading.Thread(target=_stderr_reader,
+                             args=(rtl.stderr, f"{radio.tool} {rid}", radio.fs),
                              daemon=True).start()
             # The verdict is worked out on its own thread, so that the
             # channelizer never waits for it

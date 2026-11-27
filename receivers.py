@@ -9,6 +9,8 @@ receivers.yml.
         # gain: auto (default) or e.g. 28.0 to override the calibration
         # ppm: auto (default) or e.g. 12
         # An Airspy only, each optional: lna: 0-14, mixer: 0-15, vga: 0-15
+        # An Airspy only, optional: sample_rate: 10M (R2) or 6M (Mini), for
+        # stations up to ~7.8 / ~4.6 MHz apart and up to 8 of them
 
 Without the file and with one dongle, FM_FREQUENCY / FM_FREQUENCIES are used
 on it (as before v1.0). With several dongles the file is needed.
@@ -21,8 +23,23 @@ import config
 
 MAX_STATIONS = 4
 MAX_SPAN_HZ = 2_000_000          # usable bandwidth at 2.394 MS/s
+# An Airspy's sample_rate: (R2: 2.5M, 10M; Mini: 3M, 6M). From 6 MS/s the
+# span is 80 % of the rate less a channel, and up to 8 stations
+AIRSPY_RATES = (2_500_000, 3_000_000, 6_000_000, 10_000_000)
+WIDE_RATE = 6_000_000
+MAX_STATIONS_WIDE = 8
 # A single station is captured off-centre: away from the dongle's DC spike
 SINGLE_OFFSET_HZ = 250_000
+# Every receiver leaves a weak mirror of each station on the other side of
+# the centre (I/Q imbalance, -25 to -45 dB). Two stations placed
+# symmetrically (the midpoint of two) see each other's mirror, and when one
+# is weak or absent its channel decodes the other's mirror instead: P4
+# Värmland on the 102.8 channel. So the centre is chosen where no mirror
+# lands within MIRROR_GUARD_HZ of a station and no station within
+# DC_GUARD_HZ of the centre.
+MIRROR_GUARD_HZ = 250_000
+DC_GUARD_HZ = 150_000
+CENTER_STEP_HZ = 5_000
 
 
 class ReceiverError(Exception):
@@ -40,7 +57,16 @@ class Receiver:
     lna: object = None
     mixer: object = None
     vga: object = None
+    sample_rate: object = None         # an Airspy's, in S/s (None: the lowest that fits)
     warnings: list = field(default_factory=list)
+
+    @property
+    def max_span_hz(self):
+        return span_for(self.sample_rate)
+
+    @property
+    def max_stations(self):
+        return MAX_STATIONS_WIDE if (self.sample_rate or 0) >= WIDE_RATE else MAX_STATIONS
 
     @property
     def stages(self):
@@ -64,10 +90,14 @@ class Receiver:
 
     @property
     def center_hz(self):
+        return self.placement()[0]
+
+    def placement(self):
+        """(centre Hz, True when no station sits on another's mirror)."""
         hz = self.freqs_hz
         if len(hz) == 1:
-            return hz[0] + SINGLE_OFFSET_HZ
-        return min(hz) + (max(hz) - min(hz)) // 2
+            return hz[0] + SINGLE_OFFSET_HZ, True
+        return place_center(hz, max(self.max_span_hz // 2, MAX_SPAN_HZ // 2))
 
 
 def _freq(value, where):
@@ -95,6 +125,53 @@ def _auto_or(value, kind, where):
 STAGE_MAX = {"lna": 14, "mixer": 15, "vga": 15}
 
 
+def place_center(hz, half):
+    """The centre for these stations: every station within half (Hz) of it,
+    no station's mirror within MIRROR_GUARD_HZ of another station, none
+    within DC_GUARD_HZ of the centre; the nearest such to the midpoint.
+    (centre, ok); when none exists, the one that keeps them furthest apart,
+    and ok False."""
+    mid = min(hz) + (max(hz) - min(hz)) // 2
+    lo, hi = max(hz) - half, min(hz) + half
+
+    def margin(c):
+        mirror = min(abs((a - c) + (b - c)) for i, a in enumerate(hz) for b in hz[i + 1:])
+        dc = min(abs(a - c) for a in hz)
+        return min(mirror / MIRROR_GUARD_HZ, dc / DC_GUARD_HZ)
+    steps = range(0, max(0, (hi - lo)) // CENTER_STEP_HZ + 1)
+    candidates = sorted({c for k in steps for c in (mid - k * CENTER_STEP_HZ,
+                                                    mid + k * CENTER_STEP_HZ)
+                         if lo <= c <= hi} or {mid}, key=lambda c: (abs(c - mid), c))
+    for c in candidates:
+        if margin(c) >= 1:
+            return c, True
+    return max(candidates, key=lambda c: (margin(c), -abs(c - mid))), False
+
+
+def span_for(rate):
+    """How far apart a receiver's stations may be at this sample rate."""
+    if not rate or rate < WIDE_RATE:
+        return MAX_SPAN_HZ
+    return int(0.8 * rate) - 200_000
+
+
+def _rate(value, where):
+    if value is None or str(value).strip().lower() in ("", "auto"):
+        return None
+    text = str(value).strip().upper().replace("MS/S", "M").replace("MSPS", "M")
+    try:
+        hz = float(text.rstrip("M")) * (1e6 if text.endswith("M") or float(text.rstrip("M")) < 100
+                                        else 1)
+    except ValueError:
+        hz = -1
+    hz = int(round(hz))
+    if hz not in AIRSPY_RATES:
+        raise ReceiverError(f"{where}: sample_rate must be one of "
+                            + ", ".join(f"{r / 1e6:g}M" for r in AIRSPY_RATES)
+                            + f" (got '{value}')")
+    return hz
+
+
 def _stage(value, name, where):
     if value is None or str(value).strip().lower() in ("", "auto"):
         return None
@@ -112,15 +189,29 @@ def check(receiver, where):
     hz = receiver.freqs_hz
     if not hz:
         raise ReceiverError(f"{where}: no frequencies")
-    if len(hz) > MAX_STATIONS:
-        raise ReceiverError(f"{where}: {len(hz)} frequencies, at most {MAX_STATIONS} "
-                            "per dongle")
-    if max(hz) - min(hz) > MAX_SPAN_HZ:
+    most = getattr(receiver, "max_stations", MAX_STATIONS)
+    span = getattr(receiver, "max_span_hz", MAX_SPAN_HZ)
+    if len(hz) > most:
+        raise ReceiverError(f"{where}: {len(hz)} frequencies, at most {most} "
+                            "per dongle" + ("" if most > MAX_STATIONS else
+                                            " (an Airspy at sample_rate: 10M or 6M takes 8)"))
+    if max(hz) - min(hz) > span:
         raise ReceiverError(f"{where}: the frequencies span "
                             f"{(max(hz) - min(hz)) / 1e6:.2f} MHz; one dongle covers "
-                            "2 MHz. Put the others on another dongle")
+                            f"{span / 1e6:g} MHz. Put the others on another dongle"
+                            + ("" if span > MAX_SPAN_HZ else
+                               " (or an Airspy at sample_rate: 10M: 7.8 MHz)"))
     if len(set(hz)) != len(hz):
         raise ReceiverError(f"{where}: a frequency is listed twice")
+
+
+def _mirror_warning(r):
+    center, ok = r.placement()
+    if not ok:
+        r.warnings.append(
+            "the stations cannot all be kept off each other's mirror (centre "
+            f"{center / 1e6:.3f} MHz): a weak station may decode a neighbour's "
+            "mirror instead of itself. Spread them less, or over two receivers")
 
 
 def parse(data):
@@ -146,9 +237,14 @@ def parse(data):
                      frequencies=[_freq(f, where) for f in freqs],
                      gain=_auto_or(item.get("gain"), float, f"{where}, gain"),
                      ppm=_auto_or(item.get("ppm"), int, f"{where}, ppm"),
+                     sample_rate=_rate(item.get("sample_rate"), where),
                      **{k: _stage(item.get(k), k, where) for k in STAGE_MAX})
-        check(r, where)
         airspy = dongles.is_airspy_serial(serial)
+        if r.sample_rate and not airspy:
+            r.warnings.append("sample_rate: is for an Airspy; an RTL-SDR runs at 2.4 MS/s")
+            r.sample_rate = None
+        check(r, where)
+        _mirror_warning(r)
         if airspy and r.ppm != "auto":
             r.warnings.append("ppm: is not used for an Airspy (its clock is a TCXO)")
         if r.stages and not airspy:
@@ -211,6 +307,7 @@ def load(path=None, dongles=None):
         serial = dongles[0].serial
     r = Receiver(serial=serial, frequencies=[_freq(f, "FM_FREQUENCY") for f in freqs])
     check(r, "FM_FREQUENCIES")
+    _mirror_warning(r)
     if config.RTL_GAIN or config.PPM_CORRECTION:
         r.warnings.append("RTL_GAIN and PPM_CORRECTION in .env are not used any more: "
                           "RDS Guard finds the best gain and ppm itself. To fix them, "
