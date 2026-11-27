@@ -69,11 +69,21 @@ def carrier_offset(z, f0):
     return float(np.mean(d) * (FS / k) / (2 * np.pi))
 
 
+MIN_DIFF_DB = 10   # less between the two sides: noise, not a station
+
+
 def analyse(z, label):
+    """Where the station is (-OFFSET or +OFFSET), or None when the two sides
+    are too alike to tell: then there is no station, only noise."""
     lo, hi = band_power(z, -OFFSET), band_power(z, +OFFSET)
+    diff = abs(lo - hi)
+    if diff < MIN_DIFF_DB:
+        print(f"  {label}: power at -250 kHz {lo:6.1f} dB, at +250 kHz {hi:6.1f} dB"
+              f" -> no station here ({diff:.1f} dB difference: noise)")
+        return None
     side = "BELOW centre (-250 kHz)" if lo > hi else "ABOVE centre (+250 kHz)"
     print(f"  {label}: power at -250 kHz {lo:6.1f} dB, at +250 kHz {hi:6.1f} dB"
-          f" -> the station is {side} ({abs(lo - hi):.1f} dB difference)")
+          f" -> the station is {side} ({diff:.1f} dB difference)")
     return -OFFSET if lo > hi else OFFSET
 
 
@@ -131,10 +141,23 @@ def main(argv=None):
             print("  the capture gave too little data: is the satellite stopped?")
             return 1
         found = analyse(z, label)
+        if found is None:
+            results[label] = None
+            continue
         expected = f - center                   # where it is if I/Q is as assumed
         off = carrier_offset(z, found)
         results[label] = (found == expected, off, center)
         print(f"  carrier {off:+.0f} Hz from where it should be", flush=True)
+    if all(r is None for r in results.values()):
+        print()
+        print(f"RESULT: no station heard on {f / 1e6:.3f} MHz with this dongle at this gain "
+              f"(under {MIN_DIFF_DB} dB above the noise) - nothing to judge, no ppm")
+        return 0
+    if any(r is None for r in results.values()):
+        print()
+        print("RESULT: unclear (one capture saw a station, the other only noise) - "
+              "try a stronger station or another gain")
+        return 0
     normal = all(ok for ok, _, _ in results.values())
     mirrored = not any(ok for ok, _, _ in results.values())
     print()
