@@ -166,13 +166,19 @@ TRANSCRIPTION_FALLBACK = os.environ.get(
 # Set UPLINK_URL + UPLINK_TOKEN to forward events, their audio and a periodic
 # status heartbeat to an RDS Guard aggregator.  Leave UPLINK_URL empty to run
 # standalone (the default).  Everything keeps working locally either way.
-UPLINK_URL = os.environ.get("UPLINK_URL", "").strip().rstrip("/")
+UPLINK_URL = (os.environ.get("AGGREGATOR_URL", "").strip()
+              or os.environ.get("UPLINK_URL", "").strip()).rstrip("/")
+# Optional: without a token the satellite asks to join, and the aggregator's
+# owner approves it under Admin -> Noder (or JOIN_KEY approves it at once)
 UPLINK_TOKEN = os.environ.get("UPLINK_TOKEN", "").strip()
+# The same secret on the satellite and the aggregator approves the join at
+# once (e.g. both containers in one docker-compose.yml)
+JOIN_KEY = os.environ.get("JOIN_KEY", "").strip()
 # Free-text name shown on the aggregator next to this node's reports
 NODE_NAME = os.environ.get("NODE_NAME", "").strip()
 UPLINK_HEARTBEAT_SEC = max(10, _int(os.environ.get("UPLINK_HEARTBEAT_SEC"), 30))
 # Queued items older than this are dropped instead of delivered late
-UPLINK_MAX_AGE_HOURS = max(1, _int(os.environ.get("UPLINK_MAX_AGE_HOURS"), 72))
+UPLINK_MAX_AGE_HOURS = max(1, _int(os.environ.get("UPLINK_MAX_AGE_HOURS"), 168))
 
 # Set by docker-compose.yml when the aggregator runs in the same compose
 # project: UPLINK_URL then points at it, and until UPLINK_TOKEN is set this
@@ -181,13 +187,12 @@ UPLINK_MAX_AGE_HOURS = max(1, _int(os.environ.get("UPLINK_MAX_AGE_HOURS"), 72))
 # installation only records (unless LOCAL_PROCESSING / SATELLITE_MQTT_ENABLED
 # say otherwise).
 LOCAL_AGGREGATOR = _bool(os.environ.get("LOCAL_AGGREGATOR", "false"))
-if LOCAL_AGGREGATOR and not UPLINK_TOKEN:
+if LOCAL_AGGREGATOR and not UPLINK_TOKEN and not JOIN_KEY:
     if UPLINK_URL:
         print("NOTE: the aggregator in this compose project is not used yet: "
-              "set UPLINK_TOKEN in .env (docker compose exec aggregator "
-              "python3 -m aggregator.nodes add \"<name>\") and run "
-              "docker compose up -d. Running standalone until then.",
-              file=sys.stderr)
+              "set JOIN_KEY in .env (any long random text, e.g. "
+              "'openssl rand -hex 16') and run docker compose up -d. "
+              "Running standalone until then.", file=sys.stderr)
     UPLINK_URL = ""
 
 UPLINK_ENABLED: bool = bool(UPLINK_URL)
@@ -246,10 +251,4 @@ if UPLINK_ENABLED:
             file=sys.stderr,
         )
         sys.exit(1)
-    if not UPLINK_TOKEN:
-        print(
-            "ERROR: UPLINK_URL is set but UPLINK_TOKEN is empty. Ask the "
-            "aggregator's owner for a node token. Aborting.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+

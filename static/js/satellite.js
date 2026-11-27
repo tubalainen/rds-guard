@@ -49,6 +49,7 @@ const Satellite = (() => {
     const UPLINK = {
         connected: 'ansluten', starting: 'ansluter…', offline: 'offline',
         unauthorized: 'fel token', incompatible: 'behöver uppdateras',
+        joining: 'ansluter…', pending: 'väntar på godkännande', rejected: 'nekad',
     };
 
     function renderStatus() {
@@ -68,7 +69,7 @@ const Satellite = (() => {
         document.getElementById('foot-mqtt').textContent = `MQTT ${s.mqtt_connected ? 'ansluten' : 'ej ansluten'}`;
         const up = s.uplink;
         document.getElementById('foot-uplink').textContent = up && up.enabled
-            ? `Uplink ${UPLINK[up.state] || up.state}${up.queue_depth ? ` (${up.queue_depth} i kö)` : ''}` : '';
+            ? `Uplink ${UPLINK[up.state] || up.state}${up.verify ? ` (kod ${up.verify})` : ''}${up.queue_depth ? ` (${up.queue_depth} i kö)` : ''}` : '';
         renderDebugStatus();
     }
 

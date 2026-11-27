@@ -1726,6 +1726,8 @@ def main():
             status_fn=_uplink_status,
             heartbeat_sec=config.UPLINK_HEARTBEAT_SEC,
             max_age_hours=config.UPLINK_MAX_AGE_HOURS,
+            join_key=config.JOIN_KEY,
+            suggested_location=config.NODE_LOCATION or None,
         )
         event_store.enable_outbox(uplink.notify)
 

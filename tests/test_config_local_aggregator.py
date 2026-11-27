@@ -27,7 +27,7 @@ def test_without_a_token_it_runs_standalone_with_mqtt():
     cfg, err = _config(**COMPOSE)
     assert cfg == {"UPLINK_ENABLED": False, "UPLINK_URL": "",
                    "LOCAL_PROCESSING": True, "MQTT_ENABLED": True}
-    assert "set UPLINK_TOKEN" in err
+    assert "set JOIN_KEY" in err
 
 
 def test_with_a_token_it_only_records_and_hands_over_mqtt():
@@ -48,3 +48,16 @@ def test_a_remote_satellite_is_unchanged():
                      MQTT_ENABLED="true")
     assert cfg == {"UPLINK_ENABLED": True, "UPLINK_URL": "https://rds.example.com",
                    "LOCAL_PROCESSING": True, "MQTT_ENABLED": True}
+
+
+def test_join_key_joins_the_local_aggregator_without_a_token():
+    cfg, _ = _config(**COMPOSE, JOIN_KEY="hemlig")
+    assert cfg == {"UPLINK_ENABLED": True, "UPLINK_URL": "http://aggregator:8081",
+                   "LOCAL_PROCESSING": False, "MQTT_ENABLED": False}
+
+
+def test_a_remote_satellite_may_start_without_a_token():
+    """It asks to join instead of refusing to start."""
+    cfg, _ = _config(AGGREGATOR_URL="https://rds.example.com/")
+    assert cfg["UPLINK_ENABLED"] is True
+    assert cfg["UPLINK_URL"] == "https://rds.example.com"

@@ -491,13 +491,49 @@ def _wake():
             log.debug("Outbox wake callback failed", exc_info=True)
 
 
-def outbox_head():
-    """Return the oldest outbox row as a dict, or None if the queue is empty."""
+def outbox_head(kinds=None):
+    """Return the oldest outbox row (of the given kinds) as a dict, or None
+    if that queue is empty."""
     conn = _conn()
-    row = conn.execute(
-        "SELECT * FROM outbox ORDER BY id ASC LIMIT 1"
-    ).fetchone()
+    if kinds:
+        kinds = list(kinds)
+        row = conn.execute(
+            f"SELECT * FROM outbox WHERE kind IN ({','.join('?' * len(kinds))}) "
+            "ORDER BY id ASC LIMIT 1", kinds).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM outbox ORDER BY id ASC LIMIT 1"
+        ).fetchone()
     return dict(row) if row else None
+
+
+def outbox_event_pending(event_id, before_id):
+    """Is an event snapshot or delete of this event queued before before_id?
+
+    The audio of an event waits for that, so the aggregator always knows
+    the event when its audio arrives.
+    """
+    row = _conn().execute(
+        "SELECT 1 FROM outbox WHERE event_id = ? AND kind IN (?, ?) AND id < ? "
+        "LIMIT 1", (event_id, OUTBOX_EVENT, OUTBOX_DELETE, before_id)).fetchone()
+    return row is not None
+
+
+def get_setting(key, default=None):
+    row = _conn().execute("SELECT value FROM settings WHERE key = ?",
+                          (key,)).fetchone()
+    return row[0] if row else default
+
+
+def set_setting(key, value):
+    with _lock:
+        conn = _conn()
+        if value is None:
+            conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+        else:
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                         (key, str(value)))
+        conn.commit()
 
 
 def outbox_latest_event_rev(event_id):
