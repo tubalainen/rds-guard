@@ -250,13 +250,14 @@ fixed values) overdrive its amplifier: intermodulation then spoils RDS on
 every station, even when nothing visibly clips. So the satellite finds the
 gain itself, for each dongle and for all its stations together:
 
-1. **Frequency correction (ppm)** from how far each station's carrier is
-   off its nominal frequency, the median over the stations.
-2. **A quick sweep** over all the dongle's gain steps, about a second each:
+1. **A quick sweep** over all the dongle's gain steps, about a second each:
    ADC clipping and the signal-to-noise of each station's 19 kHz pilot and
    57 kHz RDS carrier.
-3. **A check with real decoding** of the four best steps, 8 s per station:
-   RDS groups per second and block errors.
+2. **Frequency correction (ppm)**, measured on the way: how far each
+   carrier is off its nominal frequency, at every step that does not clip
+   and on every station with a clear pilot. The median of all of them.
+3. **A check with real decoding** of the four best steps, 8 s per station,
+   with that correction: RDS groups per second and block errors.
 4. **The choice:** the step where the *worst* station decodes best, so no
    station is sacrificed for another; within 5 %, the lower gain, for margin.
    A station that decodes at no step (too far, too weak) is left out of

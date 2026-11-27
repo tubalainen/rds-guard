@@ -200,47 +200,71 @@ def calibrate(receiver, index, gains, capture_fn=capture, quality_fn=redsea_qual
         z = iq_from_u8(raw)
         return {f: demod_all(z, hz - center) for f, hz in freqs}
 
-    # 1. ppm, at a middle gain without correction
-    if want_ppm:
-        mid = dongles.nearest([g for g in gains if g > 0], START_GAIN) if gains else START_GAIN
-        raw = capture_fn(index, center, mid, 0, PPM_SEC)
-        per = {}
-        for f, m in mpx_of(raw).items():
+    def ppm_estimates(mpx, label):
+        """(freq, ppm) for every station clear enough to measure on."""
+        out = []
+        for f, m in mpx.items():
             pilot = tone_snr_db(m)[0]
             v = ppm_from_mpx(m, dict(freqs)[f])
             if v is not None and pilot >= HEARD_PILOT_DB:
-                per[f] = v
-            else:
-                progress(f"[{rid}] {f}: pilot {pilot:.0f} dB, too weak to measure ppm on")
-        values = sorted(per.values())
-        k = len(values)
-        measured = (values[k // 2] if k % 2 else (values[k // 2 - 1] + values[k // 2]) / 2) if k else 0.0
-        if not k:
-            progress(f"[{rid}] no station clear enough to measure ppm: using 0")
-            ppm = 0
-        elif abs(measured) > PPM_LIMIT:
-            progress(f"[{rid}] ppm {measured:.0f} is not believable: using 0")
-            ppm = 0
-        else:
-            ppm = int(round(measured))
-            progress(f"[{rid}] ppm {ppm} (per station: "
-                     + ", ".join(f"{f} {v:.1f}" for f, v in per.items()) + ")")
-    ppm = ppm or 0
-    if not want_gain:
-        return {"gain": gain, "ppm": ppm, "stations": {}, "steps": []}
+                out.append((f, v))
+        return out
 
-    # 2. sweep (rtl_sdr takes -g 0 as the tuner's automatic gain: never)
+    def settle_ppm(estimates):
+        """The median of all estimates (steps × stations), rounded."""
+        for f, _ in freqs:
+            if not any(e[0] == f for e in estimates):
+                progress(f"[{rid}] {f}: pilot never above {HEARD_PILOT_DB} dB, too weak to "
+                         "measure ppm on")
+        values = sorted(v for _, v in estimates)
+        k = len(values)
+        if not k:
+            progress(f"[{rid}] no station clear enough to measure ppm on: using 0")
+            return 0
+        measured = values[k // 2] if k % 2 else (values[k // 2 - 1] + values[k // 2]) / 2
+        if abs(measured) > PPM_LIMIT:
+            progress(f"[{rid}] ppm {measured:.0f} is not believable: using 0")
+            return 0
+        per = {}
+        for f, v in estimates:
+            per.setdefault(f, []).append(v)
+        progress(f"[{rid}] ppm {int(round(measured))} (median of {k} measurements; per station: "
+                 + ", ".join(f"{f} {sorted(v)[len(v) // 2]:.1f}" for f, v in per.items()) + ")")
+        return int(round(measured))
+
+    # Gain fixed, ppm automatic: measure ppm at that gain, and stop
+    if not want_gain:
+        if want_ppm:
+            raw = capture_fn(index, center, gain or START_GAIN, 0, PPM_SEC)
+            ppm = settle_ppm(ppm_estimates(mpx_of(raw), "fixed gain"))
+        return {"gain": gain, "ppm": ppm or 0, "stations": {}, "steps": []}
+
+    # 1. sweep, without ppm correction unless ppm is fixed (rtl_sdr takes
+    # -g 0 as the tuner's automatic gain: never). The frequency error is
+    # measured on the way, at every step that does not clip, on every
+    # station heard clearly: far steadier than one capture at a guessed
+    # gain, and it costs nothing extra.
+    sweep_ppm = 0 if want_ppm else (ppm or 0)
     gains = [g for g in gains if g > 0] or [START_GAIN]
     steps = []
+    estimates = []
     for i, g in enumerate(gains, 1):
-        raw = capture_fn(index, center, g, ppm, SWEEP_SEC)
+        raw = capture_fn(index, center, g, sweep_ppm, SWEEP_SEC)
         clip = clip_fraction(raw)
-        snrs = {f: tone_snr_db(m) for f, m in mpx_of(raw).items()}
+        mpx = mpx_of(raw)
+        snrs = {f: tone_snr_db(m) for f, m in mpx.items()}
+        if want_ppm and clip <= CLIP_LIMIT:
+            estimates += ppm_estimates(mpx, g)
         steps.append({"gain": g, "clip": clip, "snr": snrs,
                       "level": round(level_dbfs(iq_from_u8(raw)), 1)})
         progress(f"[{rid}] {i}/{len(gains)} gain {g:4.1f} dB: clip {clip * 100:.3f} %, "
                  + ", ".join(f"{f} pilot {s[0]:.0f} dB RDS {s[1]:.0f} dB"
                              for f, s in snrs.items()))
+
+    # 2. ppm from the sweep
+    if want_ppm:
+        ppm = settle_ppm(estimates)
+    ppm = ppm or 0
 
     # 3. verify the best with redsea. Ranked by the worst station that is
     # heard at all (a clear pilot at some step): a station too far away to
