@@ -14,6 +14,11 @@ Key parameters:
   Decimation:      14  → output 171 000 Hz per station
   LPF cutoff:      80 kHz  (FM channel half-width is 100 kHz)
   Filter length:   127 taps (Blackman-windowed sinc)
+
+An Airspy gives signed 16-bit IQ at 3 MS/s (Mini) or 2.5 MS/s (R2), which
+171 kHz does not divide: it is decimated to 250 kHz (12 or 10), demodulated
+there and the MPX resampled 171/250 (polyphase), scaled to the same
+radians per 171 kHz sample as the RTL path. The RTL path has no resampler.
 """
 
 import logging
@@ -34,6 +39,53 @@ _NTAPS = 127              # FIR filter length
 _LPF_CUTOFF = 80_000      # LPF cutoff in Hz
 
 
+_MID_RATE = 250_000       # where a non-RTL rate is decimated to
+_RS_TAPS = 32             # resampler taps per phase (at the 250 kHz rate)
+_RS_CUTOFF = 80_000       # resampler low-pass (MPX ends at 60 kHz)
+
+
+def plan(fs):
+    """(decimation, resampler (up, down) or None) to reach 171 kHz."""
+    if fs % _OUTPUT_RATE == 0:
+        return fs // _OUTPUT_RATE, None
+    if fs % _MID_RATE == 0 and fs >= 2 * _MID_RATE:
+        from math import gcd
+        g = gcd(_OUTPUT_RATE, _MID_RATE)
+        return fs // _MID_RATE, (_OUTPUT_RATE // g, _MID_RATE // g)
+    raise ValueError(f"sample rate {fs} cannot be brought to 171 kHz")
+
+
+class Resampler:
+    """Polyphase rational resampler for a real stream, up/down, with its
+    state carried from block to block (no click at the joins)."""
+
+    def __init__(self, up, down, fs_in, taps=_RS_TAPS, cutoff_hz=_RS_CUTOFF):
+        self.up, self.down, self.k = up, down, taps
+        n = up * taps
+        fc = cutoff_hz / (fs_in * up)
+        t = np.arange(n) - (n - 1) / 2
+        h = np.sinc(2 * fc * t) * np.kaiser(n, 8.0)
+        h *= up / h.sum()
+        # bank[p, k] = h[p + k * up]: output with phase p uses x[i - k]
+        self._bank = h.reshape(taps, up).T.astype(np.float32)
+        self._hist = np.zeros(taps - 1, dtype=np.float32)
+        self._u = 0               # next output, in 1/up input samples from block start
+        self._k = np.arange(taps)
+
+    def process(self, x):
+        x = np.asarray(x, dtype=np.float32)
+        n = len(x)
+        ext = np.concatenate([self._hist, x])
+        end = self.up * n
+        u = np.arange(self._u, end, self.down, dtype=np.int64)
+        i = u // self.up + (self.k - 1)       # index in ext of x[u // up]
+        p = u % self.up
+        y = np.einsum("ij,ij->i", ext[i[:, None] - self._k[None, :]], self._bank[p])
+        self._u = int(u[-1] + self.down - end) if len(u) else self._u - end
+        self._hist = ext[-(self.k - 1):]
+        return y.astype(np.float32)
+
+
 def _make_lpf(cutoff_hz: float, fs: float, ntaps: int = _NTAPS) -> np.ndarray:
     """Blackman-windowed sinc low-pass filter (real, symmetric)."""
     fc = cutoff_hz / fs
@@ -46,6 +98,11 @@ class _StationDSP:
     """Per-station DSP state: phase accumulator, filter overlap, FM prev sample."""
 
     def __init__(self, delta_f: float, fs: float = _FS, pipe: bool = True):
+        self._decim, rs = plan(int(fs))
+        # A resampled MPX is in radians per 250 kHz sample: scaled to per
+        # 171 kHz sample, as the RTL path (redsea, recording, ppm alike)
+        self._rs = Resampler(*rs, fs_in=fs / self._decim) if rs else None
+        self._rs_scale = (fs / self._decim) / _OUTPUT_RATE
         # Frequency shift down by delta_f (the station's offset from the
         # centre): multiply by exp(-j 2 pi delta_f t). (Before v1.0 the sign
         # was +, which picked the mirror frequency centre - delta_f.)
@@ -110,8 +167,8 @@ class _StationDSP:
         filtered = y[_NTAPS - 1 : _NTAPS - 1 + n]
         self._overlap = zb[-(_NTAPS - 1):]
 
-        # 3. Decimate by 14
-        decimated = filtered[::_DECIMATION]
+        # 3. Decimate (by 14 for the RTL-SDR)
+        decimated = filtered[::self._decim]
         if len(decimated) == 0:
             return None
 
@@ -121,6 +178,10 @@ class _StationDSP:
         product = z_ext[1:] * np.conj(z_ext[:-1])
         discriminated = np.angle(product).astype(np.float32)
         self._prev_z = decimated[-1]
+        if self._rs is not None:
+            discriminated = self._rs.process(discriminated) * np.float32(self._rs_scale)
+            if len(discriminated) == 0:
+                return None
         return discriminated
 
     def _write(self, data: bytes) -> None:
@@ -152,6 +213,15 @@ def iq_from_u8(raw):
     return (iq[0::2] + 1j * iq[1::2]).astype(np.complex64)
 
 
+def iq_from_s16(raw):
+    """airspy_rx's signed 16-bit IQ bytes (-t 2) -> normalised complex64."""
+    a = np.frombuffer(raw[:len(raw) // 4 * 4], dtype="<i2").astype(np.float32) / 32768.0
+    return (a[0::2] + 1j * a[1::2]).astype(np.complex64)
+
+
+_FORMATS = {"u8": (2, iq_from_u8), "s16": (4, iq_from_s16)}
+
+
 def demod_all(z, delta_f, fs=_FS):
     """A whole IQ capture -> one station's MPX at 171 kHz (offline)."""
     dsp = _StationDSP(delta_f, fs, pipe=False)
@@ -173,11 +243,13 @@ class Channelizer(threading.Thread):
         # ch.pipe_read_fds[i] is the read end of station i's PCM pipe
     """
 
-    def __init__(self, rtl_sdr_stdout, frequencies_hz: list, center_freq_hz: int):
+    def __init__(self, rtl_sdr_stdout, frequencies_hz: list, center_freq_hz: int,
+                 fs: int = _FS, fmt: str = "u8"):
         super().__init__(daemon=True, name="channelizer")
         self._src = rtl_sdr_stdout
+        self._bytes_per_sample, self._to_iq = _FORMATS[fmt]
         self._stations = [
-            _StationDSP(freq_hz - center_freq_hz)
+            _StationDSP(freq_hz - center_freq_hz, fs)
             for freq_hz in frequencies_hz
         ]
 
@@ -188,7 +260,7 @@ class Channelizer(threading.Thread):
 
     def run(self) -> None:
         log.info("Channelizer started (%d station(s))", len(self._stations))
-        bytes_per_block = _BLOCK * 2   # 2 bytes per sample (I byte + Q byte)
+        bytes_per_block = _BLOCK * self._bytes_per_sample
         try:
             while True:
                 raw = self._src.read(bytes_per_block)
@@ -197,7 +269,7 @@ class Channelizer(threading.Thread):
                 if len(raw) < bytes_per_block:
                     continue  # short read — skip partial block
 
-                z = iq_from_u8(raw)
+                z = self._to_iq(raw)
 
                 for st in self._stations:
                     st.process(z)

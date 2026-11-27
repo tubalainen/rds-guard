@@ -1,4 +1,4 @@
-# The satellite's receivers: one entry per RTL-SDR dongle.
+# The satellite's receivers: one entry per RTL-SDR dongle or Airspy (Mini, R2).
 # Put this file in the satellite's data folder as rds-data/receivers.yml.
 # Without it, one dongle listens to FM_FREQUENCY / FM_FREQUENCIES from .env.
 #
@@ -6,6 +6,8 @@
 #   docker compose exec rds-guard python3 -m dongles
 # Two dongles with the same serial number (00000001 is common) cannot be
 # told apart: give one a new number with rtl_eeprom (the command says how).
+# An Airspy's serial number is 64 bits in hex, e.g. "0x644064DC2B1C2E4F";
+# its gain is the linearity gain 0-21, and it has no ppm (TCXO).
 #
 # Gain and ppm are found automatically for each dongle, for all its stations
 # together (at the first start, when decoding drops, and with Admin ->
@@ -23,3 +25,8 @@ receivers:
   #   name: källare
   #   frequencies: [99.1M]
   #   gain: 19.7
+
+  # - serial: "0x644064DC2B1C2E4F"  # an Airspy Mini or R2
+  #   name: mast
+  #   frequencies: [103.5M, 102.9M]
+  #   gain: 10                      # linearity 0-21; or leave it out (auto)

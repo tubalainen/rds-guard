@@ -8,6 +8,10 @@ checks the ppm sign. It also lists the dongles the way the satellite reads
 them (dongles.py, next to this file). It changes nothing.
 
     python3 iq_side.py 103.5M [--gain 20] [--serial 00000001 | --index 0]
+    python3 iq_side.py 103.5M --gain 12 --serial 0x644064DC2B1C2E4F   # an Airspy
+
+For an Airspy (Mini or R2) --gain is its linearity gain (0-21); it has no
+ppm correction, so the ppm check is left out (a TCXO is within about 1 ppm).
 """
 
 import argparse
@@ -18,6 +22,7 @@ import numpy as np
 
 FS = 2_394_000
 OFFSET = 250_000
+RADIO = None            # an sdr.Airspy, when --serial is one
 
 
 def hz(text):
@@ -27,6 +32,13 @@ def hz(text):
 
 
 def capture(center, gain, index, seconds=1.0, ppm=0):
+    if RADIO is not None:
+        import sdr
+        cmd = RADIO.capture_cmd(center, gain, 0, int(FS * seconds))
+        print(f"  capturing: {' '.join(cmd)}", flush=True)
+        out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             timeout=30, check=False).stdout
+        return sdr.Airspy.iq(out)
     n = int(FS * seconds) * 2
     cmd = ["rtl_sdr", "-f", str(center), "-s", str(FS), "-g", str(gain),
            "-n", str(n // 2), "-d", str(index)] + (["-p", str(ppm)] if ppm else []) + ["-"]
@@ -51,7 +63,7 @@ def carrier_offset(z, f0):
     the carrier is from f0."""
     n = np.arange(len(z))
     y = z * np.exp(-2j * np.pi * f0 * n / FS)
-    k = 14                                     # 2.394 MS/s → 171 kS/s
+    k = 14 if FS % 171_000 == 0 else FS // 250_000   # → 171 or 250 kS/s
     y = y[: len(y) // k * k].reshape(-1, k).mean(axis=1)
     d = np.angle(y[1:] * np.conj(y[:-1]))
     return float(np.mean(d) * (FS / k) / (2 * np.pi))
@@ -66,9 +78,11 @@ def analyse(z, label):
 
 
 def main(argv=None):
+    global RADIO, FS
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("frequency", help="a station you receive well, e.g. 103.5M")
-    ap.add_argument("--gain", type=float, default=20.0)
+    ap.add_argument("--gain", type=float, default=None,
+                    help="dB (RTL-SDR, default 20) or linearity 0-21 (Airspy, default 8)")
     ap.add_argument("--index", type=int, default=None, help="rtl_sdr device index")
     ap.add_argument("--serial", help="the dongle's serial number (looked up as the satellite does)")
     args = ap.parse_args(argv)
@@ -79,11 +93,19 @@ def main(argv=None):
         found_dongles = dongles.find_all(with_gains=True)
         print("Dongles, as the satellite reads them:")
         for d in found_dongles:
+            if d.kind == "airspy":
+                print(f"  Airspy  serial {d.serial}  {d.product}")
+                continue
             print(f"  index {d.index}  serial {d.serial}  {d.vendor}, {d.product}  "
                   f"tuner {d.tuner or '?'}  gains {' '.join(f'{g:g}' for g in d.gains) or '?'}")
         for serial in dongles.duplicates(found_dongles):
             print("  WARNING: " + dongles.duplicate_help(found_dongles, serial))
-        if args.serial:
+        if args.serial and dongles.is_airspy_serial(args.serial):
+            import sdr
+            RADIO = sdr.open(args.serial)
+            FS = RADIO.fs
+            print(f"  serial {args.serial} is an {RADIO.model}, {FS / 1e6:g} MS/s")
+        elif args.serial:
             index = dongles.index_of(args.serial, found_dongles)
             print(f"  serial {args.serial} is index {index}")
         elif index is None and len(found_dongles) > 1:
@@ -96,14 +118,17 @@ def main(argv=None):
         if args.serial:
             return 1
     index = 0 if index is None else index
-    print(f"Station {f / 1e6:.3f} MHz, gain {args.gain} dB", flush=True)
+    if args.gain is None:
+        args.gain = RADIO.default_gain if RADIO is not None else 20.0
+    print(f"Station {f / 1e6:.3f} MHz, gain {args.gain:g}" + (" (linearity)" if RADIO is not None else " dB"),
+          flush=True)
     results = {}
     for label, center in (("tuned 250 kHz ABOVE the station", f + OFFSET),
                           ("tuned 250 kHz BELOW the station", f - OFFSET)):
         print(f"{label} ({center / 1e6:.3f} MHz):", flush=True)
         z = capture(center, args.gain, index)
         if len(z) < FS // 2:
-            print("  rtl_sdr gave too little data: is the satellite stopped?")
+            print("  the capture gave too little data: is the satellite stopped?")
             return 1
         found = analyse(z, label)
         expected = f - center                   # where it is if I/Q is as assumed
@@ -124,7 +149,9 @@ def main(argv=None):
     ppm = float(np.median(ppms))
     print(f"ppm estimate: {ppm:+.1f} (from {', '.join(f'{p:+.1f}' for p in ppms)})")
     p = int(round(ppm))
-    if p and (normal or mirrored):
+    if RADIO is not None:
+        print("RESULT ppm: an Airspy has no ppm correction (TCXO); nothing to check")
+    elif p and (normal or mirrored):
         center = f + OFFSET
         print(f"check: tuned 250 kHz above again, with rtl_sdr -p {p}:", flush=True)
         z = capture(center, args.gain, index, ppm=p)

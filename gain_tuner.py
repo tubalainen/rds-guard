@@ -1,4 +1,4 @@
-"""Automatic gain and frequency correction (ppm) for each RTL-SDR.
+"""Automatic gain and frequency correction (ppm) for each RTL-SDR and Airspy.
 
 FM broadcasters are strong: too much gain overloads the tuner and every
 station on the dongle decodes worse, too little leaves RDS in the noise, and
@@ -38,6 +38,7 @@ import numpy as np
 
 import config
 import dongles
+import sdr
 
 log = logging.getLogger("rds-guard")
 
@@ -72,10 +73,7 @@ def say(msg):
 
 def clip_fraction(raw):
     """Share of the 8-bit ADC samples at either end (the ADC overloads)."""
-    a = np.frombuffer(raw, dtype=np.uint8)
-    if not len(a):
-        return 0.0
-    return float(np.count_nonzero((a == 0) | (a == 255))) / len(a)
+    return sdr.RtlSdr.clip_fraction(raw)
 
 
 def level_dbfs(z):
@@ -173,74 +171,98 @@ def choose(results):
 
 def capture(index, center_hz, gain, ppm, seconds):
     """IQ bytes from rtl_sdr (the first quarter second dropped: settling)."""
-    samples = int((seconds + 0.25) * FS)
-    cmd = ["rtl_sdr", "-f", str(center_hz), "-s", str(FS), "-g", f"{gain:g}"]
-    if ppm:
-        cmd += ["-p", str(ppm)]
-    cmd += ["-d", str(index), "-n", str(samples), "-"]
-    proc = subprocess.run(cmd, capture_output=True, timeout=seconds + 30)
-    raw = proc.stdout
-    if len(raw) < FS:      # not even half a second: the dongle is busy or gone
-        raise RuntimeError(f"rtl_sdr gave no samples: "
-                           f"{proc.stderr.decode('utf-8', 'replace')[-200:]}")
-    return raw[int(0.25 * FS) * 2:]
+    return sdr.capture(sdr.RtlSdr(index), center_hz, gain, ppm, seconds,
+                       run=subprocess.run)
 
 
-def calibrate(receiver, index, gains, capture_fn=capture, quality_fn=redsea_quality,
-              progress=say, want_gain=True, want_ppm=True, gain=None, ppm=None):
+def calibrate(receiver, index, gains, capture_fn=None, quality_fn=redsea_quality,
+              progress=say, want_gain=True, want_ppm=True, gain=None, ppm=None,
+              radio=None):
     """Measure ppm and gain for one receiver. Returns a dict: gain, ppm,
-    stations ({freq: groups/s at the chosen gain}), steps (the sweep)."""
-    from channelizer import demod_all, iq_from_u8
+    stations ({freq: groups/s at the chosen gain}), steps (the sweep).
+    radio: sdr.RtlSdr (default, at index) or sdr.Airspy (no ppm)."""
+    from channelizer import demod_all
 
+    radio = radio or sdr.RtlSdr(index)
+    if capture_fn is None:
+        capture_fn = (lambda i, c, g, p, s: sdr.capture(radio, c, g, p, s,
+                                                        run=subprocess.run))
+    start_gain = radio.default_gain
+    if not radio.has_ppm:
+        want_ppm, ppm = False, 0
     freqs = list(zip(receiver.frequencies, receiver.freqs_hz))
     center = receiver.center_hz
     rid = receiver.id
 
     def mpx_of(raw):
-        z = iq_from_u8(raw)
-        return {f: demod_all(z, hz - center) for f, hz in freqs}
+        z = radio.iq(raw)
+        return {f: demod_all(z, hz - center, radio.fs) for f, hz in freqs}
 
-    # 1. ppm, at a middle gain without correction
-    if want_ppm:
-        mid = dongles.nearest([g for g in gains if g > 0], START_GAIN) if gains else START_GAIN
-        raw = capture_fn(index, center, mid, 0, PPM_SEC)
-        per = {}
-        for f, m in mpx_of(raw).items():
+    def ppm_estimates(mpx, label):
+        """(freq, ppm) for every station clear enough to measure on."""
+        out = []
+        for f, m in mpx.items():
             pilot = tone_snr_db(m)[0]
             v = ppm_from_mpx(m, dict(freqs)[f])
             if v is not None and pilot >= HEARD_PILOT_DB:
-                per[f] = v
-            else:
-                progress(f"[{rid}] {f}: pilot {pilot:.0f} dB, too weak to measure ppm on")
-        values = sorted(per.values())
-        k = len(values)
-        measured = (values[k // 2] if k % 2 else (values[k // 2 - 1] + values[k // 2]) / 2) if k else 0.0
-        if not k:
-            progress(f"[{rid}] no station clear enough to measure ppm: using 0")
-            ppm = 0
-        elif abs(measured) > PPM_LIMIT:
-            progress(f"[{rid}] ppm {measured:.0f} is not believable: using 0")
-            ppm = 0
-        else:
-            ppm = int(round(measured))
-            progress(f"[{rid}] ppm {ppm} (per station: "
-                     + ", ".join(f"{f} {v:.1f}" for f, v in per.items()) + ")")
-    ppm = ppm or 0
-    if not want_gain:
-        return {"gain": gain, "ppm": ppm, "stations": {}, "steps": []}
+                out.append((f, v))
+        return out
 
-    # 2. sweep (rtl_sdr takes -g 0 as the tuner's automatic gain: never)
-    gains = [g for g in gains if g > 0] or [START_GAIN]
+    def settle_ppm(estimates):
+        """The median of all estimates (steps × stations), rounded."""
+        for f, _ in freqs:
+            if not any(e[0] == f for e in estimates):
+                progress(f"[{rid}] {f}: pilot never above {HEARD_PILOT_DB} dB, too weak to "
+                         "measure ppm on")
+        values = sorted(v for _, v in estimates)
+        k = len(values)
+        if not k:
+            progress(f"[{rid}] no station clear enough to measure ppm on: using 0")
+            return 0
+        measured = values[k // 2] if k % 2 else (values[k // 2 - 1] + values[k // 2]) / 2
+        if abs(measured) > PPM_LIMIT:
+            progress(f"[{rid}] ppm {measured:.0f} is not believable: using 0")
+            return 0
+        per = {}
+        for f, v in estimates:
+            per.setdefault(f, []).append(v)
+        progress(f"[{rid}] ppm {int(round(measured))} (median of {k} measurements; per station: "
+                 + ", ".join(f"{f} {sorted(v)[len(v) // 2]:.1f}" for f, v in per.items()) + ")")
+        return int(round(measured))
+
+    # Gain fixed, ppm automatic: measure ppm at that gain, and stop
+    if not want_gain:
+        if want_ppm:
+            raw = capture_fn(index, center, gain or start_gain, 0, PPM_SEC)
+            ppm = settle_ppm(ppm_estimates(mpx_of(raw), "fixed gain"))
+        return {"gain": gain, "ppm": ppm or 0, "stations": {}, "steps": []}
+
+    # 1. sweep, without ppm correction unless ppm is fixed (rtl_sdr takes
+    # -g 0 as the tuner's automatic gain: never). The frequency error is
+    # measured on the way, at every step that does not clip, on every
+    # station heard clearly: far steadier than one capture at a guessed
+    # gain, and it costs nothing extra.
+    sweep_ppm = 0 if want_ppm else (ppm or 0)
+    gains = [g for g in gains if g > 0 or not radio.zero_is_auto] or [start_gain]
     steps = []
+    estimates = []
     for i, g in enumerate(gains, 1):
-        raw = capture_fn(index, center, g, ppm, SWEEP_SEC)
-        clip = clip_fraction(raw)
-        snrs = {f: tone_snr_db(m) for f, m in mpx_of(raw).items()}
+        raw = capture_fn(index, center, g, sweep_ppm, SWEEP_SEC)
+        clip = radio.clip_fraction(raw)
+        mpx = mpx_of(raw)
+        snrs = {f: tone_snr_db(m) for f, m in mpx.items()}
+        if want_ppm and clip <= CLIP_LIMIT:
+            estimates += ppm_estimates(mpx, g)
         steps.append({"gain": g, "clip": clip, "snr": snrs,
-                      "level": round(level_dbfs(iq_from_u8(raw)), 1)})
+                      "level": round(level_dbfs(radio.iq(raw)), 1)})
         progress(f"[{rid}] {i}/{len(gains)} gain {g:4.1f} dB: clip {clip * 100:.3f} %, "
                  + ", ".join(f"{f} pilot {s[0]:.0f} dB RDS {s[1]:.0f} dB"
                              for f, s in snrs.items()))
+
+    # 2. ppm from the sweep
+    if want_ppm:
+        ppm = settle_ppm(estimates)
+    ppm = ppm or 0
 
     # 3. verify the best with redsea. Ranked by the worst station that is
     # heard at all (a clear pilot at some step): a station too far away to
@@ -323,11 +345,13 @@ class Tuner:
             return cal
         return None
 
-    def settings(self, r):
-        """(gain, ppm) for the receiver's pipeline."""
+    def settings(self, r, radio=None):
+        """(gain, ppm) for the receiver's pipeline (radio: its sdr.RtlSdr or
+        sdr.Airspy, for the gain to use before the calibration)."""
         cal = self._stored(r)
+        start = radio.default_gain if radio is not None else START_GAIN
         gain = r.gain if r.gain != "auto" else (cal["gain"] if cal and cal["gain"] is not None
-                                                else START_GAIN)
+                                                else start)
         ppm = r.ppm if r.ppm != "auto" else (cal["ppm"] if cal and cal["ppm"] is not None else 0)
         return gain, ppm
 
@@ -336,6 +360,8 @@ class Tuner:
         r = p.receiver
         cal = self._stored(r)
         gain, ppm = self.settings(r)
+        if getattr(p, "gain", None) is not None:      # what the pipeline runs with
+            gain, ppm = p.gain, p.ppm
         result = (cal or {}).get("result") or {}
         return {
             "gain": gain, "gain_mode": "manual" if r.gain != "auto" else "auto",
@@ -350,7 +376,8 @@ class Tuner:
 
     @staticmethod
     def _auto(r):
-        return r.gain == "auto" or r.ppm == "auto"
+        # An Airspy has no ppm to measure: only its gain
+        return r.gain == "auto" or (r.ppm == "auto" and not dongles.is_airspy_serial(r.serial))
 
     # -- requests -----------------------------------------------------------
 
@@ -471,13 +498,12 @@ class Tuner:
             p.resume()
 
     def _calibrate_dongle(self, r, want_gain=True, want_ppm=True):
-        found = dongles.find_all()
-        index = dongles.index_of(r.serial, found)
-        gains = dongles.gains_of(r.serial, found) or FALLBACK_GAINS
+        radio = sdr.open(r.serial)
+        gains = radio.gains or FALLBACK_GAINS
         fixed_gain = r.gain if r.gain != "auto" else None
         fixed_ppm = r.ppm if r.ppm != "auto" else None
-        return calibrate(r, index, gains, want_gain=want_gain, want_ppm=want_ppm,
-                         gain=fixed_gain, ppm=fixed_ppm)
+        return calibrate(r, radio.index, gains, want_gain=want_gain, want_ppm=want_ppm,
+                         gain=fixed_gain, ppm=fixed_ppm, radio=radio)
 
 
 def _epoch(ts):
@@ -512,12 +538,13 @@ def main(argv=None):
     else:
         sys.exit(f"Serial {args.serial} is not in receivers.yml: give --frequencies")
     try:
-        found = dongles.find_all()
-        index = dongles.index_of(r.serial, found)
-        gains = dongles.gains_of(r.serial, found) or FALLBACK_GAINS
+        radio = sdr.open(r.serial)
+        gains = radio.gains or FALLBACK_GAINS
     except dongles.DongleError as e:
         sys.exit(str(e))
-    res = calibrate(r, index, gains, progress=lambda m: print(m, file=sys.stderr, flush=True))
+    print(f"{radio.model}, serial {radio.serial}", file=sys.stderr, flush=True)
+    res = calibrate(r, radio.index, gains, radio=radio,
+                    progress=lambda m: print(m, file=sys.stderr, flush=True))
     print(json.dumps({k: res[k] for k in ("gain", "ppm", "stations")}, ensure_ascii=False))
     if args.save:
         import event_store

@@ -143,9 +143,13 @@ def test_a_whole_calibration_with_a_fake_dongle():
     # and the choice
     assert sum("gain" in line and "clip" in line for line in lines) == 5
     assert any(line.startswith("[1] chosen") for line in lines)
-    # The sweep ran with the measured ppm; overloaded steps were not checked
+    # ppm was measured during the sweep (no correction then, no separate
+    # capture), and the decoding checks ran with it; overloaded steps were
+    # not checked
     sweep = [c for c in dongle.calls if c[2] == gt.SWEEP_SEC]
-    assert {c[1] for c in sweep} == {res["ppm"]}
+    assert {c[1] for c in sweep} == {0}
+    assert not [c for c in dongle.calls if c[2] == gt.PPM_SEC]
+    assert {c[1] for c in dongle.calls if c[2] == gt.VERIFY_SEC} == {res["ppm"]}
     checked = [c[0] for c in dongle.calls if c[2] == gt.VERIFY_SEC]
     assert 49.6 not in checked
 
@@ -183,12 +187,41 @@ def test_a_dead_station_is_reported_and_the_other_decides():
     assert any("102.8M: no RDS at any gain" in line for line in lines)
 
 
-def test_the_ppm_capture_does_not_overload_a_strong_station():
+def test_ppm_is_measured_only_on_steps_that_do_not_clip():
+    """Clipping distorts the carrier; those steps give no ppm estimate."""
     r = receivers.parse({"receivers": [{"serial": "1", "frequencies": ["103.5M"]}]})[0]
-    dongle = FakeDongle(r)
-    gt.calibrate(r, 0, [0.0, 8.7, 19.7, 49.6], capture_fn=dongle.capture,
-                 quality_fn=lambda pcm, s: (11.0, 0), progress=lambda line: None)
-    assert [c[0] for c in dongle.calls if c[2] == gt.PPM_SEC] == [8.7]
+    dongle = FakeDongle(r, true_ppm=-3)
+
+    def capture(index, center, gain, ppm, seconds):
+        if gain > 30:                    # overload: and a carrier 40 kHz off
+            return dongle.capture(index, center + 40_000, gain, ppm, seconds)
+        return dongle.capture(index, center, gain, ppm, seconds)
+
+    lines = []
+    res = gt.calibrate(r, 0, [8.7, 12.5, 19.7, 40.2, 49.6], capture_fn=capture,
+                       quality_fn=lambda pcm, s: (11.0, 0), progress=lines.append)
+    assert res["ppm"] == pytest.approx(-3, abs=1)
+    assert any("median of" in line for line in lines)
+
+
+def test_fixed_ppm_is_used_in_the_sweep_and_not_measured():
+    r = receivers.parse({"receivers": [{"serial": "1", "frequencies": ["103.5M"], "ppm": 7}]})[0]
+    dongle = FakeDongle(r, true_ppm=7)
+    res = gt.calibrate(r, 0, [8.7, 19.7], capture_fn=dongle.capture,
+                       quality_fn=lambda pcm, s: (11.0, 0), progress=lambda line: None,
+                       want_ppm=False, ppm=7)
+    assert res["ppm"] == 7
+    assert {c[1] for c in dongle.calls} == {7}
+
+
+def test_fixed_gain_measures_ppm_at_that_gain():
+    r = receivers.parse({"receivers": [{"serial": "1", "frequencies": ["103.5M"], "gain": 12.5}]})[0]
+    dongle = FakeDongle(r, true_ppm=5)
+    res = gt.calibrate(r, 0, [8.7, 12.5, 19.7], capture_fn=dongle.capture,
+                       quality_fn=lambda pcm, s: (11.0, 0), progress=lambda line: None,
+                       want_gain=False, gain=12.5)
+    assert res["ppm"] == pytest.approx(5, abs=1)
+    assert [c[0] for c in dongle.calls] == [12.5]
 
 
 # ------------------------------------------------------------ on the satellite

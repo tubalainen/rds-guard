@@ -11,8 +11,8 @@ Built for Sveriges Radio P4, Sweden's primary traffic announcement carrier and e
 RDS Guard is two containers:
 
 - The **satellite** (`ghcr.io/tubalainen/rds-guard`) has no web UI. It
-  - drives one or more RTL-SDR dongles, each with up to four P4 stations
-    within 2 MHz
+  - drives one or more RTL-SDR dongles or Airspy (Mini, R2), each with up
+    to four P4 stations within 2 MHz
   - finds the best gain and frequency correction for each dongle by itself
   - decodes RDS and detects traffic announcements (TA) and emergency
     broadcasts (PTY Alarm)
@@ -53,7 +53,8 @@ that make transcription and the map better.
                                               :8080 web UI (archive, map, Admin)
 ```
 
-- **Satellite:** for each dongle, `rtl_sdr` captures 2.4 MHz of raw IQ;
+- **Satellite:** for each dongle, `rtl_sdr` captures 2.4 MHz of raw IQ
+  (an Airspy: `airspy_rx`, 3 MS/s on a Mini, 2.5 MS/s on an R2);
   `Channelizer` (numpy) cuts out each station and demodulates it; one
   `redsea` per station decodes RDS, and the recorder takes the same audio
   during an event. A single station is received 250 kHz off centre, away
@@ -81,7 +82,8 @@ between the two is in [docs/uplink-protocol.md](docs/uplink-protocol.md).
 ## Requirements
 
 - Linux host (Raspberry Pi 4, NAS, server)
-- One or more RTL-SDR USB dongles (RTL2832U-based)
+- One or more RTL-SDR USB dongles (RTL2832U-based) and/or Airspy Mini or
+  Airspy R2 (see [Airspy](#airspy-mini-and-r2))
 - Docker and Docker Compose
 - FM antenna with line of sight to a P4 transmitter
 
@@ -243,6 +245,35 @@ docker compose exec rds-guard python3 -m dongles
 - Without `receivers.yml` and with several dongles, set
   `RTL_DEVICE_SERIAL` to pick the one `FM_FREQUENCY` is for.
 
+### Airspy Mini and R2
+
+An Airspy is used like a dongle: one entry in `receivers.yml`, by its serial
+number, which is 64 bits in hex as `python3 -m dongles` lists it:
+
+```yaml
+receivers:
+  - serial: "0x644064DC2B1C2E4F"  # an Airspy Mini or R2
+    name: mast
+    frequencies: [103.5M, 102.9M]
+```
+
+- Nothing else to set: the satellite sees from the device whether it is a
+  Mini (captured at 3 MS/s) or an R2 (2.5 MS/s), and brings it to the same
+  171 kHz multiplex as an RTL-SDR, so decoding, recording and the
+  aggregator work as before. RTL-SDR and Airspy can be mixed on one host.
+- No host preparation (no DVB driver to blacklist); the same
+  `/dev/bus/usb` in the compose file passes it to the container.
+- Its gain is the "linearity" gain, 0–21, calibrated the same way as a
+  dongle's (`gain: 10` fixes it); the node card shows that step as its
+  gain. It has no ppm step: its clock is a TCXO, and `ppm:` is ignored for
+  it.
+- Check that I/Q is the right way round once, with the satellite stopped:
+  `docker compose run --rm rds-guard python3 iq_side.py 103.5M
+  --serial 0x…` (a normal result is what the satellite expects).
+- `python3 -m dongles` cannot list an Airspy the satellite is running (the
+  device can only be opened once): stop the satellite to see it.
+- The bias tee stays off.
+
 ### Gain and frequency correction
 
 FM stations are strong, and the dongle's own automatic gain (and most
@@ -250,19 +281,23 @@ fixed values) overdrive its amplifier: intermodulation then spoils RDS on
 every station, even when nothing visibly clips. So the satellite finds the
 gain itself, for each dongle and for all its stations together:
 
-1. **Frequency correction (ppm)** from how far each station's carrier is
-   off its nominal frequency, the median over the stations.
-2. **A quick sweep** over all the dongle's gain steps, about a second each:
+1. **A quick sweep** over all the dongle's gain steps, about a second each:
    ADC clipping and the signal-to-noise of each station's 19 kHz pilot and
    57 kHz RDS carrier.
-3. **A check with real decoding** of the four best steps, 8 s per station:
-   RDS groups per second and block errors.
+2. **Frequency correction (ppm)**, measured on the way: how far each
+   carrier is off its nominal frequency, at every step that does not clip
+   and on every station with a clear pilot. The median of all of them.
+3. **A check with real decoding** of the four best steps, 8 s per station,
+   with that correction: RDS groups per second and block errors.
 4. **The choice:** the step where the *worst* station decodes best, so no
    station is sacrificed for another; within 5 %, the lower gain, for margin.
    A station that decodes at no step (too far, too weak) is left out of
    the choice and reported, so it cannot drag the others down. With no RDS
    at all (no antenna?) it uses the highest gain that does not clip, and
    says so.
+
+An Airspy is swept over its linearity gain 0–21 the same way, and has no
+ppm step (its clock is a TCXO).
 
 It takes about two minutes per dongle, and only that dongle pauses. It runs
 

@@ -40,9 +40,12 @@ RUN git clone --depth 1 https://github.com/windytan/redsea.git /tmp/redsea \
 FROM debian:bookworm-slim
 
 # Upgrade first so the image picks up Debian security fixes that are newer
-# than the base image snapshot.
+# than the base image snapshot. airspy: Debian's airspy_rx and airspy_info
+# (1.0.10) for the Airspy Mini and R2.
 RUN apt-get update && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
+        airspy \
+        libairspy0 \
         libusb-1.0-0 \
         libliquid1 \
         libsndfile1 \
@@ -66,7 +69,10 @@ RUN pip3 install --no-cache-dir --break-system-packages -r /app/requirements.txt
 # aggregator's, in its own image)
 COPY config.py event_store.py rds_guard.py pipeline.py channelizer.py \
      audio_tee.py audio_recorder.py uplink.py receivers.py dongles.py \
-     satellite_health.py gain_tuner.py /app/
+     satellite_health.py gain_tuner.py sdr.py /app/
+# The I/Q and ppm check (python3 iq_side.py 103.5M --serial …), next to
+# dongles.py and sdr.py, which it uses
+COPY tools/iq_side.py /app/iq_side.py
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 

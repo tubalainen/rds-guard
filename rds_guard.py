@@ -431,8 +431,10 @@ def build_pipelines(sat, receivers_list):
             st = Station(r.id, freq, recorder=rec, record_types=config.RECORD_EVENT_TYPES)
             stations.append({"frequency": freq, "callback": st.on_line,
                              "recorder": rec, "station": st})
-        settings = (lambda r=r: sat.tuner.settings(r)) if sat.tuner else (lambda r=r: (
-            r.gain if r.gain != "auto" else 20.0, r.ppm if r.ppm != "auto" else 0))
+        settings = ((lambda radio=None, r=r: sat.tuner.settings(r, radio)) if sat.tuner
+                    else (lambda radio=None, r=r: (
+                        r.gain if r.gain != "auto" else getattr(radio, "default_gain", 20.0),
+                        r.ppm if r.ppm != "auto" else 0)))
         pipelines.append(ReceiverPipeline(r, stations, settings))
     return pipelines
 
