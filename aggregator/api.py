@@ -575,7 +575,11 @@ async def handle_index(request):
 async def security_headers(request, handler):
     resp = await handler(request)
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-    resp.headers.setdefault("Referrer-Policy", "same-origin")
+    # strict-origin-when-cross-origin, not same-origin: tile.openstreetmap.org
+    # answers 403 "Access blocked" to tile requests without a Referer. This
+    # sends only the origin (scheme, host, port) cross-origin, never the path.
+    resp.headers.setdefault("Referrer-Policy",
+                            "strict-origin-when-cross-origin")
     resp.headers.setdefault("X-Frame-Options", "DENY")
     resp.headers.setdefault(
         "Content-Security-Policy",
