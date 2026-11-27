@@ -1,7 +1,9 @@
-"""The satellite's receivers: one per RTL-SDR dongle, from receivers.yml.
+"""The satellite's receivers: one per RTL-SDR dongle or Airspy, from
+receivers.yml.
 
     receivers:
       - serial: "00000101"          # required: the dongle's serial number
+                                    # (an Airspy's: "0x644064DC2B1C2E4F")
         name: tak                   # optional, shown on the aggregator
         frequencies: [103.5M, 102.9M]
         # gain: auto (default) or e.g. 28.0 to override the calibration
@@ -98,7 +100,8 @@ def parse(data):
         where = f"receivers.yml, receiver {i}"
         if not isinstance(item, dict):
             raise ReceiverError(f"{where}: must be a mapping")
-        serial = str(item.get("serial") or "").strip()
+        import dongles
+        serial = dongles.normalize_serial(item.get("serial") or "")
         if not serial:
             raise ReceiverError(f"{where}: 'serial' is required (the dongle's serial "
                                 "number; 'python3 -m dongles' lists them)")
@@ -112,6 +115,8 @@ def parse(data):
                      gain=_auto_or(item.get("gain"), float, f"{where}, gain"),
                      ppm=_auto_or(item.get("ppm"), int, f"{where}, ppm"))
         check(r, where)
+        if dongles.is_airspy_serial(serial) and r.ppm != "auto":
+            r.warnings.append("ppm: is not used for an Airspy (its clock is a TCXO)")
         out.append(r)
     if not out:
         raise ReceiverError("receivers.yml lists no receivers")
@@ -148,18 +153,19 @@ def load(path=None, dongles=None):
         return parse(data)
     # No file: one dongle, the frequencies from .env
     freqs = config.FM_FREQUENCIES or [config.FM_FREQUENCY]
-    serial = config.RTL_DEVICE_SERIAL
+    import dongles as dg
+    serial = dg.normalize_serial(config.RTL_DEVICE_SERIAL)
     if not serial:
         if dongles is None:
-            import dongles as dg
             dongles = dg.find_all()
         if not dongles:
-            raise ReceiverError("No RTL-SDR dongle found. Check that it is plugged in, "
-                                "passed to the container (devices: /dev/bus/usb) and "
-                                "that the DVB driver is blacklisted on the host")
+            raise ReceiverError("No RTL-SDR dongle or Airspy found. Check that it is "
+                                "plugged in, passed to the container (devices: "
+                                "/dev/bus/usb) and, for an RTL-SDR, that the DVB driver "
+                                "is blacklisted on the host")
         if len(dongles) > 1:
             raise ReceiverError(
-                f"{len(dongles)} RTL-SDR dongles are connected ("
+                f"{len(dongles)} receivers are connected ("
                 + ", ".join(d.serial for d in dongles)
                 + "): say which listens to what in receivers.yml (see "
                 "receivers.example.yml)")

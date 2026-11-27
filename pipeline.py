@@ -1,6 +1,7 @@
-"""Radio pipeline: one per receiver (RTL-SDR dongle).
+"""Radio pipeline: one per receiver (RTL-SDR dongle or Airspy).
 
-    rtl_sdr (IQ, 2.394 MS/s) -> Channelizer thread
+    rtl_sdr (IQ, 2.394 MS/s)     -> Channelizer thread
+    or airspy_rx (IQ, 3/2.5 MS/s)
                                   |- pipe 0 -> AudioTee -> redsea -> callback[0]
                                   |- pipe 1 -> AudioTee -> redsea -> callback[1]
                                   '- ...
@@ -23,6 +24,7 @@ import time
 
 import config
 import dongles
+import sdr
 
 log = logging.getLogger("rds-guard")
 
@@ -67,13 +69,7 @@ class PipelineStatus:
 
 
 def rtl_sdr_cmd(center_hz, device_index, gain, ppm):
-    cmd = ["rtl_sdr", "-f", str(center_hz), "-s", str(config.RTL_SAMPLE_RATE)]
-    # -g 0 would be the tuner's own automatic gain, which overloads on FM
-    gain = max(float(gain), 0.9) if gain is not None else 20.0
-    cmd += ["-g", f"{gain:g}"]
-    if ppm:
-        cmd += ["-p", str(ppm)]
-    return cmd + ["-d", str(device_index), "-"]
+    return sdr.RtlSdr(device_index).stream_cmd(center_hz, gain, ppm)
 
 
 def redsea_cmd():
@@ -83,11 +79,17 @@ def redsea_cmd():
     return cmd + ["-E"]
 
 
+# airspy_rx says this every second
+_QUIET = ("Streaming at",)
+
+
 def _stderr_reader(stream, prefix):
     try:
         for raw in iter(stream.readline, b""):
             text = raw.decode("utf-8", errors="replace").rstrip()
-            if text:
+            if text and text.startswith(_QUIET):
+                log.debug("[%s] %s", prefix, text)
+            elif text:
                 log.info("[%s] %s", prefix, text)
     except Exception:
         pass
@@ -135,8 +137,8 @@ class ReceiverPipeline:
 
     stations: [{"frequency": "103.5M", "callback": fn(bytes line),
                 "recorder": AudioRecorder or None}] in the receiver's order.
-    settings: callable -> (gain, ppm) used at each start (gain None = the
-    tuner's automatic gain, only as a last resort).
+    settings: callable(radio) -> (gain, ppm) used at each start (radio: the
+    sdr.RtlSdr or sdr.Airspy found for the serial number).
     """
 
     def __init__(self, receiver, stations, settings):
@@ -151,6 +153,7 @@ class ReceiverPipeline:
         self._idle.set()
         self.gain = None
         self.ppm = None
+        self.model = None
 
     # -- control ------------------------------------------------------------
 
@@ -199,15 +202,19 @@ class ReceiverPipeline:
         self._idle.clear()
         try:
             self.status.set_starting()
-            index = dongles.index_of(self.receiver.serial)
-            self.gain, self.ppm = self._settings()
-            cmd = rtl_sdr_cmd(self.receiver.center_hz, index, self.gain, self.ppm)
-            log.info("[%s] starting: %s on %s", rid, " ".join(cmd),
+            radio = sdr.open(self.receiver.serial)
+            self.model = radio.model
+            self.gain, self.ppm = self._settings(radio)
+            if not radio.has_ppm:
+                self.ppm = 0
+            cmd = radio.stream_cmd(self.receiver.center_hz, self.gain, self.ppm)
+            log.info("[%s] starting (%s): %s on %s", rid, radio.model, " ".join(cmd),
                      ", ".join(self.receiver.frequencies))
             rtl = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            threading.Thread(target=_stderr_reader, args=(rtl.stderr, f"rtl_sdr {rid}"),
+            threading.Thread(target=_stderr_reader, args=(rtl.stderr, f"{radio.tool} {rid}"),
                              daemon=True).start()
-            chan = Channelizer(rtl.stdout, self.receiver.freqs_hz, self.receiver.center_hz)
+            chan = Channelizer(rtl.stdout, self.receiver.freqs_hz, self.receiver.center_hz,
+                               radio.fs, radio.fmt)
             chan.start()
             for fd, st in zip(chan.pipe_read_fds, self.stations):
                 rs = subprocess.Popen(redsea_cmd(), stdin=subprocess.PIPE,
@@ -225,12 +232,12 @@ class ReceiverPipeline:
                     t.start()
                     threads.append(t)
             self.status.set_running()
-            # Until the run is ended (pause, shutdown) or rtl_sdr exits
+            # Until the run is ended (pause, shutdown) or the capture exits
             while rtl.poll() is None and not self._run_stop.wait(1):
                 pass
             if self._run_stop.is_set():
                 return True
-            msg = f"rtl_sdr exited with code {rtl.returncode}"
+            msg = f"{radio.tool} exited with code {rtl.returncode}"
             log.error("[%s] %s", rid, msg)
             self.status.set_error(msg)
             return False
@@ -248,7 +255,7 @@ class ReceiverPipeline:
             self.status.set_error(str(e))
             return False
         finally:
-            _terminate(rtl, "rtl_sdr")
+            _terminate(rtl, "the capture")
             for rs in redseas:
                 _terminate(rs, "redsea")
             for t in threads:

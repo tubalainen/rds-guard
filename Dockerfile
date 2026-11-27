@@ -37,6 +37,8 @@ RUN apt-get update && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
         rtl-sdr \
         librtlsdr0 \
+        airspy \
+        libairspy0 \
         libusb-1.0-0 \
         libliquid1 \
         libsndfile1 \
@@ -56,7 +58,7 @@ RUN pip3 install --no-cache-dir --break-system-packages -r /app/requirements.txt
 # aggregator's, in its own image)
 COPY config.py event_store.py rds_guard.py pipeline.py channelizer.py \
      audio_tee.py audio_recorder.py uplink.py receivers.py dongles.py \
-     satellite_health.py gain_tuner.py /app/
+     satellite_health.py gain_tuner.py sdr.py /app/
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 

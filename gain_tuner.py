@@ -1,4 +1,4 @@
-"""Automatic gain and frequency correction (ppm) for each RTL-SDR.
+"""Automatic gain and frequency correction (ppm) for each RTL-SDR and Airspy.
 
 FM broadcasters are strong: too much gain overloads the tuner and every
 station on the dongle decodes worse, too little leaves RDS in the noise, and
@@ -21,6 +21,9 @@ for 15 minutes (at most every 6 hours), and when the aggregator's owner asks
 (Admin -> Noder -> Kalibrera om). Never during a broadcast on that dongle;
 the other dongles keep running. gain:/ppm: in receivers.yml override it.
 
+An Airspy (Mini, R2) is swept over its linearity gain 0-21 the same way; it
+has no ppm step (its clock is a TCXO, and airspy_rx has no correction).
+
     docker compose exec rds-guard python3 -m gain_tuner --serial 00000101
 
 runs it by hand (with the satellite stopped, or the dongle is busy) and
@@ -38,6 +41,7 @@ import numpy as np
 
 import config
 import dongles
+import sdr
 
 log = logging.getLogger("rds-guard")
 
@@ -70,10 +74,7 @@ def say(msg):
 
 def clip_fraction(raw):
     """Share of the 8-bit ADC samples at either end (the ADC overloads)."""
-    a = np.frombuffer(raw, dtype=np.uint8)
-    if not len(a):
-        return 0.0
-    return float(np.count_nonzero((a == 0) | (a == 255))) / len(a)
+    return sdr.RtlSdr.clip_fraction(raw)
 
 
 def level_dbfs(z):
@@ -164,36 +165,37 @@ def choose(results):
 
 def capture(index, center_hz, gain, ppm, seconds):
     """IQ bytes from rtl_sdr (the first quarter second dropped: settling)."""
-    samples = int((seconds + 0.25) * FS)
-    cmd = ["rtl_sdr", "-f", str(center_hz), "-s", str(FS), "-g", f"{gain:g}"]
-    if ppm:
-        cmd += ["-p", str(ppm)]
-    cmd += ["-d", str(index), "-n", str(samples), "-"]
-    proc = subprocess.run(cmd, capture_output=True, timeout=seconds + 30)
-    raw = proc.stdout
-    if len(raw) < FS:      # not even half a second: the dongle is busy or gone
-        raise RuntimeError(f"rtl_sdr gave no samples: "
-                           f"{proc.stderr.decode('utf-8', 'replace')[-200:]}")
-    return raw[int(0.25 * FS) * 2:]
+    return sdr.capture(sdr.RtlSdr(index), center_hz, gain, ppm, seconds,
+                       run=subprocess.run)
 
 
-def calibrate(receiver, index, gains, capture_fn=capture, quality_fn=redsea_quality,
-              progress=say, want_gain=True, want_ppm=True, gain=None, ppm=None):
+def calibrate(receiver, index, gains, capture_fn=None, quality_fn=redsea_quality,
+              progress=say, want_gain=True, want_ppm=True, gain=None, ppm=None,
+              radio=None):
     """Measure ppm and gain for one receiver. Returns a dict: gain, ppm,
-    stations ({freq: groups/s at the chosen gain}), steps (the sweep)."""
-    from channelizer import demod_all, iq_from_u8
+    stations ({freq: groups/s at the chosen gain}), steps (the sweep).
+    radio: sdr.RtlSdr (default, at index) or sdr.Airspy."""
+    from channelizer import demod_all
 
+    radio = radio or sdr.RtlSdr(index)
+    if capture_fn is None:
+        capture_fn = (lambda i, c, g, p, s: sdr.capture(radio, c, g, p, s,
+                                                        run=subprocess.run))
+    default_gain = radio.default_gain
+    fs = radio.fs
+    if not radio.has_ppm:
+        want_ppm, ppm = False, 0
     freqs = list(zip(receiver.frequencies, receiver.freqs_hz))
     center = receiver.center_hz
     rid = receiver.id
 
     def mpx_of(raw):
-        z = iq_from_u8(raw)
-        return {f: demod_all(z, hz - center) for f, hz in freqs}
+        z = radio.iq(raw)
+        return {f: demod_all(z, hz - center, fs) for f, hz in freqs}
 
     # 1. ppm, at a middle gain without correction
     if want_ppm:
-        mid = dongles.nearest([g for g in gains if g > 0], 20.0) if gains else DEFAULT_GAIN
+        mid = dongles.nearest([g for g in gains if g > 0], 20.0) if gains else default_gain
         raw = capture_fn(index, center, mid, 0, PPM_SEC)
         values = [ppm_from_mpx(m, dict(freqs)[f]) for f, m in mpx_of(raw).items()]
         values = sorted(v for v in values if v is not None)
@@ -210,15 +212,15 @@ def calibrate(receiver, index, gains, capture_fn=capture, quality_fn=redsea_qual
         return {"gain": gain, "ppm": ppm, "stations": {}, "steps": []}
 
     # 2. sweep (rtl_sdr takes -g 0 as the tuner's automatic gain: never)
-    gains = [g for g in gains if g > 0] or [DEFAULT_GAIN]
+    gains = [g for g in gains if g > 0 or not radio.zero_is_auto] or [default_gain]
     steps = []
     for i, g in enumerate(gains, 1):
         raw = capture_fn(index, center, g, ppm, SWEEP_SEC)
-        clip = clip_fraction(raw)
+        clip = radio.clip_fraction(raw)
         snrs = {f: tone_snr_db(m) for f, m in mpx_of(raw).items()}
         worst_rds = min(s[1] for s in snrs.values())
         steps.append({"gain": g, "clip": clip, "snr": snrs, "worst_rds": worst_rds,
-                      "level": round(level_dbfs(iq_from_u8(raw)), 1)})
+                      "level": round(level_dbfs(radio.iq(raw)), 1)})
         progress(f"[{rid}] {i}/{len(gains)} gain {g:4.1f} dB: clip {clip * 100:.3f} %, "
                  + ", ".join(f"{f} pilot {s[0]:.0f} dB RDS {s[1]:.0f} dB"
                              for f, s in snrs.items()))
@@ -240,7 +242,7 @@ def calibrate(receiver, index, gains, capture_fn=capture, quality_fn=redsea_qual
 
     chosen = choose(results)
     if chosen is None:
-        chosen = dongles.nearest(gains, DEFAULT_GAIN) if gains else DEFAULT_GAIN
+        chosen = dongles.nearest(gains, default_gain) if gains else default_gain
         progress(f"[{rid}] no station decoded at any gain (antenna? frequencies?): "
                  f"using {chosen:g} dB")
         stations = {}
@@ -280,11 +282,13 @@ class Tuner:
             return cal
         return None
 
-    def settings(self, r):
-        """(gain, ppm) for the receiver's pipeline."""
+    def settings(self, r, radio=None):
+        """(gain, ppm) for the receiver's pipeline (radio: its sdr.RtlSdr or
+        sdr.Airspy, for the gain to use before the calibration)."""
         cal = self._stored(r)
+        default = radio.default_gain if radio is not None else DEFAULT_GAIN
         gain = r.gain if r.gain != "auto" else (cal["gain"] if cal and cal["gain"] is not None
-                                                else DEFAULT_GAIN)
+                                                else default)
         ppm = r.ppm if r.ppm != "auto" else (cal["ppm"] if cal and cal["ppm"] is not None else 0)
         return gain, ppm
 
@@ -293,6 +297,8 @@ class Tuner:
         r = p.receiver
         cal = self._stored(r)
         gain, ppm = self.settings(r)
+        if getattr(p, "gain", None) is not None:      # what the pipeline runs with
+            gain, ppm = p.gain, p.ppm
         result = (cal or {}).get("result") or {}
         return {
             "gain": gain, "gain_mode": "manual" if r.gain != "auto" else "auto",
@@ -420,13 +426,12 @@ class Tuner:
             p.resume()
 
     def _calibrate_dongle(self, r, want_gain=True, want_ppm=True):
-        found = dongles.find_all()
-        index = dongles.index_of(r.serial, found)
-        gains = dongles.gains_of(r.serial, found) or FALLBACK_GAINS
+        radio = sdr.open(r.serial)
+        gains = radio.gains or FALLBACK_GAINS
         fixed_gain = r.gain if r.gain != "auto" else None
         fixed_ppm = r.ppm if r.ppm != "auto" else None
-        return calibrate(r, index, gains, want_gain=want_gain, want_ppm=want_ppm,
-                         gain=fixed_gain, ppm=fixed_ppm)
+        return calibrate(r, radio.index, gains, want_gain=want_gain, want_ppm=want_ppm,
+                         gain=fixed_gain, ppm=fixed_ppm, radio=radio)
 
 
 def _epoch(ts):
@@ -461,12 +466,13 @@ def main(argv=None):
     else:
         sys.exit(f"Serial {args.serial} is not in receivers.yml: give --frequencies")
     try:
-        found = dongles.find_all()
-        index = dongles.index_of(r.serial, found)
-        gains = dongles.gains_of(r.serial, found) or FALLBACK_GAINS
+        radio = sdr.open(r.serial)
+        gains = radio.gains or FALLBACK_GAINS
     except dongles.DongleError as e:
         sys.exit(str(e))
-    res = calibrate(r, index, gains, progress=lambda m: print(m, file=sys.stderr, flush=True))
+    print(f"{radio.model}, serial {radio.serial}", file=sys.stderr, flush=True)
+    res = calibrate(r, radio.index, gains, radio=radio,
+                    progress=lambda m: print(m, file=sys.stderr, flush=True))
     print(json.dumps({k: res[k] for k in ("gain", "ppm", "stations")}, ensure_ascii=False))
     if args.save:
         import event_store
