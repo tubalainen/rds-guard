@@ -312,7 +312,8 @@ class Tuner:
 
     @staticmethod
     def _auto(r):
-        return r.gain == "auto" or r.ppm == "auto"
+        # An Airspy has no ppm to measure: only its gain
+        return r.gain == "auto" or (r.ppm == "auto" and not dongles.is_airspy_serial(r.serial))
 
     # -- requests -----------------------------------------------------------
 

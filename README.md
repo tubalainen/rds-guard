@@ -262,8 +262,12 @@ receivers:
 - No host preparation (no DVB driver to blacklist); the same
   `/dev/bus/usb` in the compose file passes it to the container.
 - Its gain is the "linearity" gain, 0–21, calibrated the same way as a
-  dongle's (`gain: 12` fixes it). It has no ppm step: its clock is a TCXO,
-  and `ppm:` is ignored for it.
+  dongle's (`gain: 12` fixes it); the node card shows that step as its
+  gain. It has no ppm step: its clock is a TCXO, and `ppm:` is ignored for
+  it.
+- Check that I/Q is the right way round once, with the satellite stopped:
+  `docker compose run --rm rds-guard python3 iq_side.py 103.5M
+  --serial 0x…` (a normal result is what the satellite expects).
 - `python3 -m dongles` cannot list an Airspy the satellite is running (the
   device can only be opened once): stop the satellite to see it.
 - The bias tee stays off.

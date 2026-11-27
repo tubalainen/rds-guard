@@ -13,6 +13,8 @@ so one the satellite is running is not listed.
 import re
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass, field
 
 _DEVICE_RE = re.compile(r"^\s*(\d+):\s*(.*?),\s*(.*?),\s*SN:\s*(\S*)\s*$", re.MULTILINE)
@@ -122,7 +124,8 @@ def normalize_serial(value):
     if isinstance(value, int):
         return f"0x{value:016X}" if value > 0xFFFFFFFF else str(value)
     text = str(value or "").strip()
-    if re.fullmatch(r"0[xX][0-9A-Fa-f]{1,16}", text):
+    if re.fullmatch(r"(0[xX])?[0-9A-Fa-f]{16}", text) or \
+            re.fullmatch(r"0[xX][0-9A-Fa-f]{1,15}", text):
         return f"0x{int(text, 16):016X}"
     return text
 
@@ -161,14 +164,33 @@ def _airspy_info(timeout=10):
 
 # Airspys seen by serial: one that is running cannot be listed again
 _airspy_seen = {}
+# One listing at a time (airspy_info opens every free Airspy), and a serial
+# that is missing is looked for at most this often
+_airspy_lock = threading.Lock()
+_airspy_listed_at = [0.0]
+AIRSPY_RELIST_SEC = 60
+
+
+def _list_airspy():
+    """airspy_info now (the caller holds _airspy_lock)."""
+    found = parse_airspy_info(_airspy_info())
+    _airspy_listed_at[0] = time.monotonic()
+    for d in found:
+        _airspy_seen[d.serial] = d
+    return found
 
 
 def find_airspy():
     """The Airspys airspy_info can open now (also remembered)."""
-    found = parse_airspy_info(_airspy_info())
-    for d in found:
-        _airspy_seen[d.serial] = d
-    return found
+    with _airspy_lock:
+        return _list_airspy()
+
+
+def _seen_airspy(serial):
+    for s, d in _airspy_seen.items():
+        if same_airspy(s, serial):
+            return d
+    return None
 
 
 def find_rtl():
@@ -193,28 +215,32 @@ def lookup(serial, found=None):
     An Airspy seen before is not looked for again: while it runs,
     airspy_info cannot see it, and opening it would disturb it."""
     serial = normalize_serial(serial)
-    for s, d in _airspy_seen.items():
-        if same_airspy(s, serial):
+    if is_airspy_serial(serial):
+        for d in found or ():
+            if d.kind == "airspy" and same_airspy(d.serial, serial):
+                return d
+        # airspy_info opens every free Airspy: only for an Airspy's serial,
+        # one listing at a time (a second receiver starting finds the first
+        # one's listing), and for a missing one at most every
+        # AIRSPY_RELIST_SEC (it could catch another Airspy between two
+        # calibration captures)
+        with _airspy_lock:
+            d = _seen_airspy(serial)
+            if d is None and (not _airspy_listed_at[0] or
+                              time.monotonic() - _airspy_listed_at[0] >= AIRSPY_RELIST_SEC):
+                _list_airspy()
+                d = _seen_airspy(serial)
+        if d is not None:
             return d
-    # An RTL-SDR is looked for with rtl_test alone: airspy_info opens every
-    # free Airspy, which is only done when it is needed
-    rtl_found = None
-    if found is None:
-        try:
-            rtl_found = find_rtl()
-        except DongleError:
-            rtl_found = []
-    rtl = [d for d in (found if found is not None else rtl_found) if d.kind != "airspy"]
-    if serial in duplicates(rtl):
-        raise DongleError(duplicate_help(rtl, serial))
-    for d in rtl:
-        if d.serial == serial:
-            return d
-    if found is None:
-        found = rtl_found + find_airspy()
-    for d in found:
-        if d.kind == "airspy" and same_airspy(d.serial, serial):
-            return d
+        found = list(_airspy_seen.values())
+    else:
+        found = find_rtl() if found is None else found
+        rtl = [d for d in found if d.kind != "airspy"]
+        if serial in duplicates(rtl):
+            raise DongleError(duplicate_help(rtl, serial))
+        for d in rtl:
+            if d.serial == serial:
+                return d
     have = ", ".join(f"{d.serial} ({d.product})" for d in found) or "none"
     raise DongleError(f"No RTL-SDR or Airspy with serial number {serial} is connected "
                       f"(connected: {have})")

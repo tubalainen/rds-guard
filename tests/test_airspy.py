@@ -101,12 +101,14 @@ def test_serial_numbers_as_written_in_receivers_yml():
     assert r.serial == "0x644064DC2B1C2E4F"
     assert any("TCXO" in w for w in r.warnings)
     assert dongles.normalize_serial("0x644064dc2b1c2e4f") == "0x644064DC2B1C2E4F"
+    assert dongles.normalize_serial("644064dc2b1c2e4f") == "0x644064DC2B1C2E4F"
     assert dongles.normalize_serial("00000101") == "00000101"      # an RTL-SDR's
     assert dongles.same_airspy("644064DC2B1C2E4F", "0x644064dc2b1c2e4f")
 
 
 def test_lookup_remembers_an_airspy_it_cannot_see_while_running(monkeypatch):
     monkeypatch.setattr(dongles, "_airspy_seen", {})
+    monkeypatch.setattr(dongles, "_airspy_listed_at", [0.0])
     calls = []
     monkeypatch.setattr(dongles, "_rtl_test",
                         lambda args=(), timeout=10: "Found 1 device(s):\n"
@@ -123,8 +125,17 @@ def test_lookup_remembers_an_airspy_it_cannot_see_while_running(monkeypatch):
     monkeypatch.setattr(dongles, "_airspy_info", lambda timeout=10: pytest.fail("opened"))
     assert dongles.lookup("00000101").kind == "rtlsdr"
     monkeypatch.setattr(dongles, "_airspy_info", lambda timeout=10: "")
+    # A missing Airspy is looked for again only after a minute
     with pytest.raises(dongles.DongleError, match="RTL-SDR or Airspy"):
         dongles.lookup("0x1")
+    assert len(calls) == 1
+    monkeypatch.setattr(dongles, "_airspy_listed_at", [1.0])
+    monkeypatch.setattr(dongles.time, "monotonic", lambda: 1.0 + dongles.AIRSPY_RELIST_SEC)
+    monkeypatch.setattr(dongles, "_airspy_info",
+                        lambda timeout=10: calls.append(1) or AIRSPY_INFO)
+    with pytest.raises(dongles.DongleError):
+        dongles.lookup("0x1")
+    assert len(calls) == 2
     radio = sdr.open("0x644064DC2B1C2E4F")
     assert isinstance(radio, sdr.Airspy) and radio.fs == 3_000_000
 
@@ -154,9 +165,24 @@ def test_rtl_sdr_command_is_unchanged():
 
 
 def test_airspy_clip_fraction():
+    """A full 12-bit ADC comes out of libairspy at about ±16 384 (halved in
+    its real-to-IQ step), not at the int16 limit."""
     z = fm_station(20_000, 300_000, 3_000_000)
     assert sdr.Airspy.clip_fraction(to_s16(z, 0.3)) == 0
+    assert sdr.Airspy.clip_fraction(to_s16(z, 0.5)) > 0.2      # ±16 384: full
     assert sdr.Airspy.clip_fraction(to_s16(z, 3.0)) > 0.5
+
+
+def test_a_capture_is_tried_once_more(monkeypatch):
+    import types
+    monkeypatch.setattr(sdr.time, "sleep", lambda s: None)
+    radio = sdr.Airspy("0x1", [3_000_000])
+    answers = [b"", b"\0" * (4 * 3_000_000)]
+    run = lambda cmd, **kw: types.SimpleNamespace(stdout=answers.pop(0), stderr=b"busy")
+    assert len(sdr.capture(radio, 103_000_000, 10, 0, 0.75, run=run)) == 4 * 2_250_000
+    with pytest.raises(RuntimeError, match="airspy_rx gave no samples"):
+        sdr.capture(radio, 103_000_000, 10, 0, 0.75,
+                    run=lambda cmd, **kw: types.SimpleNamespace(stdout=b"", stderr=b"busy"))
 
 
 # -------------------------------------------------------------- the signal
@@ -262,3 +288,12 @@ def test_the_default_gain_before_calibration_follows_the_radio(tmp_path, monkeyp
     tuner = gt.Tuner(sat=None)
     assert tuner.settings(r, sdr.Airspy(r.serial, [3_000_000])) == (sdr.AIRSPY_DEFAULT_GAIN, 0)
     assert tuner.settings(r) == (gt.DEFAULT_GAIN, 0)
+
+
+def test_an_airspy_with_a_fixed_gain_is_not_calibrated():
+    fixed = receivers.parse({"receivers": [{"serial": "0x644064DC2B1C2E4F",
+                                            "frequencies": ["103.5M"], "gain": 10}]})[0]
+    assert not gt.Tuner._auto(fixed)                 # ppm: auto means nothing here
+    rtl = receivers.parse({"receivers": [{"serial": "1", "frequencies": ["103.5M"],
+                                          "gain": 19.7}]})[0]
+    assert gt.Tuner._auto(rtl)                       # its ppm is still measured

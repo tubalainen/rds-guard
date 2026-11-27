@@ -10,6 +10,7 @@ same for both. open(serial) finds which one a serial number is.
 """
 
 import subprocess
+import time
 
 import numpy as np
 
@@ -20,7 +21,9 @@ import dongles
 # resampled to 171 kHz
 AIRSPY_MID_RATE = 250_000
 AIRSPY_DEFAULT_GAIN = 12.0       # linearity, before the calibration
-AIRSPY_CLIP = 32_000             # |I| or |Q| this high: the ADC is (near) full
+# libairspy shifts the 12-bit ADC to 16 bits and halves it in its real-to-IQ
+# step (Q >> 1, the half-band I filter): a full ADC gives about ±16 384
+AIRSPY_CLIP = 15_000             # |I| or |Q| this high: the ADC is (near) full
 
 
 class RtlSdr:
@@ -119,7 +122,7 @@ class Airspy:
 
     @staticmethod
     def clip_fraction(raw):
-        """Share of the I/Q values near full scale (12-bit ADC, scaled to 16)."""
+        """Share of the I/Q values near what a full ADC gives."""
         a = np.frombuffer(raw[:len(raw) // 2 * 2], dtype=np.int16)
         if not len(a):
             return 0.0
@@ -146,14 +149,19 @@ def open(serial):                  # noqa: A001 - sdr.open(serial) reads well
     return from_dongle(dongles.lookup(serial))
 
 
-def capture(radio, center_hz, gain, ppm, seconds, run=subprocess.run):
-    """IQ bytes for a while (the first quarter second dropped: settling)."""
+def capture(radio, center_hz, gain, ppm, seconds, run=subprocess.run, retries=1):
+    """IQ bytes for a while (the first quarter second dropped: settling).
+    Tried once more after a second: an Airspy can be held for a moment by
+    airspy_info (another receiver being looked for)."""
     bps = radio.bytes_per_sample
     samples = int((seconds + 0.25) * radio.fs)
-    proc = run(radio.capture_cmd(center_hz, gain, ppm, samples), capture_output=True,
-               timeout=seconds + 30)
-    raw = proc.stdout
-    if len(raw) < radio.fs * bps // 2:   # not even half a second: busy or gone
-        raise RuntimeError(f"{radio.tool} gave no samples: "
-                           f"{proc.stderr.decode('utf-8', 'replace')[-200:]}")
-    return raw[int(0.25 * radio.fs) * bps:]
+    for attempt in range(retries + 1):
+        proc = run(radio.capture_cmd(center_hz, gain, ppm, samples), capture_output=True,
+                   timeout=seconds + 30)
+        raw = proc.stdout
+        if len(raw) >= radio.fs * bps // 2:   # at least half a second
+            return raw[int(0.25 * radio.fs) * bps:]
+        if attempt < retries:
+            time.sleep(1)
+    raise RuntimeError(f"{radio.tool} gave no samples: "
+                       f"{proc.stderr.decode('utf-8', 'replace')[-200:]}")

@@ -81,7 +81,8 @@ def main(argv=None):
     global RADIO, FS
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("frequency", help="a station you receive well, e.g. 103.5M")
-    ap.add_argument("--gain", type=float, default=20.0)
+    ap.add_argument("--gain", type=float, default=None,
+                    help="dB (RTL-SDR, default 20) or linearity 0-21 (Airspy, default 12)")
     ap.add_argument("--index", type=int, default=None, help="rtl_sdr device index")
     ap.add_argument("--serial", help="the dongle's serial number (looked up as the satellite does)")
     args = ap.parse_args(argv)
@@ -117,7 +118,10 @@ def main(argv=None):
         if args.serial:
             return 1
     index = 0 if index is None else index
-    print(f"Station {f / 1e6:.3f} MHz, gain {args.gain} dB", flush=True)
+    if args.gain is None:
+        args.gain = RADIO.default_gain if RADIO is not None else 20.0
+    print(f"Station {f / 1e6:.3f} MHz, gain {args.gain:g}" + (" (linearity)" if RADIO is not None else " dB"),
+          flush=True)
     results = {}
     for label, center in (("tuned 250 kHz ABOVE the station", f + OFFSET),
                           ("tuned 250 kHz BELOW the station", f - OFFSET)):
