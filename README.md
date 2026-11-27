@@ -257,7 +257,10 @@ gain itself, for each dongle and for all its stations together:
    RDS groups per second and block errors.
 4. **The choice:** the step where the *worst* station decodes best, so no
    station is sacrificed for another; within 5 %, the lower gain, for margin.
-   With no RDS at all (no antenna?) it uses 20 dB and says so.
+   A station that decodes at no step (too far, too weak) is left out of
+   the choice and reported, so it cannot drag the others down. With no RDS
+   at all (no antenna?) it uses the highest gain that does not clip, and
+   says so.
 
 It takes about two minutes per dongle, and only that dongle pauses. It runs
 
@@ -883,7 +886,8 @@ text once, when it reaches `master`.
 | Two dongles with the same serial number | Factory default `00000001` | Give one a new number with `rtl_eeprom` as the log says |
 | `docker compose ps` shows `unhealthy` | No dongle is receiving | `docker compose exec rds-guard python3 -m satellite_health` says why; the log has the details |
 | Low decode rate (< 5 grp/s) | Weak signal, wrong frequency or gain | **Admin → Noder → Kalibrera om**; check the antenna and that the frequency matches a nearby P4 transmitter |
-| Calibration chose 20 dB and says no RDS | No antenna or no station on the frequency | Check the antenna and `frequencies` |
+| Calibration says `no station decoded at any gain` | No antenna or no station on the frequency | Check the antenna and `frequencies` |
+| Calibration says `<freq>: no RDS at any gain` | That station is too weak on this antenna | The others still get their best gain; remove it, or give it its own dongle and antenna |
 | Log: `Uplink pending: waiting for approval (code …)` | The aggregator has not approved the satellite | Approve it under **Admin → Noder**, or give both the same `JOIN_KEY` |
 | Log: `Uplink rejected` | Rejected in Admin, or `JOIN_KEY` differs | Check that both have the same `JOIN_KEY` |
 | Log: `Uplink incompatible` | Satellite and aggregator speak different protocol versions | Update both: `docker compose pull && docker compose up -d` |

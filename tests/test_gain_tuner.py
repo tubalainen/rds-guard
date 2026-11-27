@@ -80,8 +80,20 @@ def test_choose_best_worst_station_and_lower_gain_on_ties():
            {"gain": 20.0, "stations": {"a": 8.0, "b": 7.5}},
            {"gain": 30.0, "stations": {"a": 8.1, "b": 7.7}},     # within 5 %: no
            {"gain": 40.0, "stations": {"a": 3.0, "b": 3.0}}]
-    assert gt.choose(res) == 20.0
+    assert gt.choose(res) == (20.0, [])
     assert gt.choose([{"gain": 5.0, "stations": {"a": 0.0}}]) is None
+
+
+def test_a_station_that_never_decodes_does_not_decide():
+    """A far, weak station with no RDS at any step: the others choose (it
+    would otherwise make every step score 0)."""
+    res = [{"gain": 3.0, "stations": {"near": 11.0, "far": 0.0}},
+           {"gain": 12.0, "stations": {"near": 9.0, "far": 0.0}},
+           {"gain": 16.0, "stations": {"near": 8.0, "far": 0.0}}]
+    assert gt.choose(res) == (3.0, ["far"])
+    # It decodes somewhere: then it counts, and decides
+    res[2]["stations"]["far"] = 2.0
+    assert gt.choose(res) == (16.0, [])
 
 
 def test_redsea_quality_counts_groups_and_bler():
@@ -138,13 +150,45 @@ def test_a_whole_calibration_with_a_fake_dongle():
     assert 49.6 not in checked
 
 
-def test_nothing_decodes_falls_back_to_20_db():
+def test_nothing_decodes_uses_the_highest_gain_that_does_not_clip():
     r = receivers.parse({"receivers": [{"serial": "1", "frequencies": ["103.5M"]}]})[0]
     dongle = FakeDongle(r)
     lines = []
-    res = gt.calibrate(r, 0, [0.0, 19.7, 49.6], capture_fn=dongle.capture,
+    res = gt.calibrate(r, 0, [0.0, 8.7, 19.7, 28.0, 40.2, 49.6], capture_fn=dongle.capture,
                        quality_fn=lambda pcm, s: (0.0, None), progress=lines.append)
-    assert res["gain"] == 19.7 and any("no station decoded" in line for line in lines)
+    clean = [s["gain"] for s in res["steps"] if s["clip"] <= gt.CLIP_LIMIT]
+    assert clean and max(clean) < 49.6           # the fake clips at the top
+    assert res["gain"] == max(clean)
+    assert any("no station decoded" in line for line in lines)
+
+
+def test_a_dead_station_is_reported_and_the_other_decides():
+    r = receivers.parse({"receivers": [{"serial": "1", "frequencies": ["103.5M", "102.8M"]}]})[0]
+    dongle = FakeDongle(r)
+    current, n = [None], [0]
+
+    def capture(index, center, gain, ppm, seconds):
+        current[0] = gain
+        return dongle.capture(index, center, gain, ppm, seconds)
+
+    def quality(pcm, seconds):              # stations come in order: 103.5M, 102.8M
+        n[0] += 1
+        return (dongle.quality(current)(pcm, seconds) if n[0] % 2 else (0.0, None))
+
+    lines = []
+    res = gt.calibrate(r, 0, [0.0, 8.7, 19.7, 28.0, 40.2, 49.6], capture_fn=capture,
+                       quality_fn=quality, progress=lines.append)
+    assert 15 <= res["gain"] <= 30            # where 103.5M decodes best
+    assert res["dead"] == ["102.8M"]
+    assert any("102.8M: no RDS at any gain" in line for line in lines)
+
+
+def test_the_ppm_capture_does_not_overload_a_strong_station():
+    r = receivers.parse({"receivers": [{"serial": "1", "frequencies": ["103.5M"]}]})[0]
+    dongle = FakeDongle(r)
+    gt.calibrate(r, 0, [0.0, 8.7, 19.7, 49.6], capture_fn=dongle.capture,
+                 quality_fn=lambda pcm, s: (11.0, 0), progress=lambda line: None)
+    assert [c[0] for c in dongle.calls if c[2] == gt.PPM_SEC] == [8.7]
 
 
 # ------------------------------------------------------------ on the satellite
@@ -191,7 +235,7 @@ def setup(store):
 
 def test_first_start_calibrates_then_uses_the_result(setup):
     tuner, p, st, clock, runs = setup
-    assert tuner.settings(p.receiver) == (gt.DEFAULT_GAIN, 0)
+    assert tuner.settings(p.receiver) == (gt.START_GAIN, 0) == (8.7, 0)
     assert tuner.describe(p)["calibration"] == "väntar"
     assert tuner.due(p) == "first start"
     assert tuner.step(p) == "calibrated"
