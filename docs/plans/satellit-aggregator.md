@@ -1,6 +1,6 @@
 # Plan: satellit + aggregator som enda arkitektur
 
-Status 2026-11-27: fas 0 klar (planen i repot), fas 1 byggd (v0.9.0: compose med båda, import, nodens plats i Admin, mätverktygen i aggregatorn). Fas 2–4 återstår.
+Status 2026-11-27: fas 0 klar (planen i repot), fas 1 byggd (v0.10.0: compose med båda, import, nodens plats i Admin, mätverktygen i aggregatorn). Fas 2–4 återstår.
 
 ## Bakgrund
 
@@ -360,7 +360,7 @@ på docker01 genom `docker compose pull` (som tidigare).
 **Fas 0: planen i repot.** Den här planen läggs som `docs/plans/satellit-aggregator.md`,
 med en statusrad överst som uppdateras efter varje fas (som `placering-v2.md`).
 
-**Fas 1, v0.9.0: aggregatorn redo att ta över** (protokoll v1 är kvar, inget går sönder)
+**Fas 1, v0.10.0: aggregatorn redo att ta över** (protokoll v1 är kvar, inget går sönder)
 - Nodens plats i Admin, och det utökade nodkortet.
 - Importverktyget.
 - `docker-compose.yml` i roten med båda tjänsterna, och `docker-compose.satellite.yml`.
