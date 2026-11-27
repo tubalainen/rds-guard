@@ -203,6 +203,11 @@ class Importer:
              row.get("transcription_duration_sec"),
              row.get("transcription_corrected"), row.get("geo_status"),
              row.get("geo_engine"), store.now_iso()))
+        conn.execute("UPDATE events SET station_key = ? WHERE event_uid = ?",
+                     (store.station_key(row.get("frequency"), row["pi"]), uid))
+        store.note_station(conn, row.get("frequency"), row["pi"],
+                           row.get("station_ps"), station.get("long_ps"),
+                           radiotext, started or received)
         return note
 
     def _copy_audio(self, row, uid):

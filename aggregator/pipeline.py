@@ -73,7 +73,8 @@ def alert_payload(row, transcription_status, locations=None):
     """
     station = {"pi": row["pi"]}
     for src, dst in (("station_ps", "ps"), ("long_ps", "long_ps"),
-                     ("prog_type", "prog_type")):
+                     ("prog_type", "prog_type"), ("station_name", "name"),
+                     ("station_key", "key")):
         if row.get(src):
             station[dst] = row[src]
     return {
@@ -190,11 +191,24 @@ class Pipeline(Hooks):
         location = store.node_location(store.get_node(node_id))
         return self._geo.locate_node(location) if location else None
 
+    def locate_area(self, text):
+        """A station's area ('Örebro län' or 'Ort, Län') -> Place, or None."""
+        if self._geo is None:
+            return None
+        return self._geo.locate_area(text)
+
     def place_of(self, row):
-        """(place, "Ort, Län") of a broadcast: the transcribed node's, else
-        that of another node that heard it; (None, None) if none has one."""
+        """(place, label) a broadcast's places are read around: the area set
+        for its station (e.g. "Örebro län"), else the transcribed node's
+        location, else that of another node that heard it; (None, None) if
+        none is known."""
         if self._geo is None:
             return None, None
+        st = store.get_station(row.get("station_key")) if row.get("station_key") else None
+        if st and st.get("area"):
+            place = self._geo.locate_area(st["area"])
+            if place is not None:
+                return place, st["area"]
         ids = [row["node_id"]] + [i for i in store.event_node_ids(row["id"])
                                   if i != row["node_id"]]
         for node_id in ids:
@@ -327,7 +341,9 @@ class Pipeline(Hooks):
             self._publish(
                 f"{row['pi']}/{row['type']}/transcription", {
                     "event_id": uid,
-                    "station": {"pi": row["pi"], "ps": row.get("station_ps")},
+                    "station": {"pi": row["pi"], "ps": row.get("station_ps"),
+                        "name": row.get("station_name"),
+                        "key": row.get("station_key")},
                     "node": {"name": row.get("node_name")},
                     "transcription": text,
                     "language": config.TRANSCRIPTION_LANGUAGE,
@@ -383,7 +399,9 @@ class Pipeline(Hooks):
         self._publish(f"{row['pi']}/traffic/ta", {
             "active": active,
             "since": row.get("started_at") if active else row.get("ended_at"),
-            "station": {"pi": row["pi"], "ps": row.get("station_ps")},
+            "station": {"pi": row["pi"], "ps": row.get("station_ps"),
+                        "name": row.get("station_name"),
+                        "key": row.get("station_key")},
             "frequency": row.get("frequency"),
             "node": {"name": row.get("node_name")},
             "timestamp": store.now_iso(),
@@ -448,7 +466,7 @@ class Pipeline(Hooks):
                 store.mark_alert(row["event_uid"], "published")
                 self._notify_after_alert(row)
                 log.info("Alert published for %s from %s (%s)",
-                         row.get("station_ps") or row["pi"],
+                         row.get("station_name") or row["pi"],
                          row.get("node_name"), tstatus)
             # else: MQTT not connected — try again on the next sweep
 

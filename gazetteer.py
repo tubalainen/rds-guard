@@ -51,6 +51,32 @@ COUNTIES = {
     "Z": "Jämtlands län", "AC": "Västerbottens län", "BD": "Norrbottens län",
 }
 
+# Where a county's messages are read from when a station covers the whole
+# county ("Örebro län"): its seat
+COUNTY_SEATS = {
+    "AB": "Stockholm", "C": "Uppsala", "D": "Nyköping", "E": "Linköping",
+    "F": "Jönköping", "G": "Växjö", "H": "Kalmar", "I": "Visby",
+    "K": "Karlskrona", "M": "Malmö", "N": "Halmstad", "O": "Göteborg",
+    "S": "Karlstad", "T": "Örebro", "U": "Västerås", "W": "Falun",
+    "X": "Gävle", "Y": "Härnösand", "Z": "Östersund", "AC": "Umeå",
+    "BD": "Luleå",
+}
+
+
+def area_query(text):
+    """A station's area as 'Ort, Län' for locate(): 'Örebro län' -> 'Örebro,
+    Örebro län'; 'Ort, Län' unchanged; None if it is neither."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    if "," in text:
+        return text
+    code = county_code(text)
+    if code and code in COUNTY_SEATS:
+        return f"{COUNTY_SEATS[code]}, {COUNTIES[code]}"
+    return text
+
+
 # How much a kind of place is worth when several names sound alike, and how
 # precisely it pins down a position (metres)
 KIND_WEIGHT = {

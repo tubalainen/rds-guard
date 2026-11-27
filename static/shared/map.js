@@ -241,13 +241,13 @@ const RDSMap = (() => {
         return {
             at: m.started_at || m.seen_at, src: 'radio', kind: m.kind,
             text: m.evidence || 'Nämnd i trafikmeddelandet',
-            audio: m.audio_url, event: m.event_id, node: m.node_name,
+            audio: m.audio_url, event: m.event_id, node: m.node_name, station: m.station_name,
         };
     }
 
     function radioHtml(i) {
         const badge = KIND_SV[i.kind] ? ` <span class="pill ${KIND_PILL[i.kind]} tl-kind">${KIND_SV[i.kind]}</span>` : '';
-        const node = i.node ? ` <span class="muted">· ${esc(i.node)}</span>` : '';
+        const node = i.node || i.station ? ` <span class="muted">· ${esc([i.station, i.node].filter(Boolean).join(', '))}</span>` : '';
         const play = i.audio ? `<button type="button" class="tl-play" data-audio="${esc(i.audio)}"
             title="Lyssna" aria-label="Lyssna på sändningen">${PLAY}</button>` : '';
         const link = i.event != null ? ` <a href="#/event/${encodeURIComponent(i.event)}">Sändningen</a>` : '';
@@ -426,6 +426,7 @@ const RDSMap = (() => {
             <div class="kv"><span>Plats</span><span>${esc(precision(inc.radius_m))}, ${esc(LEVEL[inc.level] || inc.level || '')}</span></div>
             <div class="kv"><span>Trafik</span><span>${esc(direction(inc))}</span></div>
             <div class="kv"><span>Omnämnd</span><span>${inc.events.length} ${inc.events.length === 1 ? 'gång' : 'gånger'}</span></div>
+            ${inc.stations && inc.stations.length ? `<div class="kv"><span>Station</span><span>${esc(inc.stations.map((st) => st.name || st.key).join(', '))}</span></div>` : ''}
             ${inc.nodes && inc.nodes.length ? `<div class="kv"><span>Hörd av</span><span>${esc(inc.nodes.join(', '))}</span></div>` : ''}
             ${short ? `<p class="inc-pop-text">”${esc(short)}”</p>` : ''}
             ${latest ? `<a href="#/event/${encodeURIComponent(latest.id)}">Öppna senaste meddelandet</a>` : ''}
@@ -507,6 +508,8 @@ const RDSMap = (() => {
                 <p><span id="map-intro">Händelser som trafikmeddelandena nämnt de senaste ${HOURS} timmarna.</span>
                 Ju större cirkel, desto osäkrare är platsen. Pilen visar vilken riktning som påverkas.</p></div>
                 <div class="map-checks">
+                    <label class="map-check" id="map-station-label" hidden><span class="sr-only">Station</span>
+                        <select class="sel" id="map-station"><option value="">Alla stationer</option></select></label>
                     <label class="map-check"><input type="checkbox" id="map-history"> Visa historiska händelser</label>
                     <label class="map-check trv" id="map-trv-label" hidden><input type="checkbox" id="map-trv"> Trafikverkets övriga händelser</label>
                 </div></div>
@@ -569,6 +572,15 @@ const RDSMap = (() => {
             }
         });
 
+        // Station filter: every station by default
+        const stationSel = root.querySelector('#map-station');
+        let station = route.params.get('station') || '';
+        stationSel.addEventListener('change', () => {
+            station = stationSel.value;
+            first = true;
+            refresh();
+        });
+
         box.addEventListener('change', () => {
             history = box.checked;
             saveHistory(history);
@@ -615,7 +627,14 @@ const RDSMap = (() => {
             if (!ctx.alive() || asked !== history) return;
             // A popup opened while the data was being fetched
             if (timed && popupOpen) { refreshWaiting = true; return; }
-            const incidents = (data.incidents || []).filter((i) => history || ageHours(i) <= HOURS);
+            const shown = (data.incidents || []).filter((i) => history || ageHours(i) <= HOURS);
+            const named = new Map();
+            shown.forEach((i) => (i.stations || []).forEach((st) => named.set(st.key, st.name || st.key)));
+            if (station && !named.has(station)) named.set(station, station);
+            stationSel.innerHTML = '<option value="">Alla stationer</option>' + [...named].sort((a, b) => a[1].localeCompare(b[1], 'sv'))
+                .map(([k, n]) => `<option value="${esc(k)}"${k === station ? ' selected' : ''}>${esc(n)}</option>`).join('');
+            root.querySelector('#map-station-label').hidden = named.size < 2 && !station;
+            const incidents = station ? shown.filter((i) => (i.stations || []).some((st) => st.key === station)) : shown;
             if (first && !history && focus && !incidents.some((i) => String(i.id) === focus)) {
                 // A link to an older incident (from the archive): show the history
                 history = true;
@@ -658,7 +677,8 @@ const RDSMap = (() => {
                     <span class="map-item-dot" style="opacity:${freshness(inc).toFixed(2)}"></span>
                     <span class="map-item-body"><b>${esc(inc.label)}</b>
                         ${inc.what ? `<span class="small muted map-item-what">${esc(inc.what)}</span>` : ''}
-                        <span class="small muted">${esc(ago(inc))} · ${esc(precision(inc.radius_m))}${k === 'cleared' ? ' · avklarad' : ''}${inc.trafikverket ? ' · Trafikverket' : ''}</span>
+                        <span class="small muted">${esc(ago(inc))} · ${esc(precision(inc.radius_m))}${k === 'cleared' ? ' · avklarad' : ''}${inc.trafikverket ? ' · Trafikverket' : ''}${
+    named.size > 1 && (inc.stations || []).length ? ` · ${esc(inc.stations.map((st) => st.name || st.key).join(', '))}` : ''}</span>
                     </span></button>`;
             };
             const trvItem = (dev) => `<button type="button" class="map-item trv" data-id="trv:${esc(dev.id)}">

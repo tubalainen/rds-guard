@@ -40,7 +40,7 @@ MAX_MESSAGE = 400
 
 _TOPIC_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
-_PI_RE = re.compile(r"^(0[xX])?[0-9A-Fa-f]{4}$")
+_PI_RE = re.compile(r"^(\d{5,6}/)?(0[xX])?[0-9A-Fa-f]{4}$")
 
 DEFAULT_RULES = (
     {"name": "VMA", "enabled": True, "event_types": ["emergency"],
@@ -111,11 +111,11 @@ def validate(raw):
         raise RuleError("okänd händelsetyp")
     types = [t for t in EVENT_TYPES if t in types]
 
-    stations = _str_list(raw.get("stations"), "stations", 6)
+    stations = _str_list(raw.get("stations"), "stations", 16)
     for pi in stations:
         if not _PI_RE.match(pi):
-            raise RuleError(f"ogiltig PI-kod: {pi}")
-    stations = [norm_pi(s) for s in stations]
+            raise RuleError(f"ogiltig station: {pi}")
+    stations = [norm_station(s) for s in stations]
 
     nodes = _str_list(raw.get("nodes"), "nodes", 64)
     keywords = _str_list(raw.get("keywords"), "keywords")
@@ -171,6 +171,27 @@ def validate(raw):
 # ---------------------------------------------------------------------------
 # Matching
 # ---------------------------------------------------------------------------
+
+def norm_station(entry):
+    """'102800/0xe224' -> '102800/E224' (one station: frequency + PI);
+    'e224' -> 'E224' (every station with that PI)."""
+    khz, _, pi = (entry or "").strip().rpartition("/")
+    return f"{khz}/{norm_pi(pi)}" if khz else norm_pi(pi)
+
+
+def station_matches(stations, event):
+    """True if the event is from one of the stations ('102800/E224' or a
+    bare PI)."""
+    pi = norm_pi(event.get("pi"))
+    key = event.get("station_key")   # set by the aggregator
+    for entry in stations:
+        if "/" in entry:
+            if entry == key:
+                return True
+        elif entry == pi:
+            return True
+    return False
+
 
 def norm_pi(pi):
     """'0x9e04', '9E04' -> '9E04' (redsea reports PI as 0x....)."""
@@ -251,7 +272,7 @@ def matches(rule, event, zone):
         return False
     if event.get("type") not in rule["event_types"]:
         return False
-    if rule.get("stations") and norm_pi(event.get("pi")) not in rule["stations"]:
+    if rule.get("stations") and not station_matches(rule["stations"], event):
         return False
     if rule.get("nodes"):
         # Aggregator: heard by any of these nodes
@@ -288,7 +309,8 @@ def headline(event):
     rt = [r for r in (event.get("radiotext") or []) if r and str(r).strip()]
     if rt:
         return _shorten(str(rt[-1]), 90)
-    station = event.get("station_ps") or event.get("pi") or "okänd station"
+    station = (event.get("station_name") or event.get("station_ps")
+               or event.get("pi") or "okänd station")
     if event.get("type") == "emergency":
         return f"Viktigt meddelande till allmänheten på {station}"
     return f"Trafikmeddelande på {station}"
@@ -303,6 +325,8 @@ def build_payload(event, rule, event_ref, public_url="", audio_path=None,
     """
     etype = event.get("type", "traffic")
     station = {"pi": event.get("pi"), "ps": event.get("station_ps")}
+    if event.get("station_name"):
+        station["name"] = event["station_name"]
     message = (event.get("transcription_corrected") or event.get("transcription")
                or " – ".join(
                    str(r) for r in (event.get("radiotext") or []) if r))
