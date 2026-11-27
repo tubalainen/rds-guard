@@ -295,6 +295,13 @@ def _backfill_station_keys(conn):
              r["ps"], r["first"], r["last"]))
     if rows:
         log.info("Gave %d events their station (frequency + PI)", len(rows))
+    # Stations seen before a cut-short PS ("P4 Värml") counted as a name
+    for r in conn.execute("SELECT station_key, ps FROM stations "
+                          "WHERE rds_name IS NULL AND ps IS NOT NULL").fetchall():
+        rds = rds_station_name(r["ps"])
+        if rds:
+            conn.execute("UPDATE stations SET rds_name = ? WHERE station_key = ?",
+                         (rds, r["station_key"]))
 
 
 # The 25 P4 regions (lower case) and where their messages are read from.
@@ -331,12 +338,32 @@ _P4_NAME = re.compile(r"\bP4\s+(" + "|".join(sorted(P4_REGIONS, key=len, reverse
                       + r")(?![\wåäöé])", re.IGNORECASE)
 
 
+def p4_region(text):
+    """The P4 region a PS names, or None. PS is only 8 characters, so the
+    name is often cut short ("P4 Värml", "P4 Örebr"): a cut that fits only
+    one region counts. "P4 SR" (the shared programme) names none."""
+    m = re.fullmatch(r"(?i)\s*(?:sr\s+)?p4\s+([\wåäöé]+)\s*", text or "")
+    if not m:
+        return None
+    word = m.group(1).casefold()
+    if word in P4_REGIONS:
+        return P4_REGIONS[word]
+    if len(word) < 3:
+        return None
+    hits = [r for k, r in P4_REGIONS.items() if k.startswith(word)]
+    return hits[0] if len(hits) == 1 else None
+
+
 def rds_station_name(ps=None, long_ps=None, radiotext=()):
     """The station's name as RDS gives it: Long PS when it says more than PS,
-    else "P4 <Region>" (one of the 25) in RadioText, else None."""
+    else the P4 region its PS names ("P4 Värml" -> "P4 Värmland"), else
+    "P4 <Region>" (one of the 25) in RadioText, else None."""
     lps = (long_ps or "").strip()
     if lps and lps.casefold() != (ps or "").strip().casefold():
         return lps[:64]
+    region = p4_region(ps)
+    if region:
+        return region[0]
     if isinstance(radiotext, str):
         radiotext = [radiotext]
     for text in radiotext or ():
@@ -354,8 +381,42 @@ def _station_rows():
     if rows is None:
         rows = {r["station_key"]: dict(r) for r in
                 _conn().execute("SELECT * FROM stations").fetchall()}
+        _inherit_from_frequency(rows)
         _stations_cache["rows"] = rows
     return rows
+
+
+def _inherit_from_frequency(rows):
+    """A station with no name of its own takes the name (and area) of the
+    other PI on its frequency. P4 swaps PI and PS when it sends the shared
+    programme: 103.5 is 0xE824 "P4 Värml" in the regional hours and 0xE224
+    "P4 SR" in the evening, so 103500/E224 is called P4 Värmland too. Only
+    when the frequency's named stations agree on one name."""
+    by_freq = {}
+    for r in rows.values():
+        own = r.get("name") or r.get("rds_name")
+        if own and r.get("frequency_khz"):
+            by_freq.setdefault(r["frequency_khz"], []).append(r)
+    for r in rows.values():
+        r["inherited_name"] = r["inherited_area"] = r["inherited_from"] = None
+        if r.get("name") or r.get("rds_name") or not r.get("frequency_khz"):
+            continue
+        named = [o for o in by_freq.get(r["frequency_khz"], ())
+                 if o["station_key"] != r["station_key"]]
+        names = {(o.get("name") or o.get("rds_name")) for o in named}
+        if len(names) != 1:
+            continue
+        r["inherited_name"] = names.pop()
+        r["inherited_from"] = named[0]["station_key"]
+        r["inherited_area"] = next((o["area"] for o in named if o.get("area")), None)
+
+
+def station_area(station):
+    """The area set for the station, else that of the station it takes its
+    name from (same frequency, other PI)."""
+    if not station:
+        return None
+    return station.get("area") or station.get("inherited_area")
 
 
 def _stations_changed():
@@ -363,10 +424,12 @@ def _stations_changed():
 
 
 def station_display_name(station):
-    """Name set in Admin, else from RDS, else PS, else PI."""
+    """Name set in Admin, else from RDS, else that of the other PI on the
+    same frequency, else PS, else PI."""
     if not station:
         return None
-    return (station.get("name") or station.get("rds_name") or station.get("ps")
+    return (station.get("name") or station.get("rds_name")
+            or station.get("inherited_name") or station.get("ps")
             or station.get("pi"))
 
 
@@ -374,7 +437,7 @@ def with_station_name(d):
     """Add station_name (and station_area) to a row with station_key."""
     st = _station_rows().get(d.get("station_key"))
     d["station_name"] = station_display_name(st) or d.get("station_ps") or d.get("pi")
-    d["station_area"] = (st or {}).get("area")
+    d["station_area"] = station_area(st)
     return d
 
 
@@ -427,12 +490,12 @@ def note_station(conn, frequency, pi, ps=None, long_ps=None, radiotext=(),
 def suggest_area(name):
     """'P4 Örebro' -> 'Örebro län', 'P4 Skaraborg' -> 'Skövde, Västra
     Götalands län', a county name -> that county; None otherwise."""
+    region = p4_region(name)
+    if region:
+        return region[1]
     text = re.sub(r"(?i)^\s*(sr\s+)?p4\s+", "", name or "").strip()
     if not text:
         return None
-    region = P4_REGIONS.get(text.casefold())
-    if region:
-        return region[1]
     code = gz.county_code(text)
     return gz.COUNTIES.get(code) if code else None
 
@@ -454,7 +517,8 @@ def list_stations():
         c = counts.get(key, {})
         d = dict(st)
         d["display_name"] = station_display_name(st)
-        d["suggested_area"] = None if st.get("area") else suggest_area(d["display_name"])
+        d["suggested_area"] = (None if station_area(st)
+                               else suggest_area(d["display_name"]))
         d["events"] = c.get("events", 0)
         d["last_event_at"] = c.get("last_event_at")
         d["frequency"] = (f"{st['frequency_khz'] / 1000:g}M" if st.get("frequency_khz")

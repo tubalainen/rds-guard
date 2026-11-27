@@ -1,6 +1,10 @@
 # Stationer: namn, område och identitet
 
 Status: godkänd och byggd 2026-11-27 (gren claude-/upbeat-shannon-cu61mt).
+Tillägg v1.0.12: 0xE224 "P4 SR" är P4:s gemensamma program (lunch, kvällar,
+helger); under regionala timmar sänder 103,5 0xE824 "P4 Värml". En station
+utan eget namn får namn och område från den andra PI:n på samma frekvens, och
+avkortad PS ("P4 Värml") räknas som regionens namn.
 API: `GET /api/v1/stations`, `PATCH /api/v1/station-settings` (admin),
 `GET /api/v1/events?station=102800/E224`.
 
