@@ -694,6 +694,25 @@ Claude place each message, Claude's corrected text and its token cost. The
 second also transcribes the clips again with ElevenLabs with and without
 the place names, to see whether they help.
 
+### Transcribe the stored messages again
+
+After a better transcription engine, more place names or a new version,
+the stored recordings can be transcribed again, oldest first, with the
+receiver's own settings. It shows the count and the cost first and changes
+nothing without `--yes`:
+
+```bash
+docker compose exec rds-guard python3 /app/tools/retranscribe.py
+docker compose exec rds-guard python3 /app/tools/retranscribe.py --yes
+docker compose exec rds-guard python3 /app/tools/retranscribe.py --yes --limit 5      # try a few
+docker compose exec rds-guard python3 /app/tools/retranscribe.py --yes --engine local # free, on the CPU
+```
+
+ElevenLabs costs about 2–3 öre per message (from the plan's credits);
+local is free. It prints a line per message. The map is not touched: then
+**Admin → Karta → Bygg om kartan** places every message again from the new
+texts.
+
 Places missing from OpenStreetMap, or the one of several same-named places
 that the traffic desk means, are added by hand in
 `geodata/places-local.tsv` (name, kind, lat, lon, county; one per line). A
@@ -936,6 +955,7 @@ rds-guard/
 ├── tools/build_roads.py        # Rebuilds the roads in geodata/ from OpenStreetMap
 ├── tools/build_roads_trafikverket.py # Rebuilds roads and Trafikverket's places in geodata/
 ├── tools/measure_geolocation.py # Measures the map engines on your own messages
+├── tools/retranscribe.py      # Transcribes the stored recordings again
 ├── status.py             # Status snapshot (/api/status + uplink heartbeat)
 ├── uplink.py             # Satellite → aggregator sender (outbox + heartbeat)
 ├── docs/
