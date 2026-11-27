@@ -114,10 +114,17 @@ sudo modprobe -r dvb_usb_rtl28xxu
 
 ## Quick start
 
+RDS Guard is moving to one setup for everyone: a **satellite** that only
+receives and records, and an **aggregator** that does everything else
+(archive, transcription, map, push, MQTT). From v0.9.0 the default
+`docker-compose.yml` runs both on one host; see the
+[plan](docs/plans/satellit-aggregator.md). Until v1.0 the satellite also keeps
+its own web UI on port 8022.
+
 1. Get the two files you need. There is no need to clone the repository:
-   `docker-compose.yml` uses the ready-made image
-   `ghcr.io/tubalainen/rds-guard:latest` (amd64 + arm64), which Docker pulls
-   for you.
+   `docker-compose.yml` uses the ready-made images
+   `ghcr.io/tubalainen/rds-guard` and `ghcr.io/tubalainen/rds-guard-aggregator`
+   (amd64 + arm64), which Docker pulls for you.
 
 ```bash
 mkdir rds-guard && cd rds-guard
@@ -125,10 +132,13 @@ curl -fsSLo docker-compose.yml https://raw.githubusercontent.com/tubalainen/rds-
 curl -fsSLo .env https://raw.githubusercontent.com/tubalainen/rds-guard/master/.env.example
 ```
 
-2. Edit `.env` and at minimum set your local P4 frequency:
+2. Edit `.env` and at minimum set your local P4 frequency, where the receiver
+   is, and a password for the Admin pages:
 
 ```bash
-FM_FREQUENCY=103.3M        # Your local P4 frequency
+FM_FREQUENCY=103.3M                   # Your local P4 frequency
+NODE_LOCATION=Karlstad, Värmlands län # Ort, Län: places the messages on the map
+ADMIN_PASSWORD=choose-one
 ```
 
 For the best transcriptions, add an [ElevenLabs](https://elevenlabs.io) API
@@ -147,30 +157,101 @@ MQTT_HOST=192.168.1.100        # Your MQTT broker IP
 MQTT_PORT=1883
 ```
 
-3. Pull the image and start it:
+3. Pull the images and start them:
 
 ```bash
 docker compose pull
 docker compose up -d
 ```
 
-To update later, run `docker compose pull && docker compose up -d` in the
-same folder. Your `.env` and `rds-data` are kept.
-
-4. Open the web UI at **http://your-host:8022**
-
-5. View logs:
+4. Connect the satellite to the aggregator: create a node for it, and put
+   the printed `UPLINK_TOKEN=…` line in `.env` (the other printed lines are
+   not needed here; the compose file sets the address):
 
 ```bash
-docker compose logs -f rds-guard
+docker compose exec aggregator python3 -m aggregator.nodes add "Hemma"
 ```
 
-> **Building locally:** Only if you want to build the image yourself instead of pulling it, you need the whole repository: `git clone https://github.com/tubalainen/rds-guard.git`, then in `rds-guard` copy `.env.example` to `.env`, edit `docker-compose.yml` (comment out the `image:` line and uncomment `build: .`) and run `docker compose up -d --build`.
+```bash
+docker compose up -d
+```
 
-6. **Optional:** connect the installation to an aggregator. See
-   [Run as a satellite](#run-as-a-satellite).
+5. Open the aggregator's web UI at **http://your-host:8080**. The
+   satellite's own web UI stays at **http://your-host:8022** until v1.0.
 
-That's a complete **standalone** installation: everything stays on this host.
+To update later, run `docker compose pull && docker compose up -d` in the
+same folder. Your `.env`, `rds-data` and `aggregator-data` are kept.
+
+View logs:
+
+```bash
+docker compose logs -f rds-guard aggregator
+```
+
+> **Building locally:** Only if you want to build the images yourself instead of pulling them, you need the whole repository: `git clone https://github.com/tubalainen/rds-guard.git`, then in `rds-guard` copy `.env.example` to `.env`, edit `docker-compose.yml` (comment out the `image:` lines and uncomment the `build:` lines) and run `docker compose up -d --build`.
+
+> **Only the satellite:** on a host that reports to someone else's
+> aggregator (or where you want no aggregator yet), use
+> `docker-compose.satellite.yml` instead:
+> `curl -fsSLo docker-compose.yml https://raw.githubusercontent.com/tubalainen/rds-guard/master/docker-compose.satellite.yml`.
+> See [Run as a satellite](#run-as-a-satellite).
+
+### Moving an existing installation to satellite + aggregator
+
+If you already run RDS Guard on its own (one `rds-guard` container), you can
+add the aggregator next to it and bring your history along: events, audio,
+transcriptions, the map and your push rules. Nothing is transcribed again
+and nothing is pushed again.
+
+1. In the folder you run RDS Guard from, replace `docker-compose.yml` with
+   the new one (keep `.env` and `rds-data`):
+
+```bash
+curl -fsSLo docker-compose.yml https://raw.githubusercontent.com/tubalainen/rds-guard/master/docker-compose.yml
+```
+
+2. Pull and start. The satellite runs as before; the aggregator starts
+   empty:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+3. Import the history. This creates the node (here `docker01`) and prints its
+   lines; one line per event shows how far it has come. Run it with
+   `--dry-run` first to see what it would do:
+
+```bash
+docker compose exec aggregator python3 -m aggregator.import_satellite /import/events.db /import/audio --node "docker01" --dry-run
+```
+
+```bash
+docker compose exec aggregator python3 -m aggregator.import_satellite /import/events.db /import/audio --node "docker01"
+```
+
+4. Put the printed `UPLINK_TOKEN=…` line in `.env` and restart. From now on
+   the satellite only records and sends; the aggregator transcribes, maps and
+   pushes:
+
+```bash
+docker compose up -d
+```
+
+5. Check: the aggregator's web UI (port 8080) shows your history, and under
+   **Admin → Noder** the node is green. The import can be run again at any
+   time; it skips what is already there.
+
+The satellite's own data is not changed. Your push rules are copied.
+
+**MQTT and Home Assistant:** in this setup only the aggregator publishes, under
+the same prefix as before (`MQTT_TOPIC_PREFIX`, default `rds`), so
+`rds/alert`, `rds/notify/…`, `rds/{pi}/traffic/ta` and
+`rds/{pi}/{type}/transcription` keep working, with the same fields plus the
+node. The satellite's other topics (`rds/{pi}/programme/rt`, `station/pty`,
+`traffic/tp`, `system/status` and everything from `PUBLISH_MODE=all`) are no
+longer sent. `SATELLITE_MQTT_ENABLED=true` turns the satellite's own MQTT on
+again until v1.0, but then pushes come twice; `AGGREGATOR_MQTT_TOPIC_PREFIX`
+gives the aggregator another prefix.
 
 ## Run as a satellite
 
@@ -190,8 +271,9 @@ sent to the aggregator.
 
 ### Before you start
 
-1. Get the standalone installation working first ([Quick start](#quick-start)):
-   the *Debug* page of the web UI (link in the footer) shows your station and a decode rate above 5 grp/s.
+1. Get the satellite working first: follow the [Quick start](#quick-start)
+   but download `docker-compose.satellite.yml` as `docker-compose.yml` (a
+   friend's satellite needs no aggregator of its own). The *Debug* page of the web UI (link in the footer) shows your station and a decode rate above 5 grp/s.
 2. Ask the aggregator's owner for three values: the aggregator address, a
    node token, and the name to use for your node. They create the token in the
    aggregator's web UI (*Admin → Noder → Lägg till nod*) and get the lines to send you.
@@ -880,7 +962,8 @@ Frequencies may vary by relay transmitter. The decoded AF (Alternative Frequenci
 ```
 rds-guard/
 ├── Dockerfile
-├── docker-compose.yml
+├── docker-compose.yml            # Satellite + aggregator on one host
+├── docker-compose.satellite.yml  # Satellite only
 ├── .env
 ├── config.py
 ├── requirements.txt

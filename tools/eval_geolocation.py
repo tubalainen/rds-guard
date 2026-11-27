@@ -21,7 +21,9 @@ own logic without calling Claude, so changes to placing and merging can be
 measured for free.
 
 events.json is the output of
-    curl -s 'http://<host>:8022/api/events?type=traffic&limit=60'
+    curl -s 'http://<host>:8022/api/events?type=traffic&limit=60'      # satellite
+    curl -s 'http://<host>:8080/api/v1/events?type=traffic&limit=200'  # aggregator
+(an aggregator's events are matched to the set by when they were broadcast).
 Messages added with --import have "expect": null. They are still run (an
 earlier message gives later ones something to link to) but not scored
 until someone fills in "expect".
@@ -94,20 +96,26 @@ def import_events(corpus, events):
     """Add /api/events rows that have a transcription and are not in the set
     yet. Returns how many were added."""
     have = {c.get("event_id") for c in corpus["cases"]}
+    have_at = {norm_ts(c["at"]) for c in corpus["cases"] if c.get("at")}
     added = 0
     for ev in events:
         text = (ev.get("transcription") or "").strip()
-        if not text or ev.get("id") in have or not ev.get("started_at"):
+        # A satellite's rows have an id, an aggregator's an event_uid
+        ev_id = ev.get("id", ev.get("event_uid"))
+        if (not text or ev_id in have or not ev.get("started_at")
+                or norm_ts(ev["started_at"]) in have_at):
             continue
+        short = ev_id if isinstance(ev_id, int) else str(ev_id)[:8]
         corpus["cases"].append({
-            "id": f"ev{ev['id']}", "event_id": ev["id"],
+            "id": f"ev{short}", "event_id": ev_id,
             "at": norm_ts(ev["started_at"]),
             "station": ev.get("station_ps") or "",
             "text": text,
             "radiotext": ev.get("radiotext") or [],
             "expect": None,
         })
-        have.add(ev["id"])
+        have.add(ev_id)
+        have_at.add(norm_ts(ev["started_at"]))
         added += 1
     corpus["cases"].sort(key=lambda c: c["at"])
     return added
@@ -288,10 +296,13 @@ def stored_runs(corpus, events):
     messages (the "incidents" of each /api/events row), without placing
     anything again. Whether a message cleared its incident is not stored
     per message, so the kind is only new or known."""
-    by_id = {e.get("id"): e for e in events}
+    by_id = {e.get("id", e.get("event_uid")): e for e in events}
+    # After moving to the aggregator the messages have new ids (uids): find
+    # them by when they were broadcast
+    by_at = {norm_ts(e["started_at"]): e for e in events if e.get("started_at")}
     seen, out = set(), []
     for case in sorted(corpus["cases"], key=lambda c: c["at"]):
-        ev = by_id.get(case.get("event_id"))
+        ev = by_id.get(case.get("event_id")) or by_at.get(norm_ts(case["at"]))
         if ev is None:
             continue
         predicted = []
@@ -541,7 +552,10 @@ def main():
             with open(args.replay, encoding="utf-8") as f:
                 g = geolocate.Geolocator(ReplayReader(json.load(f)))
         elif name == "claude":
-            import config
+            try:
+                import config
+            except ImportError:   # in the aggregator's image
+                from aggregator import config
             if not config.ANTHROPIC_API_KEY:
                 sys.exit("ANTHROPIC_API_KEY saknas.")
             reader = geolocate.ClaudeReader(
