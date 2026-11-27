@@ -237,6 +237,11 @@ docker compose exec rds-guard python3 -m dongles
   how to give one a new number with `rtl_eeprom -d <index> -s <new>` (run
   it with only that dongle in use, then replug it).
 - Up to 4 stations per dongle, all within 2 MHz of each other.
+- The dongle is tuned so that no station sits on another's mirror: every
+  receiver leaves a weak mirror image of each station on the other side of
+  the centre, and a weak or absent station's channel would decode its
+  neighbour's mirror instead (the same PI and PS on both). Stations that
+  cannot be kept apart that way get a warning in the log.
 - The same frequency on two dongles is allowed (a warning): the aggregator
   merges what both hear into one event.
 - A connected dongle that is not in the file is left alone; one in the file

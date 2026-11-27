@@ -659,3 +659,53 @@ def test_a_wide_capture_is_tried_once_more(monkeypatch):
     clip, level, [mpx] = sdr.capture_measure(radio, 103_000_000, 8, 0, 0.5, [300_000],
                                              popen=popen)
     assert len(mpx) > 0 and answers == []
+
+
+# ------------------------------------------- stations off each other's mirror
+
+def _mirror_gaps(hz, c):
+    return [abs((a - c) + (b - c)) for i, a in enumerate(hz) for b in hz[i + 1:]]
+
+
+@pytest.mark.parametrize("freqs", [["102.8M", "103.5M"], ["103.5M", "102.9M"],
+                                   ["99.1M", "99.5M", "100.2M"], ["88.0M", "89.5M"]])
+def test_the_centre_keeps_every_station_off_the_others_mirror(freqs):
+    r = receivers.parse({"receivers": [{"serial": "1", "frequencies": freqs}]})[0]
+    c, ok = r.placement()
+    assert ok and not r.warnings
+    assert min(_mirror_gaps(r.freqs_hz, c)) >= receivers.MIRROR_GUARD_HZ
+    assert min(abs(f - c) for f in r.freqs_hz) >= receivers.DC_GUARD_HZ
+    assert max(abs(f - c) for f in r.freqs_hz) <= receivers.MAX_SPAN_HZ // 2
+
+
+def test_the_docker01_pair_is_no_longer_symmetric():
+    r = _airspy_receiver(frequencies=["102.8M", "103.5M"])
+    assert r.center_hz == 103_025_000          # was 103.15: ±350 kHz, mirrors
+    wide = _airspy_receiver(sample_rate="10M", frequencies=["99.5M", "102.8M", "106.9M"])
+    c, ok = wide.placement()
+    assert ok and min(_mirror_gaps(wide.freqs_hz, c)) >= receivers.MIRROR_GUARD_HZ
+
+
+def test_stations_that_cannot_be_kept_apart_are_warned_about():
+    r = receivers.parse({"receivers": [{"serial": "1",
+                                        "frequencies": ["102.0M", "104.0M"]}]})[0]
+    assert not r.placement()[1]
+    assert any("mirror" in w for w in r.warnings)
+
+
+def test_an_absent_station_no_longer_decodes_its_neighbours_mirror():
+    """docker01: 102.8 (weak or absent) decoded P4 Värmland on 103.5. With a
+    mirror at -30 dB, at the old centre the 102.8 channel heard Värmland's
+    RDS; at the new one it hears no station."""
+    fs = 2_500_000
+    n = int(fs * 0.6)
+
+    def channel_102_8(center):
+        z = fm_station(n, 103_500_000 - center, fs, seed=1)       # only 103.5 on air
+        z = z + 10 ** (-30 / 20) * np.conj(z)                     # I/Q imbalance
+        return gt.tone_snr_db(demod_all(iq_from_s16(to_s16(z, 0.3, noise=0.0003)),
+                                        102_800_000 - center, fs)[500:])
+    old = channel_102_8(103_150_000)
+    new = channel_102_8(_airspy_receiver(frequencies=["102.8M", "103.5M"]).center_hz)
+    assert old[0] > 20 and old[1] > 6          # Värmland's pilot and RDS
+    assert new[0] < gt.HEARD_PILOT_DB          # nothing heard
