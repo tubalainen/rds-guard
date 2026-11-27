@@ -230,6 +230,8 @@ connected:
 docker compose exec rds-guard python3 -m dongles
 ```
 
+- Every RTL2832U dongle works, the RTL-SDR Blog V4 included: the image uses
+  the RTL-SDR Blog driver (from v1.0.3).
 - Many dongles come with the same serial number (`00000001`). Two of them
   cannot be told apart, and the satellite stops with a message that shows
   how to give one a new number with `rtl_eeprom -d <index> -s <new>` (run
@@ -262,7 +264,7 @@ receivers:
 - No host preparation (no DVB driver to blacklist); the same
   `/dev/bus/usb` in the compose file passes it to the container.
 - Its gain is the "linearity" gain, 0–21, calibrated the same way as a
-  dongle's (`gain: 12` fixes it); the node card shows that step as its
+  dongle's (`gain: 10` fixes it); the node card shows that step as its
   gain. It has no ppm step: its clock is a TCXO, and `ppm:` is ignored for
   it.
 - Check that I/Q is the right way round once, with the satellite stopped:
@@ -279,19 +281,23 @@ fixed values) overdrive its amplifier: intermodulation then spoils RDS on
 every station, even when nothing visibly clips. So the satellite finds the
 gain itself, for each dongle and for all its stations together:
 
-1. **Frequency correction (ppm)** from how far each station's carrier is
-   off its nominal frequency, the median over the stations.
-2. **A quick sweep** over all the dongle's gain steps, about a second each:
+1. **A quick sweep** over all the dongle's gain steps, about a second each:
    ADC clipping and the signal-to-noise of each station's 19 kHz pilot and
    57 kHz RDS carrier.
-3. **A check with real decoding** of the four best steps, 8 s per station:
-   RDS groups per second and block errors.
+2. **Frequency correction (ppm)**, measured on the way: how far each
+   carrier is off its nominal frequency, at every step that does not clip
+   and on every station with a clear pilot. The median of all of them.
+3. **A check with real decoding** of the four best steps, 8 s per station,
+   with that correction: RDS groups per second and block errors.
 4. **The choice:** the step where the *worst* station decodes best, so no
    station is sacrificed for another; within 5 %, the lower gain, for margin.
-   With no RDS at all (no antenna?) it uses 20 dB and says so (an Airspy:
-   linearity 12).
+   A station that decodes at no step (too far, too weak) is left out of
+   the choice and reported, so it cannot drag the others down. With no RDS
+   at all (no antenna?) it uses the highest gain that does not clip, and
+   says so.
 
-An Airspy is swept over its linearity gain 0–21 and has no ppm step.
+An Airspy is swept over its linearity gain 0–21 the same way, and has no
+ppm step (its clock is a TCXO).
 
 It takes about two minutes per dongle, and only that dongle pauses. It runs
 
@@ -917,7 +923,10 @@ text once, when it reaches `master`.
 | Two dongles with the same serial number | Factory default `00000001` | Give one a new number with `rtl_eeprom` as the log says |
 | `docker compose ps` shows `unhealthy` | No dongle is receiving | `docker compose exec rds-guard python3 -m satellite_health` says why; the log has the details |
 | Low decode rate (< 5 grp/s) | Weak signal, wrong frequency or gain | **Admin → Noder → Kalibrera om**; check the antenna and that the frequency matches a nearby P4 transmitter |
-| Calibration chose 20 dB and says no RDS | No antenna or no station on the frequency | Check the antenna and `frequencies` |
+| Calibration says `no station decoded at any gain` | No antenna or no station on the frequency | Check the antenna and `frequencies` |
+| Calibration says `no FM station heard on this dongle` | No FM on that dongle at any gain: an antenna for another band, an FM band-stop filter (common on airband and ADS-B antennas), or a loose cable | Try an FM antenna or another dongle. The node card shows *ingen FM-signal hörs*, and the satellite tries again in 3 hours |
+| `unhealthy`: `no RDS from any station for over 5 minutes` | The dongle runs but nothing decodes | As above; `python3 -m satellite_health` says the same |
+| Calibration says `<freq>: no RDS at any gain` | That station is too weak on this antenna | The others still get their best gain; remove it, or give it its own dongle and antenna |
 | Log: `Uplink pending: waiting for approval (code …)` | The aggregator has not approved the satellite | Approve it under **Admin → Noder**, or give both the same `JOIN_KEY` |
 | Log: `Uplink rejected` | Rejected in Admin, or `JOIN_KEY` differs | Check that both have the same `JOIN_KEY` |
 | Log: `Uplink incompatible` | Satellite and aggregator speak different protocol versions | Update both: `docker compose pull && docker compose up -d` |

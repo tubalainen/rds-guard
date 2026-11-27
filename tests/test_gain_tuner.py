@@ -80,8 +80,20 @@ def test_choose_best_worst_station_and_lower_gain_on_ties():
            {"gain": 20.0, "stations": {"a": 8.0, "b": 7.5}},
            {"gain": 30.0, "stations": {"a": 8.1, "b": 7.7}},     # within 5 %: no
            {"gain": 40.0, "stations": {"a": 3.0, "b": 3.0}}]
-    assert gt.choose(res) == 20.0
+    assert gt.choose(res) == (20.0, [])
     assert gt.choose([{"gain": 5.0, "stations": {"a": 0.0}}]) is None
+
+
+def test_a_station_that_never_decodes_does_not_decide():
+    """A far, weak station with no RDS at any step: the others choose (it
+    would otherwise make every step score 0)."""
+    res = [{"gain": 3.0, "stations": {"near": 11.0, "far": 0.0}},
+           {"gain": 12.0, "stations": {"near": 9.0, "far": 0.0}},
+           {"gain": 16.0, "stations": {"near": 8.0, "far": 0.0}}]
+    assert gt.choose(res) == (3.0, ["far"])
+    # It decodes somewhere: then it counts, and decides
+    res[2]["stations"]["far"] = 2.0
+    assert gt.choose(res) == (16.0, [])
 
 
 def test_redsea_quality_counts_groups_and_bler():
@@ -131,20 +143,85 @@ def test_a_whole_calibration_with_a_fake_dongle():
     # and the choice
     assert sum("gain" in line and "clip" in line for line in lines) == 5
     assert any(line.startswith("[1] chosen") for line in lines)
-    # The sweep ran with the measured ppm; overloaded steps were not checked
+    # ppm was measured during the sweep (no correction then, no separate
+    # capture), and the decoding checks ran with it; overloaded steps were
+    # not checked
     sweep = [c for c in dongle.calls if c[2] == gt.SWEEP_SEC]
-    assert {c[1] for c in sweep} == {res["ppm"]}
+    assert {c[1] for c in sweep} == {0}
+    assert not [c for c in dongle.calls if c[2] == gt.PPM_SEC]
+    assert {c[1] for c in dongle.calls if c[2] == gt.VERIFY_SEC} == {res["ppm"]}
     checked = [c[0] for c in dongle.calls if c[2] == gt.VERIFY_SEC]
     assert 49.6 not in checked
 
 
-def test_nothing_decodes_falls_back_to_20_db():
+def test_nothing_decodes_uses_the_highest_gain_that_does_not_clip():
     r = receivers.parse({"receivers": [{"serial": "1", "frequencies": ["103.5M"]}]})[0]
     dongle = FakeDongle(r)
     lines = []
-    res = gt.calibrate(r, 0, [0.0, 19.7, 49.6], capture_fn=dongle.capture,
+    res = gt.calibrate(r, 0, [0.0, 8.7, 19.7, 28.0, 40.2, 49.6], capture_fn=dongle.capture,
                        quality_fn=lambda pcm, s: (0.0, None), progress=lines.append)
-    assert res["gain"] == 19.7 and any("no station decoded" in line for line in lines)
+    clean = [s["gain"] for s in res["steps"] if s["clip"] <= gt.CLIP_LIMIT]
+    assert clean and max(clean) < 49.6           # the fake clips at the top
+    assert res["gain"] == max(clean)
+    assert any("no station decoded" in line for line in lines)
+
+
+def test_a_dead_station_is_reported_and_the_other_decides():
+    r = receivers.parse({"receivers": [{"serial": "1", "frequencies": ["103.5M", "102.8M"]}]})[0]
+    dongle = FakeDongle(r)
+    current, n = [None], [0]
+
+    def capture(index, center, gain, ppm, seconds):
+        current[0] = gain
+        return dongle.capture(index, center, gain, ppm, seconds)
+
+    def quality(pcm, seconds):              # stations come in order: 103.5M, 102.8M
+        n[0] += 1
+        return (dongle.quality(current)(pcm, seconds) if n[0] % 2 else (0.0, None))
+
+    lines = []
+    res = gt.calibrate(r, 0, [0.0, 8.7, 19.7, 28.0, 40.2, 49.6], capture_fn=capture,
+                       quality_fn=quality, progress=lines.append)
+    assert 15 <= res["gain"] <= 30            # where 103.5M decodes best
+    assert res["dead"] == ["102.8M"]
+    assert any("102.8M: no RDS at any gain" in line for line in lines)
+
+
+def test_ppm_is_measured_only_on_steps_that_do_not_clip():
+    """Clipping distorts the carrier; those steps give no ppm estimate."""
+    r = receivers.parse({"receivers": [{"serial": "1", "frequencies": ["103.5M"]}]})[0]
+    dongle = FakeDongle(r, true_ppm=-3)
+
+    def capture(index, center, gain, ppm, seconds):
+        if gain > 30:                    # overload: and a carrier 40 kHz off
+            return dongle.capture(index, center + 40_000, gain, ppm, seconds)
+        return dongle.capture(index, center, gain, ppm, seconds)
+
+    lines = []
+    res = gt.calibrate(r, 0, [8.7, 12.5, 19.7, 40.2, 49.6], capture_fn=capture,
+                       quality_fn=lambda pcm, s: (11.0, 0), progress=lines.append)
+    assert res["ppm"] == pytest.approx(-3, abs=1)
+    assert any("median of" in line for line in lines)
+
+
+def test_fixed_ppm_is_used_in_the_sweep_and_not_measured():
+    r = receivers.parse({"receivers": [{"serial": "1", "frequencies": ["103.5M"], "ppm": 7}]})[0]
+    dongle = FakeDongle(r, true_ppm=7)
+    res = gt.calibrate(r, 0, [8.7, 19.7], capture_fn=dongle.capture,
+                       quality_fn=lambda pcm, s: (11.0, 0), progress=lambda line: None,
+                       want_ppm=False, ppm=7)
+    assert res["ppm"] == 7
+    assert {c[1] for c in dongle.calls} == {7}
+
+
+def test_fixed_gain_measures_ppm_at_that_gain():
+    r = receivers.parse({"receivers": [{"serial": "1", "frequencies": ["103.5M"], "gain": 12.5}]})[0]
+    dongle = FakeDongle(r, true_ppm=5)
+    res = gt.calibrate(r, 0, [8.7, 12.5, 19.7], capture_fn=dongle.capture,
+                       quality_fn=lambda pcm, s: (11.0, 0), progress=lambda line: None,
+                       want_gain=False, gain=12.5)
+    assert res["ppm"] == pytest.approx(5, abs=1)
+    assert [c[0] for c in dongle.calls] == [12.5]
 
 
 # ------------------------------------------------------------ on the satellite
@@ -191,7 +268,7 @@ def setup(store):
 
 def test_first_start_calibrates_then_uses_the_result(setup):
     tuner, p, st, clock, runs = setup
-    assert tuner.settings(p.receiver) == (gt.DEFAULT_GAIN, 0)
+    assert tuner.settings(p.receiver) == (gt.START_GAIN, 0) == (8.7, 0)
     assert tuner.describe(p)["calibration"] == "väntar"
     assert tuner.due(p) == "first start"
     assert tuner.step(p) == "calibrated"
@@ -285,3 +362,56 @@ def test_a_failed_calibration_waits_hours(setup):
     assert tuner.describe(p)["calibration"].startswith("misslyckades: rtl_sdr")
     clock[0] += gt.RETRY_AFTER_FAIL_SEC + 1
     assert tuner.due(p) == "first start"
+
+
+def test_ppm_comes_from_the_stations_that_are_heard():
+    """A frequency with no station on it (only noise) must not pull the ppm:
+    on docker01 one gave 18.5 next to the real -1.7, and the median of two
+    took it."""
+    r = receivers.parse({"receivers": [{"serial": "1", "frequencies": ["103.5M", "102.8M"]}]})[0]
+    true_ppm = -2
+
+    def capture(index, center, gain, ppm, seconds):
+        n = int(min(seconds, 0.3) * FS)
+        hz = 103_500_000                      # only 103.5M is on the air
+        z = 0.5 * fm_station(n, hz - center - (true_ppm - ppm) * hz / 1e6)
+        return to_u8(z, 0.4, noise=0.05)
+
+    lines = []
+    res = gt.calibrate(r, 0, [8.7, 19.7], capture_fn=capture,
+                       quality_fn=lambda pcm, s: (11.0, 0), progress=lines.append)
+    assert res["ppm"] == pytest.approx(true_ppm, abs=1)
+    assert any("102.8M: pilot" in line and "too weak" in line for line in lines)
+
+
+def test_a_dongle_that_hears_nothing_is_said_so_and_not_checked():
+    r = receivers.parse({"receivers": [{"serial": "1", "frequencies": ["103.5M"]}]})[0]
+    calls = []
+
+    def capture(index, center, gain, ppm, seconds):        # noise only
+        calls.append(seconds)
+        return to_u8(np.zeros(int(min(seconds, 0.3) * FS), complex), 0.0, noise=0.05)
+
+    lines = []
+    res = gt.calibrate(r, 0, [8.7, 19.7, 49.6], capture_fn=capture,
+                       quality_fn=lambda pcm, s: (0.0, None), progress=lines.append)
+    assert res["silent"] and any("no FM station heard" in line for line in lines)
+    assert gt.VERIFY_SEC not in calls                       # no decoding run in vain
+
+
+def test_a_silent_dongle_keeps_its_settings_and_tries_later(setup, store):
+    tuner, p, st, clock, runs = setup
+    tuner._calibrate = lambda r, **kw: {"silent": True, "gain": 49.6, "ppm": 0,
+                                        "stations": {}, "dead": ["103.5M"], "steps": []}
+    tuner.calibrate_pipeline(p, "first start")
+    assert tuner.settings(p.receiver) == (gt.START_GAIN, 0)    # nothing saved
+    assert "ingen FM-signal" in tuner.describe(p)["calibration"]
+    assert p.resumed == 1
+
+
+def test_stations_without_rds_show_on_the_node_card(setup, store):
+    tuner, p, st, clock, runs = setup
+    tuner._calibrate = lambda r, **kw: {"gain": 3.7, "ppm": -2, "stations": {"103.5M": 11.0},
+                                        "dead": ["102.8M"], "steps": []}
+    tuner.calibrate_pipeline(p, "first start")
+    assert tuner.describe(p)["calibration"] == "ingen RDS: 102.8M"

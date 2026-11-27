@@ -21,9 +21,6 @@ for 15 minutes (at most every 6 hours), and when the aggregator's owner asks
 (Admin -> Noder -> Kalibrera om). Never during a broadcast on that dongle;
 the other dongles keep running. gain:/ppm: in receivers.yml override it.
 
-An Airspy (Mini, R2) is swept over its linearity gain 0-21 the same way; it
-has no ppm step (its clock is a TCXO, and airspy_rx has no correction).
-
     docker compose exec rds-guard python3 -m gain_tuner --serial 00000101
 
 runs it by hand (with the satellite stopped, or the dongle is busy) and
@@ -47,13 +44,15 @@ log = logging.getLogger("rds-guard")
 
 FS = config.RTL_SAMPLE_RATE
 MPX_RATE = 171_000
-DEFAULT_GAIN = 20.0           # dB, when nothing decodes (no antenna …)
+START_GAIN = 8.7             # dB, until the first calibration (and for the ppm capture):
+                             # low enough not to clip on a strong station
 CLIP_LIMIT = 0.0005           # fraction of ADC samples at 0 or 255
 VERIFY_STEPS = 4
 VERIFY_SEC = 8
 SWEEP_SEC = 1.0
 PPM_SEC = 3.0
 PPM_LIMIT = 150
+HEARD_PILOT_DB = 20           # a station counts as heard with a pilot this clear
 TIE = 0.05                    # within 5 %: the lower gain
 LOW_QUALITY = 0.6             # of the calibrated rate …
 LOW_FOR_SEC = 15 * 60         # … for this long: calibrate again
@@ -149,14 +148,21 @@ def redsea_quality(pcm, seconds, run=None):
 def choose(results):
     """The gain to use from the verified steps:
     results = [{"gain", "stations": {freq: gps}}]. Best worst station; within
-    TIE the lower gain. None when nothing decodes."""
-    scored = [(min(r["stations"].values()) if r["stations"] else 0.0, r["gain"])
-              for r in results]
-    scored = [s for s in scored if s[0] > 0]
+    TIE the lower gain. A station that decodes at none of the steps does not
+    count (it would make every step score 0). Returns (gain, dead stations),
+    or None when no station decodes at all."""
+    freqs = {f for r in results for f in r["stations"]}
+    dead = sorted(f for f in freqs
+                  if not any((r["stations"].get(f) or 0) > 0 for r in results))
+    live = [f for f in freqs if f not in dead]
+    if not live:
+        return None
+    scored = [(min(r["stations"].get(f) or 0.0 for f in live), r["gain"]) for r in results]
+    scored = [x for x in scored if x[0] > 0]
     if not scored:
         return None
-    best = max(s[0] for s in scored)
-    return min(g for s, g in scored if s >= best * (1 - TIE))
+    best = max(x[0] for x in scored)
+    return min(g for x, g in scored if x >= best * (1 - TIE)), dead
 
 
 # ---------------------------------------------------------------------------
@@ -174,15 +180,14 @@ def calibrate(receiver, index, gains, capture_fn=None, quality_fn=redsea_quality
               radio=None):
     """Measure ppm and gain for one receiver. Returns a dict: gain, ppm,
     stations ({freq: groups/s at the chosen gain}), steps (the sweep).
-    radio: sdr.RtlSdr (default, at index) or sdr.Airspy."""
+    radio: sdr.RtlSdr (default, at index) or sdr.Airspy (no ppm)."""
     from channelizer import demod_all
 
     radio = radio or sdr.RtlSdr(index)
     if capture_fn is None:
         capture_fn = (lambda i, c, g, p, s: sdr.capture(radio, c, g, p, s,
                                                         run=subprocess.run))
-    default_gain = radio.default_gain
-    fs = radio.fs
+    start_gain = radio.default_gain
     if not radio.has_ppm:
         want_ppm, ppm = False, 0
     freqs = list(zip(receiver.frequencies, receiver.freqs_hz))
@@ -191,41 +196,92 @@ def calibrate(receiver, index, gains, capture_fn=None, quality_fn=redsea_quality
 
     def mpx_of(raw):
         z = radio.iq(raw)
-        return {f: demod_all(z, hz - center, fs) for f, hz in freqs}
+        return {f: demod_all(z, hz - center, radio.fs) for f, hz in freqs}
 
-    # 1. ppm, at a middle gain without correction
-    if want_ppm:
-        mid = dongles.nearest([g for g in gains if g > 0], 20.0) if gains else default_gain
-        raw = capture_fn(index, center, mid, 0, PPM_SEC)
-        values = [ppm_from_mpx(m, dict(freqs)[f]) for f, m in mpx_of(raw).items()]
-        values = sorted(v for v in values if v is not None)
-        measured = values[len(values) // 2] if values else 0.0
+    def ppm_estimates(mpx, label):
+        """(freq, ppm) for every station clear enough to measure on."""
+        out = []
+        for f, m in mpx.items():
+            pilot = tone_snr_db(m)[0]
+            v = ppm_from_mpx(m, dict(freqs)[f])
+            if v is not None and pilot >= HEARD_PILOT_DB:
+                out.append((f, v))
+        return out
+
+    def settle_ppm(estimates):
+        """The median of all estimates (steps × stations), rounded."""
+        for f, _ in freqs:
+            if not any(e[0] == f for e in estimates):
+                progress(f"[{rid}] {f}: pilot never above {HEARD_PILOT_DB} dB, too weak to "
+                         "measure ppm on")
+        values = sorted(v for _, v in estimates)
+        k = len(values)
+        if not k:
+            progress(f"[{rid}] no station clear enough to measure ppm on: using 0")
+            return 0
+        measured = values[k // 2] if k % 2 else (values[k // 2 - 1] + values[k // 2]) / 2
         if abs(measured) > PPM_LIMIT:
             progress(f"[{rid}] ppm {measured:.0f} is not believable: using 0")
-            ppm = 0
-        else:
-            ppm = int(round(measured))
-            progress(f"[{rid}] ppm {ppm} (per station: "
-                     + ", ".join(f"{v:.1f}" for v in values) + ")")
-    ppm = ppm or 0
-    if not want_gain:
-        return {"gain": gain, "ppm": ppm, "stations": {}, "steps": []}
+            return 0
+        per = {}
+        for f, v in estimates:
+            per.setdefault(f, []).append(v)
+        progress(f"[{rid}] ppm {int(round(measured))} (median of {k} measurements; per station: "
+                 + ", ".join(f"{f} {sorted(v)[len(v) // 2]:.1f}" for f, v in per.items()) + ")")
+        return int(round(measured))
 
-    # 2. sweep (rtl_sdr takes -g 0 as the tuner's automatic gain: never)
-    gains = [g for g in gains if g > 0 or not radio.zero_is_auto] or [default_gain]
+    # Gain fixed, ppm automatic: measure ppm at that gain, and stop
+    if not want_gain:
+        if want_ppm:
+            raw = capture_fn(index, center, gain or start_gain, 0, PPM_SEC)
+            ppm = settle_ppm(ppm_estimates(mpx_of(raw), "fixed gain"))
+        return {"gain": gain, "ppm": ppm or 0, "stations": {}, "steps": []}
+
+    # 1. sweep, without ppm correction unless ppm is fixed (rtl_sdr takes
+    # -g 0 as the tuner's automatic gain: never). The frequency error is
+    # measured on the way, at every step that does not clip, on every
+    # station heard clearly: far steadier than one capture at a guessed
+    # gain, and it costs nothing extra.
+    sweep_ppm = 0 if want_ppm else (ppm or 0)
+    gains = [g for g in gains if g > 0 or not radio.zero_is_auto] or [start_gain]
     steps = []
+    estimates = []
     for i, g in enumerate(gains, 1):
-        raw = capture_fn(index, center, g, ppm, SWEEP_SEC)
+        raw = capture_fn(index, center, g, sweep_ppm, SWEEP_SEC)
         clip = radio.clip_fraction(raw)
-        snrs = {f: tone_snr_db(m) for f, m in mpx_of(raw).items()}
-        worst_rds = min(s[1] for s in snrs.values())
-        steps.append({"gain": g, "clip": clip, "snr": snrs, "worst_rds": worst_rds,
+        mpx = mpx_of(raw)
+        snrs = {f: tone_snr_db(m) for f, m in mpx.items()}
+        if want_ppm and clip <= CLIP_LIMIT:
+            estimates += ppm_estimates(mpx, g)
+        steps.append({"gain": g, "clip": clip, "snr": snrs,
                       "level": round(level_dbfs(radio.iq(raw)), 1)})
         progress(f"[{rid}] {i}/{len(gains)} gain {g:4.1f} dB: clip {clip * 100:.3f} %, "
                  + ", ".join(f"{f} pilot {s[0]:.0f} dB RDS {s[1]:.0f} dB"
                              for f, s in snrs.items()))
 
-    # 3. verify the best with redsea
+    # 2. ppm from the sweep
+    if want_ppm:
+        ppm = settle_ppm(estimates)
+    ppm = ppm or 0
+
+    # 3. verify the best with redsea. Ranked by the worst station that is
+    # heard at all (a clear pilot at some step): a station too far away to
+    # hear would make every step equally bad
+    heard = [f for f, _ in freqs
+             if max(s["snr"][f][0] for s in steps) >= HEARD_PILOT_DB]
+    if not heard:
+        # Nothing on the air for this dongle: decoding would find nothing
+        # either. Say so plainly instead of guessing a gain.
+        unclipped = [s["gain"] for s in steps if s["clip"] <= CLIP_LIMIT]
+        chosen = max(unclipped) if unclipped else min(gains)
+        progress(f"[{rid}] no FM station heard on this dongle at any gain (pilot below "
+                 f"{HEARD_PILOT_DB} dB on every frequency): antenna, FM filter or driver? "
+                 f"Using {chosen:g} dB")
+        return {"gain": chosen, "ppm": ppm, "stations": {}, "dead": list(dict(freqs)),
+                "silent": True,
+                "steps": [{"gain": s["gain"], "clip": s["clip"]} for s in steps]}
+    for s in steps:
+        s["worst_rds"] = min(s["snr"][f][1] for f in heard)
     clean = [s for s in steps if s["clip"] <= CLIP_LIMIT] or steps
     best = sorted(clean, key=lambda s: (-s["worst_rds"], s["gain"]))[:VERIFY_STEPS]
     results = []
@@ -240,17 +296,24 @@ def calibrate(receiver, index, gains, capture_fn=None, quality_fn=redsea_quality
         progress(f"[{rid}] check gain {s['gain']:4.1f} dB: "
                  + ", ".join(f"{f} {v:.1f} grp/s" for f, v in stations.items()))
 
-    chosen = choose(results)
-    if chosen is None:
-        chosen = dongles.nearest(gains, default_gain) if gains else default_gain
+    picked = choose(results)
+    dead = []
+    if picked is None:
+        # Nothing decodes (antenna? frequencies?): the most sensitive step
+        # that does not overload
+        unclipped = [s["gain"] for s in steps if s["clip"] <= CLIP_LIMIT]
+        chosen = max(unclipped) if unclipped else min(gains)
         progress(f"[{rid}] no station decoded at any gain (antenna? frequencies?): "
-                 f"using {chosen:g} dB")
+                 f"using {chosen:g} dB, the highest that does not clip")
         stations = {}
     else:
+        chosen, dead = picked
+        for f in dead:
+            progress(f"[{rid}] {f}: no RDS at any gain - gain chosen for the others")
         stations = next(r["stations"] for r in results if r["gain"] == chosen)
         progress(f"[{rid}] chosen: gain {chosen:g} dB, ppm {ppm} ("
                  + ", ".join(f"{f} {v:.1f} grp/s" for f, v in stations.items()) + ")")
-    return {"gain": chosen, "ppm": ppm, "stations": stations,
+    return {"gain": chosen, "ppm": ppm, "stations": stations, "dead": dead,
             "steps": [{"gain": s["gain"], "clip": s["clip"], "worst_rds": s["worst_rds"]}
                       for s in steps]}
 
@@ -286,9 +349,9 @@ class Tuner:
         """(gain, ppm) for the receiver's pipeline (radio: its sdr.RtlSdr or
         sdr.Airspy, for the gain to use before the calibration)."""
         cal = self._stored(r)
-        default = radio.default_gain if radio is not None else DEFAULT_GAIN
+        start = radio.default_gain if radio is not None else START_GAIN
         gain = r.gain if r.gain != "auto" else (cal["gain"] if cal and cal["gain"] is not None
-                                                else default)
+                                                else start)
         ppm = r.ppm if r.ppm != "auto" else (cal["ppm"] if cal and cal["ppm"] is not None else 0)
         return gain, ppm
 
@@ -306,6 +369,7 @@ class Tuner:
             "calibrated_at": cal["calibrated_at"] + "Z" if cal else None,
             "calibration": self._busy.get(r.id) or (
                 f"misslyckades: {self._failed[r.id][1]}"[:64] if r.id in self._failed
+                else f"ingen RDS: {', '.join(result['dead'])}"[:64] if result.get("dead")
                 else None if cal or not self._auto(r) else "väntar"),
             "quality": result.get("stations") or {},
         }
@@ -407,11 +471,18 @@ class Tuner:
             if not p.pause("calibrating"):
                 log.warning("[%s] the dongle did not come free; calibrating anyway", r.id)
             res = self._calibrate(r, want_gain=r.gain == "auto", want_ppm=r.ppm == "auto")
+            if res.get("silent"):
+                # Nothing heard: keep what it had, say why, and try again later
+                log.warning("[%s] nothing heard on this dongle: keeping the earlier settings "
+                            "and calibrating again in %d hours", r.id, RETRY_AFTER_FAIL_SEC // 3600)
+                self._failed[r.id] = (self._now(), "ingen FM-signal hörs (antenn, filter, drivrutin?)")
+                return
             event_store.save_calibration(
                 r.serial, r.frequencies,
                 res["gain"] if r.gain == "auto" else None,
                 res["ppm"] if r.ppm == "auto" else None,
-                {"stations": res.get("stations") or {}, "steps": res.get("steps") or []},
+                {"stations": res.get("stations") or {}, "steps": res.get("steps") or [],
+                 "dead": res.get("dead") or []},
                 why, at=self._now())
             log.info("[%s] calibrated: gain %s, ppm %s", r.id, res.get("gain"), res.get("ppm"))
             self._failed.pop(r.id, None)

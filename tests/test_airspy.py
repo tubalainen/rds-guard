@@ -287,7 +287,8 @@ def test_the_default_gain_before_calibration_follows_the_radio(tmp_path, monkeyp
                                         "frequencies": ["103.5M"]}]})[0]
     tuner = gt.Tuner(sat=None)
     assert tuner.settings(r, sdr.Airspy(r.serial, [3_000_000])) == (sdr.AIRSPY_DEFAULT_GAIN, 0)
-    assert tuner.settings(r) == (gt.DEFAULT_GAIN, 0)
+    assert tuner.settings(r) == (gt.START_GAIN, 0)
+    assert sdr.RtlSdr.default_gain == gt.START_GAIN         # the same start for both paths
 
 
 def test_an_airspy_with_a_fixed_gain_is_not_calibrated():

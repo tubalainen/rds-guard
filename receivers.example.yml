@@ -29,4 +29,4 @@ receivers:
   # - serial: "0x644064DC2B1C2E4F"  # an Airspy Mini or R2
   #   name: mast
   #   frequencies: [103.5M, 102.9M]
-  #   gain: 12                      # linearity 0-21; or leave it out (auto)
+  #   gain: 10                      # linearity 0-21; or leave it out (auto)

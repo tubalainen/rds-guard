@@ -82,7 +82,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("frequency", help="a station you receive well, e.g. 103.5M")
     ap.add_argument("--gain", type=float, default=None,
-                    help="dB (RTL-SDR, default 20) or linearity 0-21 (Airspy, default 12)")
+                    help="dB (RTL-SDR, default 20) or linearity 0-21 (Airspy, default 8)")
     ap.add_argument("--index", type=int, default=None, help="rtl_sdr device index")
     ap.add_argument("--serial", help="the dongle's serial number (looked up as the satellite does)")
     args = ap.parse_args(argv)

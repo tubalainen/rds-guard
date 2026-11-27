@@ -20,7 +20,8 @@ import dongles
 # The Airspy is decimated to 250 kHz (3 MS/s / 12, 2.5 MS/s / 10), then
 # resampled to 171 kHz
 AIRSPY_MID_RATE = 250_000
-AIRSPY_DEFAULT_GAIN = 12.0       # linearity, before the calibration
+AIRSPY_DEFAULT_GAIN = 8.0        # linearity, before the calibration: well
+                                 # below overload, as the RTL-SDR's 8.7 dB
 # libairspy shifts the 12-bit ADC to 16 bits and halves it in its real-to-IQ
 # step (Q >> 1, the half-band I filter): a full ADC gives about ±16 384
 AIRSPY_CLIP = 15_000             # |I| or |Q| this high: the ADC is (near) full
@@ -33,7 +34,7 @@ class RtlSdr:
     bytes_per_sample = 2          # I and Q, one byte each
     has_ppm = True
     zero_is_auto = True           # rtl_sdr -g 0: the tuner's AGC, never used
-    default_gain = 20.0
+    default_gain = 8.7            # until calibrated: low enough not to clip
 
     def __init__(self, index, serial="", product="RTL-SDR"):
         self.index = index
