@@ -43,7 +43,8 @@ log = logging.getLogger("rds-guard")
 
 FS = config.RTL_SAMPLE_RATE
 MPX_RATE = 171_000
-DEFAULT_GAIN = 20.0           # dB, when nothing decodes (no antenna …)
+START_GAIN = 8.7             # dB, until the first calibration (and for the ppm capture):
+                             # low enough not to clip on a strong station
 CLIP_LIMIT = 0.0005           # fraction of ADC samples at 0 or 255
 VERIFY_STEPS = 4
 VERIFY_SEC = 8
@@ -148,14 +149,21 @@ def redsea_quality(pcm, seconds, run=None):
 def choose(results):
     """The gain to use from the verified steps:
     results = [{"gain", "stations": {freq: gps}}]. Best worst station; within
-    TIE the lower gain. None when nothing decodes."""
-    scored = [(min(r["stations"].values()) if r["stations"] else 0.0, r["gain"])
-              for r in results]
-    scored = [s for s in scored if s[0] > 0]
+    TIE the lower gain. A station that decodes at none of the steps does not
+    count (it would make every step score 0). Returns (gain, dead stations),
+    or None when no station decodes at all."""
+    freqs = {f for r in results for f in r["stations"]}
+    dead = sorted(f for f in freqs
+                  if not any((r["stations"].get(f) or 0) > 0 for r in results))
+    live = [f for f in freqs if f not in dead]
+    if not live:
+        return None
+    scored = [(min(r["stations"].get(f) or 0.0 for f in live), r["gain"]) for r in results]
+    scored = [x for x in scored if x[0] > 0]
     if not scored:
         return None
-    best = max(s[0] for s in scored)
-    return min(g for s, g in scored if s >= best * (1 - TIE))
+    best = max(x[0] for x in scored)
+    return min(g for x, g in scored if x >= best * (1 - TIE)), dead
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +201,7 @@ def calibrate(receiver, index, gains, capture_fn=capture, quality_fn=redsea_qual
 
     # 1. ppm, at a middle gain without correction
     if want_ppm:
-        mid = dongles.nearest([g for g in gains if g > 0], 20.0) if gains else DEFAULT_GAIN
+        mid = dongles.nearest([g for g in gains if g > 0], START_GAIN) if gains else START_GAIN
         raw = capture_fn(index, center, mid, 0, PPM_SEC)
         values = [ppm_from_mpx(m, dict(freqs)[f]) for f, m in mpx_of(raw).items()]
         values = sorted(v for v in values if v is not None)
@@ -210,7 +218,7 @@ def calibrate(receiver, index, gains, capture_fn=capture, quality_fn=redsea_qual
         return {"gain": gain, "ppm": ppm, "stations": {}, "steps": []}
 
     # 2. sweep (rtl_sdr takes -g 0 as the tuner's automatic gain: never)
-    gains = [g for g in gains if g > 0] or [DEFAULT_GAIN]
+    gains = [g for g in gains if g > 0] or [START_GAIN]
     steps = []
     for i, g in enumerate(gains, 1):
         raw = capture_fn(index, center, g, ppm, SWEEP_SEC)
@@ -238,17 +246,24 @@ def calibrate(receiver, index, gains, capture_fn=capture, quality_fn=redsea_qual
         progress(f"[{rid}] check gain {s['gain']:4.1f} dB: "
                  + ", ".join(f"{f} {v:.1f} grp/s" for f, v in stations.items()))
 
-    chosen = choose(results)
-    if chosen is None:
-        chosen = dongles.nearest(gains, DEFAULT_GAIN) if gains else DEFAULT_GAIN
+    picked = choose(results)
+    dead = []
+    if picked is None:
+        # Nothing decodes (antenna? frequencies?): the most sensitive step
+        # that does not overload
+        unclipped = [s["gain"] for s in steps if s["clip"] <= CLIP_LIMIT]
+        chosen = max(unclipped) if unclipped else min(gains)
         progress(f"[{rid}] no station decoded at any gain (antenna? frequencies?): "
-                 f"using {chosen:g} dB")
+                 f"using {chosen:g} dB, the highest that does not clip")
         stations = {}
     else:
+        chosen, dead = picked
+        for f in dead:
+            progress(f"[{rid}] {f}: no RDS at any gain - gain chosen for the others")
         stations = next(r["stations"] for r in results if r["gain"] == chosen)
         progress(f"[{rid}] chosen: gain {chosen:g} dB, ppm {ppm} ("
                  + ", ".join(f"{f} {v:.1f} grp/s" for f, v in stations.items()) + ")")
-    return {"gain": chosen, "ppm": ppm, "stations": stations,
+    return {"gain": chosen, "ppm": ppm, "stations": stations, "dead": dead,
             "steps": [{"gain": s["gain"], "clip": s["clip"], "worst_rds": s["worst_rds"]}
                       for s in steps]}
 
@@ -284,7 +299,7 @@ class Tuner:
         """(gain, ppm) for the receiver's pipeline."""
         cal = self._stored(r)
         gain = r.gain if r.gain != "auto" else (cal["gain"] if cal and cal["gain"] is not None
-                                                else DEFAULT_GAIN)
+                                                else START_GAIN)
         ppm = r.ppm if r.ppm != "auto" else (cal["ppm"] if cal and cal["ppm"] is not None else 0)
         return gain, ppm
 
@@ -300,6 +315,7 @@ class Tuner:
             "calibrated_at": cal["calibrated_at"] + "Z" if cal else None,
             "calibration": self._busy.get(r.id) or (
                 f"misslyckades: {self._failed[r.id][1]}"[:64] if r.id in self._failed
+                else f"ingen RDS: {', '.join(result['dead'])}"[:64] if result.get("dead")
                 else None if cal or not self._auto(r) else "väntar"),
             "quality": result.get("stations") or {},
         }
