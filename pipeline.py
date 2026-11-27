@@ -23,6 +23,7 @@ import threading
 import time
 
 import config
+import dongle_check
 import dongles
 import sdr
 
@@ -61,6 +62,11 @@ class PipelineStatus:
 
     def set_error(self, message):
         self._set("error", message)
+
+    def set_note(self, message):
+        """A warning shown with the state, without changing it."""
+        with self.lock:
+            self.error_message = message
 
     def snapshot(self):
         with self.lock:
@@ -154,6 +160,22 @@ class ReceiverPipeline:
         self.gain = None
         self.ppm = None
         self.model = None
+        self.check = None                      # (level, message) of the dongle check
+
+    def _on_check(self, radio, iq, nbytes, elapsed):
+        """The dongle check's verdict on this run's first seconds."""
+        level, msg, _heard = dongle_check.judge(
+            iq, nbytes, elapsed, radio, self.receiver.freqs_hz, self.receiver.center_hz,
+            gain=self.gain)
+        self.check = (level, msg)
+        rid = self.receiver.id
+        if level == "error":
+            log.error("[%s] dongle check: %s", rid, msg)
+        elif level == "warning":
+            log.warning("[%s] dongle check: %s", rid, msg)
+            self.status.set_note(msg[:256])
+        else:
+            log.info("[%s] dongle check: %s", rid, msg)
 
     # -- control ------------------------------------------------------------
 
@@ -200,6 +222,7 @@ class ReceiverPipeline:
         redseas = []
         threads = []
         self._idle.clear()
+        self.check = None
         try:
             self.status.set_starting()
             radio = sdr.open(self.receiver.serial)
@@ -213,8 +236,12 @@ class ReceiverPipeline:
             rtl = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             threading.Thread(target=_stderr_reader, args=(rtl.stderr, f"{radio.tool} {rid}"),
                              daemon=True).start()
+            # The verdict is worked out on its own thread, so that the
+            # channelizer never waits for it
+            probe = dongle_check.Probe(radio.fs, lambda iq, n, el: threading.Thread(
+                target=self._on_check, args=(radio, iq, n, el), daemon=True).start())
             chan = Channelizer(rtl.stdout, self.receiver.freqs_hz, self.receiver.center_hz,
-                               radio.fs, radio.fmt)
+                               radio.fs, radio.fmt, probe=probe)
             chan.start()
             for fd, st in zip(chan.pipe_read_fds, self.stations):
                 rs = subprocess.Popen(redsea_cmd(), stdin=subprocess.PIPE,
@@ -232,11 +259,16 @@ class ReceiverPipeline:
                     t.start()
                     threads.append(t)
             self.status.set_running()
-            # Until the run is ended (pause, shutdown) or the capture exits
-            while rtl.poll() is None and not self._run_stop.wait(1):
+            # Until the run is ended (pause, shutdown), the capture exits or
+            # the dongle check finds it does not really receive
+            while (rtl.poll() is None and not self._run_stop.wait(1)
+                   and not (self.check and self.check[0] == "error")):
                 pass
             if self._run_stop.is_set():
                 return True
+            if self.check and self.check[0] == "error":
+                self.status.set_error(self.check[1])
+                return False
             msg = f"{radio.tool} exited with code {rtl.returncode}"
             log.error("[%s] %s", rid, msg)
             self.status.set_error(msg)

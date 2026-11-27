@@ -378,7 +378,15 @@ docker compose exec rds-guard python3 -m satellite_health
 ```
 
 - The log: the join code, `approved by the aggregator`, each dongle's
-  calibration, and one line per event.
+  calibration, and one line per event. About 5 seconds after each receiver
+  starts, a **dongle check** says whether it really receives:
+
+  | Log line | Meaning |
+  |---|---|
+  | `dongle check: OK: … level −23 dBFS, 103.5M pilot 50 dB; heard 103.5M` | Data at the full rate, and its stations are heard |
+  | `dongle check: no FM station heard on … at gain …` | It runs, but none of its stations is above the noise at this gain. A warning: the calibration still tries every gain, and the node card shows it |
+  | `dongle check: too little data from the dongle (x of y MS/s)` | An error: the receiver stops and is tried again in a moment. USB, power, or a host too busy |
+  | `dongle check: the dongle's samples do not change` | An error: the tuner or its driver gives nothing |
 
 ```bash
 docker compose logs -f rds-guard

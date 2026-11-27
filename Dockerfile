@@ -69,7 +69,7 @@ RUN pip3 install --no-cache-dir --break-system-packages -r /app/requirements.txt
 # aggregator's, in its own image)
 COPY config.py event_store.py rds_guard.py pipeline.py channelizer.py \
      audio_tee.py audio_recorder.py uplink.py receivers.py dongles.py \
-     satellite_health.py gain_tuner.py sdr.py /app/
+     satellite_health.py gain_tuner.py dongle_check.py sdr.py /app/
 # The I/Q and ppm check (python3 iq_side.py 103.5M --serial …), next to
 # dongles.py and sdr.py, which it uses
 COPY tools/iq_side.py /app/iq_side.py

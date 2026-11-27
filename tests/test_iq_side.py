@@ -55,3 +55,23 @@ def test_a_correction_that_doubles_the_offset_is_reported(monkeypatch, capsys):
     monkeypatch.setitem(sys.modules, "dongles", None)
     iq_side.main(["103.5M"])
     assert "the sign is WRONG" in capsys.readouterr().out
+
+
+def test_only_noise_gives_no_verdict(monkeypatch, capsys):
+    """On docker01 two dongles gave 'normal I/Q' and 'sign is WRONG' at
+    0.1-0.7 dB between the sides: verdicts drawn from noise."""
+    rng = np.random.default_rng(0)
+    calls = []
+
+    def capture(center, gain, index, seconds=1.0, ppm=0):
+        calls.append(ppm)
+        n = int(iq_side.FS * 0.5)
+        return 0.05 * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+
+    monkeypatch.setattr(iq_side, "capture", capture)
+    monkeypatch.setitem(sys.modules, "dongles", None)
+    assert iq_side.main(["102.8M", "--index", "0"]) == 0
+    out = capsys.readouterr().out
+    assert "RESULT: no station heard" in out
+    assert "normal I/Q" not in out and "MIRRORED" not in out and "ppm estimate" not in out
+    assert calls == [0, 0]                      # no check capture with -p
