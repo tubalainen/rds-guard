@@ -270,6 +270,19 @@ receivers:
 - Check that I/Q is the right way round once, with the satellite stopped:
   `docker compose run --rm rds-guard python3 iq_side.py 103.5M
   --serial 0x…` (a normal result is what the satellite expects).
+- **Wider: `sample_rate:` (optional).** By default an Airspy covers 2 MHz
+  like a dongle. With `sample_rate: 10M` (R2) or `sample_rate: 6M` (Mini)
+  its stations may be up to 7.8 MHz or 4.6 MHz apart, and up to 8 of them:
+
+  ```yaml
+    - serial: "0x62CC68FF3584805B"
+      sample_rate: 10M
+      frequencies: [99.5M, 102.8M, 106.9M]
+  ```
+
+  At these rates one FFT is shared by all stations, so 10 MS/s with four
+  stations costs about half the CPU of an RTL-SDR at 2.4 MS/s; the USB link
+  carries 40 MB/s. The calibration decodes each capture as it comes in.
 - **LNA, Mixer and VGA by hand (optional).** Each linearity step is a
   fixed set of the three (with both AGCs off), e.g. step 8 is LNA 3,
   Mixer 0, VGA 10. To set them yourself, add any of `lna:` (0–14),

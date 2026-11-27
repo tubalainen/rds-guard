@@ -202,15 +202,15 @@ class ReceiverPipeline:
         self._idle.clear()
         try:
             self.status.set_starting()
-            radio = sdr.open(self.receiver.serial, getattr(self.receiver, "stages", None))
+            radio = sdr.for_receiver(self.receiver)
             self.model = radio.model
             self.gain, self.ppm = self._settings(radio)
             if not radio.has_ppm:
                 self.ppm = 0
             cmd = radio.stream_cmd(self.receiver.center_hz, self.gain, self.ppm)
             radio.prepare()
-            log.info("[%s] starting (%s, gain %s): %s on %s", rid, radio.model,
-                     radio.describe_gain(self.gain), " ".join(cmd),
+            log.info("[%s] starting (%s, %g MS/s, gain %s): %s on %s", rid, radio.model,
+                     radio.fs / 1e6, radio.describe_gain(self.gain), " ".join(cmd),
                      ", ".join(self.receiver.frequencies))
             rtl = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             threading.Thread(target=_stderr_reader, args=(rtl.stderr, f"{radio.tool} {rid}"),

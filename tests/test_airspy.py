@@ -452,3 +452,150 @@ def test_changed_stages_calibrate_again(monkeypatch):
     # A calibration saved before stages existed counts as none by hand
     store[r.serial]["result"] = {"stations": {}}
     assert tuner._stored(_airspy_receiver()) is not None
+
+
+# ------------------------------------------------------- 10 MS/s and 6 MS/s
+
+def test_the_wide_front_end_fits_its_blocks():
+    from channelizer import WIDE_FROM, _WideFront
+    for fs in (6_000_000, 10_000_000):
+        f = _WideFront(fs)
+        assert fs >= WIDE_FROM and fs // f.decim == 250_000
+        assert f.size % f.decim == 0 and f.block % f.decim == 0 and f.overlap % f.decim == 0
+        assert f.overlap >= int(6 * fs / 40_000)          # longer than the filter
+        assert f.bins == f.size // f.decim
+
+
+@pytest.mark.parametrize("fs, off", [(10_000_000, 300_000), (10_000_000, -3_700_000),
+                                     (10_000_000, 2_123_457), (6_000_000, 300_000),
+                                     (6_000_000, -2_123_457)])
+def test_wide_rates_give_the_same_multiplex(fs, off):
+    a = demod_all(iq_from_s16(to_s16(fm_station(int(fs * 0.5), off, fs), 0.4)), off, fs)
+    pilot, rds = gt.tone_snr_db(a[500:])
+    assert pilot > 15 and rds > 6
+    assert len(a) == pytest.approx(0.5 * 171_000, rel=0.03)
+    # The carrier offset reads right, and blocks join without a step
+    b = demod_all(iq_from_s16(to_s16(fm_station(int(fs * 0.4), off + 2000, fs, dev=0), 0.4)),
+                  off, fs)[500:]
+    assert float(np.mean(b)) * 171_000 / (2 * np.pi) == pytest.approx(2000, rel=0.01)
+    assert b.std() < 0.02
+
+
+def test_far_apart_stations_do_not_leak_into_each_other():
+    from channelizer import demod_many
+    fs = 10_000_000
+    n = int(fs * 0.4)
+    t = np.arange(n) / fs
+
+    def tone_station(off, tone):
+        return np.exp(1j * (2 * np.pi * off * t
+                            + 2 * np.pi * np.cumsum(75_000 * 0.8 * np.sin(2 * np.pi * tone * t)) / fs))
+    z = iq_from_s16(to_s16((tone_station(-3_500_000, 1000) + tone_station(3_500_000, 3000)) / 2,
+                           0.4))
+    lo, hi = demod_many(z, [-3_500_000, 3_500_000], fs)
+
+    def peak(m):
+        sp = np.abs(np.fft.rfft(m[500:] * np.hanning(len(m) - 500)))
+        return np.fft.rfftfreq(len(m) - 500, 1 / 171_000)[sp.argmax()]
+    assert peak(lo) == pytest.approx(1000, abs=20)
+    assert peak(hi) == pytest.approx(3000, abs=20)
+    # The mirror of a station is not picked up
+    mirror = demod_all(iq_from_s16(to_s16(fm_station(n, -2_000_000, fs, dev=0), 0.4)),
+                       2_000_000, fs)
+    assert mirror[500:].std() > 1.0
+
+
+def test_the_channelizer_reads_10_msps_from_a_pipe():
+    import threading
+    fs = 10_000_000
+    freqs = [99_500_000, 106_900_000]
+    center = (freqs[0] + freqs[1]) // 2
+    n = int(fs * 0.25)
+    z = sum(fm_station(n, f - center, fs, seed=i) for i, f in enumerate(freqs)) / 2
+    r, w = os.pipe()
+    chan = Channelizer(os.fdopen(r, "rb"), freqs, center, fs, "s16")
+    chan.start()
+    outs = [bytearray() for _ in freqs]
+
+    def drain(fd, buf):
+        with os.fdopen(fd, "rb") as f:
+            while chunk := f.read(65536):
+                buf.extend(chunk)
+    readers = [threading.Thread(target=drain, args=(fd, b)) for fd, b in
+               zip(chan.pipe_read_fds, outs)]
+    for t in readers:
+        t.start()
+    with os.fdopen(w, "wb") as f:
+        f.write(to_s16(z, 0.4))
+    chan.join(20)
+    for t in readers:
+        t.join(20)
+    for buf in outs:
+        pcm = np.frombuffer(bytes(buf), dtype=np.int16)
+        assert len(pcm) == pytest.approx(n / fs * 171_000, rel=0.1)
+        pilot, rds = gt.tone_snr_db(pcm[500:].astype(np.float32) / 32767 * np.pi)
+        assert pilot > 15 and rds > 6
+
+
+def test_sample_rate_in_receivers_yml():
+    r = _airspy_receiver(sample_rate="10M", frequencies=["99.5M", "102.8M", "106.9M"])
+    assert r.sample_rate == 10_000_000 and r.max_span_hz == 7_800_000
+    with pytest.raises(receivers.ReceiverError, match="one dongle covers 7.8 MHz"):
+        _airspy_receiver(sample_rate="10M", frequencies=["95.0M", "103.0M"])
+    with pytest.raises(receivers.ReceiverError, match="sample_rate: 10M"):
+        _airspy_receiver(frequencies=["99.5M", "106.9M"])           # 2 MHz without it
+    eight = [f"{88 + i * 0.9:.1f}M" for i in range(8)]
+    assert len(_airspy_receiver(sample_rate=10_000_000, frequencies=eight).frequencies) == 8
+    with pytest.raises(receivers.ReceiverError, match="at most 4"):
+        _airspy_receiver(sample_rate="2.5M", frequencies=eight[:5])
+    assert _airspy_receiver(sample_rate="6M", frequencies=["99.0M", "103.6M"]).max_span_hz \
+        == 4_600_000
+    with pytest.raises(receivers.ReceiverError, match="must be one of"):
+        _airspy_receiver(sample_rate="5M")
+    rtl = receivers.parse({"receivers": [{"serial": "00000101", "frequencies": ["102.8M"],
+                                          "sample_rate": "10M"}]})[0]
+    assert rtl.sample_rate is None and any("for an Airspy" in w for w in rtl.warnings)
+
+
+def test_the_sample_rate_must_be_the_devices():
+    r2 = sdr.Airspy("0x1", [2_500_000, 10_000_000], "Airspy R2", rate=10_000_000)
+    assert r2.fs == 10_000_000 and _arg(r2.stream_cmd(103_000_000, 8, 0), "-a") == "10000000"
+    with pytest.raises(dongles.DongleError, match="cannot run at 6 MS/s"):
+        sdr.Airspy("0x1", [2_500_000, 10_000_000], "Airspy R2", rate=6_000_000)
+
+
+def test_a_wide_capture_is_decoded_while_it_comes_in():
+    import io
+    import types
+    radio = sdr.Airspy("0x1", [2_500_000, 10_000_000], "Airspy R2", rate=10_000_000)
+    data = to_s16(fm_station(int(radio.fs * 0.75), 300_000, radio.fs), 0.3)
+    seen = []
+
+    def popen(cmd, **kw):
+        seen.append(cmd)
+        return types.SimpleNamespace(stdout=io.BytesIO(data), kill=lambda: None,
+                                     wait=lambda: 0)
+    clip, level, [mpx] = sdr.capture_measure(radio, 103_000_000, 8, 0, 0.5, [300_000],
+                                             popen=popen)
+    assert _arg(seen[0], "-n") == str(int(0.75 * radio.fs))
+    assert clip == 0 and -20 < level < 0
+    assert len(mpx) == pytest.approx(0.5 * 171_000, rel=0.05)
+    assert gt.tone_snr_db(mpx[500:])[0] > 15
+
+
+def test_the_calibration_streams_at_wide_rates(monkeypatch):
+    r = _airspy_receiver(sample_rate="10M")
+    radio = sdr.Airspy(r.serial, [2_500_000, 10_000_000], "Airspy R2", rate=10_000_000)
+    calls = []
+
+    def fake(radio_, center, gain, ppm, seconds, offsets):
+        """A clean multiplex: pilot and RDS carrier, no IQ at all."""
+        calls.append(gain)
+        t = np.arange(int(171_000 * 0.3)) / 171_000
+        m = (0.8 * np.sin(2 * np.pi * 1000 * t) + 0.09 * np.sin(2 * np.pi * 19_000 * t)
+             + 0.05 * np.sin(2 * np.pi * 57_000 * t)).astype(np.float32) * 2.75
+        return 0.0, -10.0, [m for _ in offsets]
+    monkeypatch.setattr(sdr, "capture_measure", fake)
+    res = gt.calibrate(r, None, radio.gains, quality_fn=lambda pcm, s: (5.0, 0),
+                       progress=lambda m: None, radio=radio)
+    assert len(calls) >= 22 and res["gain"] in radio.gains

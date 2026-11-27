@@ -9,6 +9,8 @@ receivers.yml.
         # gain: auto (default) or e.g. 28.0 to override the calibration
         # ppm: auto (default) or e.g. 12
         # An Airspy only, each optional: lna: 0-14, mixer: 0-15, vga: 0-15
+        # An Airspy only, optional: sample_rate: 10M (R2) or 6M (Mini), for
+        # stations up to ~7.8 / ~4.6 MHz apart and up to 8 of them
 
 Without the file and with one dongle, FM_FREQUENCY / FM_FREQUENCIES are used
 on it (as before v1.0). With several dongles the file is needed.
@@ -21,6 +23,11 @@ import config
 
 MAX_STATIONS = 4
 MAX_SPAN_HZ = 2_000_000          # usable bandwidth at 2.394 MS/s
+# An Airspy's sample_rate: (R2: 2.5M, 10M; Mini: 3M, 6M). From 6 MS/s the
+# span is 80 % of the rate less a channel, and up to 8 stations
+AIRSPY_RATES = (2_500_000, 3_000_000, 6_000_000, 10_000_000)
+WIDE_RATE = 6_000_000
+MAX_STATIONS_WIDE = 8
 # A single station is captured off-centre: away from the dongle's DC spike
 SINGLE_OFFSET_HZ = 250_000
 
@@ -40,7 +47,16 @@ class Receiver:
     lna: object = None
     mixer: object = None
     vga: object = None
+    sample_rate: object = None         # an Airspy's, in S/s (None: the lowest that fits)
     warnings: list = field(default_factory=list)
+
+    @property
+    def max_span_hz(self):
+        return span_for(self.sample_rate)
+
+    @property
+    def max_stations(self):
+        return MAX_STATIONS_WIDE if (self.sample_rate or 0) >= WIDE_RATE else MAX_STATIONS
 
     @property
     def stages(self):
@@ -95,6 +111,30 @@ def _auto_or(value, kind, where):
 STAGE_MAX = {"lna": 14, "mixer": 15, "vga": 15}
 
 
+def span_for(rate):
+    """How far apart a receiver's stations may be at this sample rate."""
+    if not rate or rate < WIDE_RATE:
+        return MAX_SPAN_HZ
+    return int(0.8 * rate) - 200_000
+
+
+def _rate(value, where):
+    if value is None or str(value).strip().lower() in ("", "auto"):
+        return None
+    text = str(value).strip().upper().replace("MS/S", "M").replace("MSPS", "M")
+    try:
+        hz = float(text.rstrip("M")) * (1e6 if text.endswith("M") or float(text.rstrip("M")) < 100
+                                        else 1)
+    except ValueError:
+        hz = -1
+    hz = int(round(hz))
+    if hz not in AIRSPY_RATES:
+        raise ReceiverError(f"{where}: sample_rate must be one of "
+                            + ", ".join(f"{r / 1e6:g}M" for r in AIRSPY_RATES)
+                            + f" (got '{value}')")
+    return hz
+
+
 def _stage(value, name, where):
     if value is None or str(value).strip().lower() in ("", "auto"):
         return None
@@ -112,13 +152,18 @@ def check(receiver, where):
     hz = receiver.freqs_hz
     if not hz:
         raise ReceiverError(f"{where}: no frequencies")
-    if len(hz) > MAX_STATIONS:
-        raise ReceiverError(f"{where}: {len(hz)} frequencies, at most {MAX_STATIONS} "
-                            "per dongle")
-    if max(hz) - min(hz) > MAX_SPAN_HZ:
+    most = getattr(receiver, "max_stations", MAX_STATIONS)
+    span = getattr(receiver, "max_span_hz", MAX_SPAN_HZ)
+    if len(hz) > most:
+        raise ReceiverError(f"{where}: {len(hz)} frequencies, at most {most} "
+                            "per dongle" + ("" if most > MAX_STATIONS else
+                                            " (an Airspy at sample_rate: 10M or 6M takes 8)"))
+    if max(hz) - min(hz) > span:
         raise ReceiverError(f"{where}: the frequencies span "
                             f"{(max(hz) - min(hz)) / 1e6:.2f} MHz; one dongle covers "
-                            "2 MHz. Put the others on another dongle")
+                            f"{span / 1e6:g} MHz. Put the others on another dongle"
+                            + ("" if span > MAX_SPAN_HZ else
+                               " (or an Airspy at sample_rate: 10M: 7.8 MHz)"))
     if len(set(hz)) != len(hz):
         raise ReceiverError(f"{where}: a frequency is listed twice")
 
@@ -146,9 +191,13 @@ def parse(data):
                      frequencies=[_freq(f, where) for f in freqs],
                      gain=_auto_or(item.get("gain"), float, f"{where}, gain"),
                      ppm=_auto_or(item.get("ppm"), int, f"{where}, ppm"),
+                     sample_rate=_rate(item.get("sample_rate"), where),
                      **{k: _stage(item.get(k), k, where) for k in STAGE_MAX})
-        check(r, where)
         airspy = dongles.is_airspy_serial(serial)
+        if r.sample_rate and not airspy:
+            r.warnings.append("sample_rate: is for an Airspy; an RTL-SDR runs at 2.4 MS/s")
+            r.sample_rate = None
+        check(r, where)
         if airspy and r.ppm != "auto":
             r.warnings.append("ppm: is not used for an Airspy (its clock is a TCXO)")
         if r.stages and not airspy:
