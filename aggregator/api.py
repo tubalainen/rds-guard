@@ -10,6 +10,8 @@ cannot drive the admin endpoints through the owner's browser.
 import asyncio
 import functools
 import pathlib
+import re
+import urllib.parse
 from urllib.parse import urlsplit
 
 from aiohttp import web
@@ -707,13 +709,41 @@ async def handle_delete_node(request):
 # Static files
 # ---------------------------------------------------------------------------
 
+_index_cache = {}
+
+# Our own scripts and stylesheets in index.html (not vendor/, whose file
+# names carry their version already)
+_ASSET_REF = re.compile(r'((?:src|href)="/static/(?!shared/vendor/)[^"?]+\.(?:js|css))"')
+
+
+def index_html():
+    """index.html with ?v=<version> on our scripts and stylesheets, so a new
+    version is fetched at once instead of from the browser's cache."""
+    path = STATIC_DIR / "index.html"
+    mtime = path.stat().st_mtime_ns
+    cached = _index_cache.get("page")
+    if cached is None or cached[0] != mtime:
+        version = urllib.parse.quote(config.BUILD_VERSION or "dev", safe="")
+        if version == "dev":
+            version = f"dev{mtime}"
+        html = _ASSET_REF.sub(rf'\1?v={version}"', path.read_text(encoding="utf-8"))
+        cached = (mtime, html)
+        _index_cache["page"] = cached
+    return cached[1]
+
+
 async def handle_index(request):
-    return web.FileResponse(STATIC_DIR / "index.html")
+    return web.Response(text=index_html(), content_type="text/html",
+                        charset="utf-8")
 
 
 @web.middleware
 async def security_headers(request, handler):
     resp = await handler(request)
+    if request.path == "/" or request.path.startswith("/static/"):
+        # Ask the server every time (a 304 when unchanged): an update is
+        # seen at once, not after the browser's own guess at freshness
+        resp.headers.setdefault("Cache-Control", "no-cache")
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     # strict-origin-when-cross-origin, not same-origin: tile.openstreetmap.org
     # answers 403 "Access blocked" to tile requests without a Referer. This
