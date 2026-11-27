@@ -255,6 +255,16 @@ def delete_node(node_id):
         rows = conn.execute(
             "SELECT audio_path FROM events WHERE node_id = ? "
             "AND audio_path IS NOT NULL", (node_id,)).fetchall()
+        # The map is keyed by event uid, not by a foreign key: take the
+        # node's messages off it, and the incidents only they mentioned.
+        # Left behind, a new import of the same history added them again.
+        mine = "SELECT event_uid FROM events WHERE node_id = ?"
+        conn.execute(f"DELETE FROM incident_events WHERE event_key IN ({mine})",
+                     (node_id,))
+        conn.execute(f"DELETE FROM area_warnings WHERE event_key IN ({mine})",
+                     (node_id,))
+        conn.execute("DELETE FROM incidents WHERE id NOT IN "
+                     "(SELECT incident_id FROM incident_events)")
         cur = conn.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
         conn.commit()
     if cur.rowcount == 0:

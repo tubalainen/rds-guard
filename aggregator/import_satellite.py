@@ -241,6 +241,11 @@ class Importer:
         inc_cols = _columns(self.src, "incidents")
         have_cols = _columns(conn, "incidents")
         cols = [c for c in inc_cols if c in have_cols and c != "id"]
+        # Messages already on the aggregator's map (an earlier import whose
+        # events were deleted since): never add their incidents twice
+        placed = {r[0] for r in conn.execute(
+            "SELECT event_key FROM incident_events UNION "
+            "SELECT event_key FROM area_warnings")}
         links = {}
         for r in self.src.execute("SELECT * FROM incident_events"):
             r = dict(r)
@@ -248,8 +253,9 @@ class Importer:
                 event_id = int(r["event_key"])
             except (TypeError, ValueError):
                 continue
-            if event_id in self.uid_of:
-                links.setdefault(r["incident_id"], []).append(dict(r, event_key=self.uid_of[event_id]))
+            uid = self.uid_of.get(event_id)
+            if uid is not None and uid not in placed:
+                links.setdefault(r["incident_id"], []).append(dict(r, event_key=uid))
         trv_ids = set()
         for inc_id, inc_links in sorted(links.items()):
             inc = dict(self.src.execute("SELECT * FROM incidents WHERE id = ?",
@@ -279,7 +285,7 @@ class Importer:
                     uid = self.uid_of.get(int(r["event_key"]))
                 except (TypeError, ValueError):
                     uid = None
-                if uid is None:
+                if uid is None or uid in placed:
                     continue
                 self.counts["areas"] += 1
                 if not self.dry_run:
