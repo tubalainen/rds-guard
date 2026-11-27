@@ -311,7 +311,7 @@ def calibrate(receiver, index, gains, capture_fn=None, quality_fn=redsea_quality
         for f in dead:
             progress(f"[{rid}] {f}: no RDS at any gain - gain chosen for the others")
         stations = next(r["stations"] for r in results if r["gain"] == chosen)
-        progress(f"[{rid}] chosen: gain {chosen:g} dB, ppm {ppm} ("
+        progress(f"[{rid}] chosen: gain {radio.describe_gain(chosen)}, ppm {ppm} ("
                  + ", ".join(f"{f} {v:.1f} grp/s" for f, v in stations.items()) + ")")
     return {"gain": chosen, "ppm": ppm, "stations": stations, "dead": dead,
             "steps": [{"gain": s["gain"], "clip": s["clip"], "worst_rds": s["worst_rds"]}
@@ -364,7 +364,7 @@ class Tuner:
             gain, ppm = p.gain, p.ppm
         result = (cal or {}).get("result") or {}
         return {
-            "gain": gain, "gain_mode": "manual" if r.gain != "auto" else "auto",
+            "gain": gain, "gain_mode": "manual" if _gain_fixed(r) else "auto",
             "ppm": ppm, "ppm_mode": "manual" if r.ppm != "auto" else "auto",
             "calibrated_at": cal["calibrated_at"] + "Z" if cal else None,
             "calibration": self._busy.get(r.id) or (
@@ -377,7 +377,8 @@ class Tuner:
     @staticmethod
     def _auto(r):
         # An Airspy has no ppm to measure: only its gain
-        return r.gain == "auto" or (r.ppm == "auto" and not dongles.is_airspy_serial(r.serial))
+        return (not _gain_fixed(r)
+                or (r.ppm == "auto" and not dongles.is_airspy_serial(r.serial)))
 
     # -- requests -----------------------------------------------------------
 
@@ -470,7 +471,7 @@ class Tuner:
         try:
             if not p.pause("calibrating"):
                 log.warning("[%s] the dongle did not come free; calibrating anyway", r.id)
-            res = self._calibrate(r, want_gain=r.gain == "auto", want_ppm=r.ppm == "auto")
+            res = self._calibrate(r, want_gain=not _gain_fixed(r), want_ppm=r.ppm == "auto")
             if res.get("silent"):
                 # Nothing heard: keep what it had, say why, and try again later
                 log.warning("[%s] nothing heard on this dongle: keeping the earlier settings "
@@ -479,7 +480,7 @@ class Tuner:
                 return
             event_store.save_calibration(
                 r.serial, r.frequencies,
-                res["gain"] if r.gain == "auto" else None,
+                res["gain"] if not _gain_fixed(r) else None,
                 res["ppm"] if r.ppm == "auto" else None,
                 {"stations": res.get("stations") or {}, "steps": res.get("steps") or [],
                  "dead": res.get("dead") or []},
@@ -498,12 +499,18 @@ class Tuner:
             p.resume()
 
     def _calibrate_dongle(self, r, want_gain=True, want_ppm=True):
-        radio = sdr.open(r.serial)
+        radio = sdr.open(r.serial, getattr(r, "stages", None))
+        radio.prepare()
         gains = radio.gains or FALLBACK_GAINS
         fixed_gain = r.gain if r.gain != "auto" else None
         fixed_ppm = r.ppm if r.ppm != "auto" else None
         return calibrate(r, radio.index, gains, want_gain=want_gain, want_ppm=want_ppm,
                          gain=fixed_gain, ppm=fixed_ppm, radio=radio)
+
+
+def _gain_fixed(r):
+    """gain: in receivers.yml, or an Airspy's LNA, Mixer and VGA all by hand."""
+    return r.gain != "auto" or len(getattr(r, "stages", None) or {}) == 3
 
 
 def _epoch(ts):
@@ -538,7 +545,8 @@ def main(argv=None):
     else:
         sys.exit(f"Serial {args.serial} is not in receivers.yml: give --frequencies")
     try:
-        radio = sdr.open(r.serial)
+        radio = sdr.open(r.serial, r.stages)
+        radio.prepare()
         gains = radio.gains or FALLBACK_GAINS
     except dongles.DongleError as e:
         sys.exit(str(e))
