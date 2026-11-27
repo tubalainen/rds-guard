@@ -554,6 +554,60 @@ async def handle_update_node(request):
     return web.json_response({"node": public_node(node, request.app[PIPELINE])})
 
 
+def public_join(req):
+    return {k: req.get(k) for k in ("id", "verify", "node_name", "version",
+                                    "suggested_location", "stations", "address",
+                                    "created_at", "last_seen_at")}
+
+
+async def handle_join_requests(request):
+    """GET /api/v1/nodes/pending — satellites waiting to be approved."""
+    rows = await _run(store.list_join_requests)
+    return web.json_response({"pending": [public_join(r) for r in rows],
+                              "join_key": bool(config.JOIN_KEY)})
+
+
+def _request_id(request):
+    try:
+        return int(request.match_info["request_id"])
+    except (TypeError, ValueError):
+        return None
+
+
+async def handle_approve_join(request):
+    """POST /api/v1/nodes/pending/{id}/approve — {"name", "location",
+    "replace_node_id"} (all optional)."""
+    body = await _json_body(request)
+    if body is None:
+        return _error(422, "invalid", "body must be a JSON object")
+    name, location, replace = body.get("name"), body.get("location"), body.get("replace_node_id")
+    if ((name is not None and not isinstance(name, str))
+            or (location is not None and not isinstance(location, str))
+            or (replace is not None and (isinstance(replace, bool)
+                                         or not isinstance(replace, int)))):
+        return _error(422, "invalid", "name and location are text, "
+                                      "replace_node_id a node id")
+    location = " ".join((location or "").split())[:80] or None
+    request_id = _request_id(request)
+    try:
+        if name is not None and name.strip():
+            name = nodes.clean_name(name)
+        node = await _run(store.approve_join, request_id, name or None, location,
+                          replace) if request_id else None
+    except ValueError as e:
+        return _error(422, "invalid", str(e))
+    if node is None:
+        return _error(404, "not_found", "no such waiting satellite (or node)")
+    return web.json_response({"node": public_node(node, request.app[PIPELINE])})
+
+
+async def handle_reject_join(request):
+    request_id = _request_id(request)
+    if not request_id or not await _run(store.reject_join, request_id):
+        return _error(404, "not_found")
+    return web.json_response({"rejected": True})
+
+
 async def handle_delete_node(request):
     node_id = _node_id(request)
     paths = await _run(store.delete_node, node_id) if node_id else None
@@ -622,6 +676,9 @@ def create_web_app(pipeline=None, mqtt=None):
     r.add_get("/api/v1/incidents/{incident_id:\\d+}", handle_incident)
     r.add_get("/api/v1/trafikverket", handle_trafikverket)
     r.add_get("/api/v1/nodes", handle_nodes)
+    r.add_get("/api/v1/nodes/pending", handle_join_requests)
+    r.add_post("/api/v1/nodes/pending/{request_id}/approve", handle_approve_join)
+    r.add_post("/api/v1/nodes/pending/{request_id}/reject", handle_reject_join)
     r.add_post("/api/v1/nodes", handle_create_node)
     r.add_post("/api/v1/nodes/{node_id}/rotate", handle_rotate_node)
     r.add_patch("/api/v1/nodes/{node_id}", handle_update_node)

@@ -1,6 +1,6 @@
 """Ingest API for satellites — the only part of the aggregator on the internet.
 
-Implements docs/uplink-protocol.md (version 1). Every response, errors
+Implements docs/uplink-protocol.md (version 2). Every response, errors
 included, carries the protocol header so a satellite can tell the
 aggregator's answers apart from those of a proxy or a wrong URL.
 
@@ -11,6 +11,8 @@ touch its own events.
 
 import asyncio
 import functools
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -26,7 +28,7 @@ from . import config, store
 
 log = logging.getLogger("rds-aggregator")
 
-PROTOCOL_VERSION = "1"
+PROTOCOL_VERSION = "2"
 PROTOCOL_HEADER = "X-RDS-Guard-Protocol"
 
 EVENT_TYPES = ("traffic", "emergency")
@@ -135,6 +137,8 @@ def validate_event(body):
         "ended_at": _opt_ts(body, "ended_at"),
         "duration_sec": _opt_int(body, "duration_sec", 0, 86400),
         "sent_at": _opt_ts(body, "sent_at", required=True),
+        # Which of the satellite's receivers heard it (protocol 2)
+        "receiver": _opt_str(body, "receiver", 32) or "0",
     }
     if ev["type"] not in EVENT_TYPES:
         raise ValidationError(f"'type' must be one of {', '.join(EVENT_TYPES)}")
@@ -210,8 +214,10 @@ def clean_heartbeat(body):
             },
             "stations": clean_stations,
             "queue_depth": _num(body.get("queue_depth")),
-            # "Ort, Län" the satellite owner gave (NODE_LOCATION)
-            "location": _cap(body.get("location"), 80),
+            # "Ort, Län" the satellite owner gave (NODE_LOCATION); the
+            # owner of the aggregator can set another under Admin -> Noder
+            "location": _cap(body.get("suggested_location")
+                             or body.get("location"), 80),
             "local_processing": (body.get("local_processing")
                                  if isinstance(body.get("local_processing"), bool)
                                  else None),
@@ -255,6 +261,27 @@ class RateLimiter:
 
 
 LIMITER = web.AppKey("limiter", RateLimiter)
+JOIN_LIMITER = web.AppKey("join_limiter", RateLimiter)
+
+
+def verify_code(join_id):
+    """Short code shown in the satellite's log and in Admin (same formula
+    as the satellite's uplink.verify_code)."""
+    digest = hashlib.sha256(join_id.encode("utf-8")).digest()
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    chars = [alphabet[b % len(alphabet)] for b in digest[:6]]
+    return "".join(chars[:3]) + "-" + "".join(chars[3:])
+
+
+def client_address(request):
+    """The client's address; X-Forwarded-For only from a trusted proxy."""
+    peer = request.remote or ""
+    if peer in config.TRUSTED_PROXIES:
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first[:64]
+    return peer[:64]
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +311,8 @@ async def auth_middleware(request, handler):
     if request.headers.get(PROTOCOL_HEADER) != PROTOCOL_VERSION:
         return _error(426, "unsupported_protocol",
                       f"this aggregator speaks protocol {PROTOCOL_VERSION}")
+    if request.path == JOIN_PATH:
+        return await handler(request)      # authenticates by itself
     auth = request.headers.get("Authorization", "")
     token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
     node = await _run(store.authenticate, token) if token else None
@@ -416,6 +445,78 @@ async def handle_heartbeat(request):
     return web.json_response({"server_time": store.now_iso()})
 
 
+JOIN_PATH = "/api/v1/ingest/join"
+
+
+def _bearer(request):
+    auth = request.headers.get("Authorization", "")
+    return auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+
+
+async def handle_join(request):
+    """POST /join — a satellite asks to become a node, with a token it made
+    itself. Pending until the owner approves it (Admin -> Noder or the
+    nodes CLI); a matching JOIN_KEY approves at once. Nothing secret is
+    sent back, so the satellite simply asks again until approved."""
+    address = client_address(request)
+    limiter = request.app[JOIN_LIMITER]
+    if not limiter.allow(f"ip:{address}") or not limiter.allow("all"):
+        return _error(429, "rate_limited", "too many join requests")
+    token = _bearer(request)
+    if len(token) < 32 or len(token) > 256:
+        return _error(401, "unauthorized", "a join needs the satellite's own "
+                                           "token (at least 32 characters)")
+    try:
+        body = await _read_json(request)
+        if not isinstance(body, dict):
+            raise ValidationError("body must be a JSON object")
+        join_id = body.get("join_id")
+        if not valid_uid(join_id):
+            raise ValidationError("'join_id' must be a lowercase UUID")
+        info = {
+            "node_name": _opt_str(body, "node_name", 64),
+            "version": _opt_str(body, "version", 64),
+            "suggested_location": _opt_str(body, "suggested_location", 80),
+            "stations": [
+                {"frequency": _cap(st.get("frequency"), 16), "pi": _cap(st.get("pi"), 16),
+                 "ps": _cap(st.get("ps"), 64)}
+                for st in (body.get("stations") or [])[:8] if isinstance(st, dict)],
+        }
+        join_key = body.get("join_key")
+        if join_key is not None and not isinstance(join_key, str):
+            raise ValidationError("'join_key' must be a string")
+    except ValidationError as e:
+        return _error(422, "invalid", str(e))
+
+    node = await _run(store.authenticate, token)
+    if node is not None:
+        if not node["enabled"]:
+            return _error(403, "node_disabled",
+                          "this node has been disabled by the aggregator's owner")
+        return web.json_response({"status": "approved", "node": node["name"]})
+
+    if join_key:
+        if not config.JOIN_KEY or not hmac.compare_digest(
+                join_key.encode("utf-8"), config.JOIN_KEY.encode("utf-8")):
+            return _error(403, "rejected", "join refused")
+    verify = verify_code(join_id)
+    status, req = await _run(store.record_join_request, token, join_id, verify,
+                             info, address, config.JOIN_MAX_PENDING)
+    if status == "conflict":
+        return _error(409, "conflict", "this join id belongs to another token")
+    if status == "full":
+        return _error(429, "too_many_pending", "too many satellites are waiting "
+                                               "for approval")
+    if status == store.JOIN_REJECTED:
+        return _error(403, "rejected", "join refused")
+    if join_key:   # matches JOIN_KEY: approve at once
+        name = await _run(store.free_name, info["node_name"] or f"Nod {verify}")
+        node = await _run(store.approve_join, req["id"], name,
+                          info["suggested_location"])
+        return web.json_response({"status": "approved", "node": node["name"]})
+    return web.json_response({"status": "pending", "verify": verify}, status=202)
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -429,10 +530,12 @@ def create_ingest_app(hooks=None, limiter=None):
     app[HOOKS] = hooks or Hooks()
     app[LIMITER] = limiter or RateLimiter(config.INGEST_RATE_PER_MIN,
                                           config.INGEST_BURST)
+    app[JOIN_LIMITER] = RateLimiter(config.JOIN_RATE_PER_MIN, config.JOIN_RATE_PER_MIN)
     base = "/api/v1/ingest"
     uid = "{uid}"
     app.router.add_put(f"{base}/events/{uid}", handle_put_event)
     app.router.add_put(f"{base}/events/{uid}/audio", handle_put_audio)
     app.router.add_delete(f"{base}/events/{uid}", handle_delete_event)
     app.router.add_post(f"{base}/heartbeat", handle_heartbeat)
+    app.router.add_post(JOIN_PATH, handle_join)
     return app

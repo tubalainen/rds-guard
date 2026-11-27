@@ -73,6 +73,15 @@ def main(argv=None):
         description="Manage RDS Guard satellites (nodes) of this aggregator.")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list", help="List nodes")
+    sub.add_parser("pending", help="List satellites waiting to be approved")
+    p = sub.add_parser("approve", help="Approve a waiting satellite by its code")
+    p.add_argument("code", help="the code in the satellite's log, e.g. K7Q-3PD")
+    p.add_argument("--name", help="node name (default: the one it sent)")
+    p.add_argument("--location", help="where it is, 'Ort, Län'")
+    p.add_argument("--replace", metavar="NODE",
+                   help="give this existing node the satellite's token instead")
+    p = sub.add_parser("reject", help="Reject a waiting satellite by its code")
+    p.add_argument("code")
     for cmd, helptext in (("add", "Create a node and print its token"),
                           ("rotate", "Replace a node's token"),
                           ("disable", "Reject a node's reports"),
@@ -92,6 +101,37 @@ def main(argv=None):
             state = "enabled " if n["enabled"] else "disabled"
             print(f"{n['name']:<32} {state}  token {n['token_prefix']}…  "
                   f"last seen {n['last_seen_at'] or 'never'}")
+        return
+
+    if args.cmd == "pending":
+        reqs = store.list_join_requests()
+        if not reqs:
+            print("No satellites are waiting.")
+        for r in reqs:
+            print(f"{r['verify']}  {r['node_name'] or '(no name)':<32} "
+                  f"{r['suggested_location'] or '-':<28} {r['address'] or '?':<16} "
+                  f"{r['version'] or ''}  since {r['created_at']}")
+        return
+
+    if args.cmd in ("approve", "reject"):
+        req = store.join_request_by_verify(args.code)
+        if req is None:
+            print(f"No waiting satellite with code {args.code}.", file=sys.stderr)
+            sys.exit(1)
+        if args.cmd == "reject":
+            store.reject_join(req["id"])
+            print(f"Rejected {req['verify']} ({req['node_name']}).")
+            return
+        replace = _find(args.replace)["id"] if args.replace else None
+        try:
+            name = clean_name(args.name) if args.name else store.free_name(
+                req["node_name"] or f"Nod {req['verify']}")
+            node = store.approve_join(req["id"], name, args.location or
+                                      req["suggested_location"], replace)
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        print(f"Approved: the satellite now reports as node '{node['name']}'.")
         return
 
     if args.cmd == "add":

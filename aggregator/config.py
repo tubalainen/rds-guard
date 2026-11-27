@@ -50,6 +50,20 @@ MAX_AUDIO_BYTES = 8 * 1024 * 1024
 INGEST_RATE_PER_MIN = max(1, _int(os.environ.get("INGEST_RATE_PER_MIN"), 120))
 INGEST_BURST = max(1, _int(os.environ.get("INGEST_BURST"), 60))
 
+# --- Joining (protocol 2) ---
+# The same secret on a satellite (JOIN_KEY) approves its join at once, e.g.
+# both containers in one docker-compose.yml. Empty: every new satellite waits
+# for approval under Admin -> Noder (or 'python3 -m aggregator.nodes approve').
+JOIN_KEY = os.environ.get("JOIN_KEY", "").strip()
+# Join requests per client address (and in total) per minute
+JOIN_RATE_PER_MIN = max(1, _int(os.environ.get("JOIN_RATE_PER_MIN"), 12))
+JOIN_MAX_PENDING = max(1, _int(os.environ.get("JOIN_MAX_PENDING"), 20))
+JOIN_PENDING_HOURS = max(1, _int(os.environ.get("JOIN_PENDING_HOURS"), 24))
+# Reverse proxies whose X-Forwarded-For names the client (comma-separated
+# addresses). Empty: the address the request came from.
+TRUSTED_PROXIES = {a.strip() for a in os.environ.get("TRUSTED_PROXIES", "").split(",")
+                   if a.strip()}
+
 # A node counts as offline when no heartbeat arrived for this long
 NODE_OFFLINE_SEC = max(30, _int(os.environ.get("NODE_OFFLINE_SEC"), 120))
 

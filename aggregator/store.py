@@ -144,6 +144,21 @@ def init_db(db_path):
             created_at      TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS join_requests (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            join_id         TEXT NOT NULL UNIQUE,
+            token_hash      TEXT NOT NULL UNIQUE,
+            verify          TEXT NOT NULL,
+            node_name       TEXT,
+            version         TEXT,
+            suggested_location TEXT,
+            stations        TEXT,
+            address         TEXT,
+            status          TEXT NOT NULL DEFAULT 'pending',
+            created_at      TEXT NOT NULL,
+            last_seen_at    TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_notify_log_event ON notify_log(event_uid);
         CREATE INDEX IF NOT EXISTS idx_notify_log_created ON notify_log(created_at);
     """)
@@ -221,6 +236,158 @@ def create_node(name):
         node_id = cur.lastrowid
     log.info("Node created: %s (#%d)", name, node_id)
     return get_node(node_id), token
+
+
+def free_name(name):
+    """name, or "name (2)", "name (3)" … if it is taken."""
+    base = (name or "").strip()[:58] or "Nod"
+    candidate, n = base, 1
+    conn = _conn()
+    while conn.execute("SELECT 1 FROM nodes WHERE name = ?", (candidate,)).fetchone():
+        n += 1
+        candidate = f"{base} ({n})"
+    return candidate
+
+
+# --- join requests (protocol 2) ---------------------------------------------
+
+JOIN_PENDING = "pending"
+JOIN_REJECTED = "rejected"
+
+
+def _join_dict(row):
+    if row is None:
+        return None
+    d = dict(row)
+    d.pop("token_hash", None)
+    try:
+        d["stations"] = json.loads(d["stations"]) if d.get("stations") else []
+    except (TypeError, ValueError):
+        d["stations"] = []
+    return d
+
+
+def get_join_request(request_id):
+    return _join_dict(_conn().execute(
+        "SELECT * FROM join_requests WHERE id = ?", (request_id,)).fetchone())
+
+
+def join_request_by_verify(verify):
+    return _join_dict(_conn().execute(
+        "SELECT * FROM join_requests WHERE verify = ? AND status = ?",
+        ((verify or "").strip().upper(), JOIN_PENDING)).fetchone())
+
+
+def list_join_requests():
+    rows = _conn().execute(
+        "SELECT * FROM join_requests WHERE status = ? ORDER BY created_at",
+        (JOIN_PENDING,)).fetchall()
+    return [_join_dict(r) for r in rows]
+
+
+def record_join_request(token, join_id, verify, info, address, max_pending):
+    """Record (or refresh) a satellite's request to join.
+
+    Returns (status, request): status is 'pending', 'rejected', 'conflict'
+    (the join id comes with another token) or 'full' (too many pending).
+    """
+    token_hash = hash_token(token)
+    ts = now_iso()
+    with _lock:
+        conn = _conn()
+        row = conn.execute("SELECT * FROM join_requests WHERE join_id = ?",
+                           (join_id,)).fetchone()
+        if row is not None:
+            if not hmac.compare_digest(row["token_hash"], token_hash):
+                return "conflict", None
+            if row["status"] == JOIN_REJECTED:
+                return JOIN_REJECTED, _join_dict(row)
+            conn.execute(
+                "UPDATE join_requests SET node_name = ?, version = ?, "
+                "suggested_location = ?, stations = ?, address = ?, "
+                "last_seen_at = ? WHERE id = ?",
+                (info.get("node_name"), info.get("version"),
+                 info.get("suggested_location"),
+                 json.dumps(info.get("stations") or []), address, ts, row["id"]))
+            conn.commit()
+            return JOIN_PENDING, get_join_request(row["id"])
+        if conn.execute("SELECT 1 FROM join_requests WHERE token_hash = ?",
+                        (token_hash,)).fetchone():
+            return "conflict", None
+        pending = conn.execute("SELECT COUNT(*) FROM join_requests WHERE status = ?",
+                               (JOIN_PENDING,)).fetchone()[0]
+        if pending >= max_pending:
+            return "full", None
+        cur = conn.execute(
+            "INSERT INTO join_requests (join_id, token_hash, verify, node_name, "
+            "version, suggested_location, stations, address, created_at, "
+            "last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (join_id, token_hash, verify, info.get("node_name"),
+             info.get("version"), info.get("suggested_location"),
+             json.dumps(info.get("stations") or []), address, ts, ts))
+        conn.commit()
+        request_id = cur.lastrowid
+    log.info("Join request from '%s' (code %s, %s): waiting for approval",
+             info.get("node_name"), verify, address)
+    return JOIN_PENDING, get_join_request(request_id)
+
+
+def approve_join(request_id, name=None, location=None, replace_node_id=None):
+    """Turn a pending request into a node (or give an existing node the
+    satellite's token). Returns the node, or None if no such request.
+    Raises ValueError if the name is taken."""
+    with _lock:
+        conn = _conn()
+        req = conn.execute("SELECT * FROM join_requests WHERE id = ? AND status = ?",
+                           (request_id, JOIN_PENDING)).fetchone()
+        if req is None:
+            return None
+        if replace_node_id is not None:
+            cur = conn.execute(
+                "UPDATE nodes SET token_hash = ?, token_prefix = ?, enabled = 1 "
+                "WHERE id = ?", (req["token_hash"], "join", replace_node_id))
+            if cur.rowcount == 0:
+                return None
+            node_id = replace_node_id
+            if location:
+                conn.execute("UPDATE nodes SET location = ? WHERE id = ?",
+                             (location, node_id))
+        else:
+            node_name = (name or "").strip() or req["node_name"] or f"Nod {req['verify']}"
+            try:
+                cur = conn.execute(
+                    "INSERT INTO nodes (name, token_hash, token_prefix, created_at, "
+                    "location) VALUES (?, ?, ?, ?, ?)",
+                    (node_name, req["token_hash"], "join", now_iso(),
+                     location or None))
+            except sqlite3.IntegrityError:
+                raise ValueError(f"A node named '{node_name}' already exists")
+            node_id = cur.lastrowid
+        conn.execute("DELETE FROM join_requests WHERE id = ?", (request_id,))
+        conn.commit()
+    node = get_node(node_id)
+    log.info("Join request %s approved as node '%s'", req["verify"], node["name"])
+    return node
+
+
+def reject_join(request_id):
+    """Reject a request: the satellite is told so until the request expires."""
+    with _lock:
+        conn = _conn()
+        cur = conn.execute("UPDATE join_requests SET status = ? WHERE id = ? "
+                           "AND status = ?", (JOIN_REJECTED, request_id, JOIN_PENDING))
+        conn.commit()
+    return cur.rowcount > 0
+
+
+def purge_join_requests(hours):
+    """Forget requests not repeated for `hours` (pending or rejected)."""
+    with _lock:
+        conn = _conn()
+        cur = conn.execute("DELETE FROM join_requests WHERE last_seen_at < ?",
+                           (iso_ago(hours * 3600),))
+        conn.commit()
+    return cur.rowcount
 
 
 def rotate_token(node_id):

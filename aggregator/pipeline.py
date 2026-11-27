@@ -398,6 +398,7 @@ class Pipeline(Hooks):
             self._last_purge = now
             remove_audio_files(store.purge_old_events(config.EVENT_RETENTION_DAYS))
             store.purge_notify_log(config.EVENT_RETENTION_DAYS)
+            store.purge_join_requests(config.JOIN_PENDING_HOURS)
 
     def _sweep_alerts(self, now):
         engine_on = self._transcriber is not None

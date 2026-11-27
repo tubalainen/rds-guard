@@ -40,7 +40,7 @@ async def client(aiohttp_client, agg_store, hooks):
 def node(agg_store):
     n, token = agg_store.create_node("Kalle")
     return {"node": n, "token": token,
-            "headers": {"Authorization": f"Bearer {token}", H: "1"}}
+            "headers": {"Authorization": f"Bearer {token}", H: "2"}}
 
 
 def _event(rev=1, state="start", **kw):
@@ -63,10 +63,10 @@ OGG = b"OggS" + b"\0" * 200
 async def test_every_response_has_protocol_header(client, node):
     resp = await client.put(_url(uuid.uuid4()), json=_event())
     assert resp.status == 426
-    assert resp.headers[H] == "1"
+    assert resp.headers[H] == "2"
     resp = await client.get("/nope", headers=node["headers"])
     assert resp.status in (404, 405)
-    assert resp.headers[H] == "1"
+    assert resp.headers[H] == "2"
 
 
 @pytest.mark.parametrize("method,path", [
@@ -85,7 +85,7 @@ async def test_ingest_port_serves_nothing_but_ingest(client, node, method, path)
     the web UI, the read API and node admin must not exist on it."""
     r = await client.request(method, path, headers=node["headers"], json={})
     assert r.status == 404
-    assert r.headers[H] == "1"
+    assert r.headers[H] == "2"
     # … and without a token the caller does not even learn that
     r = await client.request(method, path)
     assert r.status == 426
@@ -96,15 +96,15 @@ async def test_reachability_check_from_readme(client):
     that is recognisably from the aggregator."""
     r = await client.get("/api/v1/ingest/heartbeat")
     assert r.status == 426
-    assert r.headers[H] == "1"
+    assert r.headers[H] == "2"
     assert (await r.json())["error"] == "unsupported_protocol"
 
 
 async def test_auth_required(client):
-    resp = await client.put(_url(uuid.uuid4()), json=_event(), headers={H: "1"})
+    resp = await client.put(_url(uuid.uuid4()), json=_event(), headers={H: "2"})
     assert resp.status == 401
     resp = await client.put(_url(uuid.uuid4()), json=_event(),
-                            headers={H: "1", "Authorization": "Bearer wrong"})
+                            headers={H: "2", "Authorization": "Bearer wrong"})
     assert resp.status == 401
 
 
@@ -143,7 +143,7 @@ async def test_other_node_cannot_touch_event(client, node, agg_store):
     uid = str(uuid.uuid4())
     await client.put(_url(uid), json=_event(), headers=node["headers"])
     _, token2 = agg_store.create_node("Eve")
-    h2 = {"Authorization": f"Bearer {token2}", H: "1"}
+    h2 = {"Authorization": f"Bearer {token2}", H: "2"}
     r = await client.put(_url(uid), json=_event(rev=9), headers=h2)
     assert r.status == 409
     r = await client.put(_url(uid, "/audio"), data=OGG, headers=h2)
@@ -189,7 +189,7 @@ async def test_oversized_json_rejected(client, node):
     body["padding"] = "x" * (config.MAX_JSON_BYTES + 10)
     r = await client.put(_url(uuid.uuid4()), json=body, headers=node["headers"])
     assert r.status == 413
-    assert r.headers[H] == "1"
+    assert r.headers[H] == "2"
 
 
 async def test_audio_upload(client, node, hooks, agg_store, tmp_path):
