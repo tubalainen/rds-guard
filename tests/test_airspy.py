@@ -631,10 +631,12 @@ def test_a_new_sample_rate_calibrates_again(monkeypatch):
     assert tuner._stored(r) is None
 
 
-def test_lost_samples_are_logged_as_a_warning(caplog):
+def test_lost_samples_are_logged_as_a_warning(caplog, monkeypatch):
     import io
     import logging
     import pipeline
+    # As on a host booted seconds ago (CI): monotonic time is still small
+    monkeypatch.setattr(pipeline.time, "monotonic", lambda: 5.0)
     err = io.BytesIO(b"Streaming at 10.001 MSPS\nStreaming at  8.200 MSPS\n"
                      b"Streaming at  8.100 MSPS\nairspy_open() failed\n")
     with caplog.at_level(logging.DEBUG, logger="rds-guard"):

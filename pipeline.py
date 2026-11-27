@@ -94,7 +94,7 @@ SHORT_EVERY_SEC = 60          # … at most this often
 
 
 def _stderr_reader(stream, prefix, expected_sps=None):
-    last_warned = 0.0
+    last_warned = None           # (monotonic time can be under a minute after boot)
     try:
         for raw in iter(stream.readline, b""):
             text = raw.decode("utf-8", errors="replace").rstrip()
@@ -102,7 +102,8 @@ def _stderr_reader(stream, prefix, expected_sps=None):
                 m = _STREAMING_RE.search(text)
                 rate = float(m.group(1)) * 1e6 if m else None
                 if (expected_sps and rate is not None and rate < SHORT_RATE * expected_sps
-                        and time.monotonic() - last_warned >= SHORT_EVERY_SEC):
+                        and (last_warned is None
+                             or time.monotonic() - last_warned >= SHORT_EVERY_SEC)):
                     last_warned = time.monotonic()
                     log.warning("[%s] %s, not %g: samples are lost (USB, CPU or the "
                                 "pipe cannot keep up)", prefix, text, expected_sps / 1e6)
