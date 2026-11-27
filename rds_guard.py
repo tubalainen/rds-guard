@@ -30,6 +30,8 @@ log = logging.getLogger("rds-guard")
 
 ALERT_PTY = {"Alarm", "Alarm - Loss of radio"}
 MIN_EVENT_SEC = 10          # shorter "events" are RDS noise
+SILENT_END_SEC = 180        # no RDS this long: an open broadcast ends
+STATION_KEY = "station"     # TA/RT/PTY state is per station, not per PI
 
 
 def now_iso():
@@ -232,13 +234,19 @@ class RulesEngine:
       2. RadioText while TA is on: the announcement is updated
       3. TA off: it ends (shorter than 10 s: discarded as noise)
       4. PTY Alarm: emergency broadcast starts; PTY back: it ends
+
+    One station (one frequency) has at most one announcement and one
+    emergency broadcast at a time, whatever PI it sends: a P4 transmitter
+    switches between the shared PI 0xE224 (national programme) and its
+    regional PI, and an announcement can start on one and end on the other.
+    The event keeps the PI it started on.
     """
 
     def __init__(self, recorder=None, record_event_types=None, frequency=None,
                  receiver=None):
         self.lock = threading.Lock()
-        self._active = {}            # pi -> {event_id, since, radiotext}
-        self._active_emergency = {}  # pi -> {event_id, since}
+        self._active = None          # {event_id, pi, since, radiotext}
+        self._active_emergency = None  # {event_id, pi, since}
         self._recorder = recorder
         self._record_types = {t.strip() for t in
                               (record_event_types or "traffic,emergency").split(",")}
@@ -261,51 +269,55 @@ class RulesEngine:
         ts = msg_ts(data)
         with self.lock:
             if ta:
+                if self._active:
+                    return
                 event_id = event_store.insert_event(
                     event_type="traffic", severity="warning", state="start", pi=pi,
                     data_payload={"prog_type": data.get("prog_type", "")},
                     station_ps=self._ps(pi), frequency=self.frequency,
                     started_at=ts, receiver=self.receiver)
-                self._active[pi] = {"event_id": event_id, "since": ts, "radiotext": []}
+                self._active = {"event_id": event_id, "pi": pi, "since": ts,
+                                "radiotext": []}
                 self._record("traffic", event_id)
                 log.info("EVENT traffic start on %s %s (#%d)", pi, self.frequency, event_id)
                 return
-            ann = self._active.pop(pi, None)
+            ann, self._active = self._active, None
             if not ann:
                 return
             self._stop_recording()
             duration = self._duration(ann["since"], ts)
             if duration < MIN_EVENT_SEC:
                 event_store.delete_event(ann["event_id"])
-                log.info("Discarded short traffic event #%d on %s (%ds)",
-                         ann["event_id"], pi, duration)
+                log.info("Discarded short traffic event #%d on %s %s (%ds)",
+                         ann["event_id"], ann["pi"], self.frequency, duration)
                 return
             event_store.end_event(event_id=ann["event_id"], ended_at=ts,
                                   duration_sec=duration,
                                   radiotext_list=ann["radiotext"])
-            log.info("EVENT traffic end on %s (%ds, %d RadioText)", pi, duration,
-                     len(ann["radiotext"]))
+            log.info("EVENT traffic end on %s %s (%ds, %d RadioText)%s", ann["pi"],
+                     self.frequency, duration, len(ann["radiotext"]),
+                     "" if pi == ann["pi"] else f" (ended on PI {pi})")
 
     def on_radiotext(self, pi, rt, data):
         with self.lock:
-            ann = self._active.get(pi)
+            ann = self._active
             if not ann:
                 return
             if not ann["radiotext"] or ann["radiotext"][-1] != rt:
                 ann["radiotext"].append(rt)
             event_store.update_event_radiotext(ann["event_id"], list(ann["radiotext"]))
-            log.info("EVENT traffic update on %s: %s", pi, rt[:80])
+            log.info("EVENT traffic update on %s %s: %s", pi, self.frequency, rt[:80])
 
     def on_pty_alert(self, pi, pty, data):
         ts = msg_ts(data)
         with self.lock:
-            if pi in self._active_emergency:
+            if self._active_emergency:
                 return
             event_id = event_store.insert_event(
                 event_type="emergency", severity="critical", state="active", pi=pi,
                 data_payload={"prog_type": pty}, station_ps=self._ps(pi),
                 frequency=self.frequency, started_at=ts, receiver=self.receiver)
-            self._active_emergency[pi] = {"event_id": event_id, "since": ts}
+            self._active_emergency = {"event_id": event_id, "pi": pi, "since": ts}
         self._record("emergency", event_id)
         log.warning("EVENT emergency (PTY %s) on %s %s (#%d)", pty, pi,
                     self.frequency, event_id)
@@ -313,26 +325,49 @@ class RulesEngine:
     def on_pty_normal(self, pi, pty, data):
         ts = msg_ts(data)
         with self.lock:
-            em = self._active_emergency.pop(pi, None)
+            em, self._active_emergency = self._active_emergency, None
         if not em:
             return
         self._stop_recording()
         duration = self._duration(em["since"], ts)
         if duration < MIN_EVENT_SEC:
             event_store.delete_event(em["event_id"])
-            log.info("Discarded short emergency event #%d on %s (%ds)",
-                     em["event_id"], pi, duration)
+            log.info("Discarded short emergency event #%d on %s %s (%ds)",
+                     em["event_id"], em["pi"], self.frequency, duration)
             return
         event_store.end_event(event_id=em["event_id"], ended_at=ts, duration_sec=duration)
-        log.info("EVENT emergency end on %s (PTY %s, %ds)", pi, pty, duration)
+        log.info("EVENT emergency end on %s %s (PTY %s, %ds)", em["pi"],
+                 self.frequency, pty, duration)
 
-    def is_active(self, pi):
+    def end_silent(self, age_sec):
+        """The station has sent nothing for age_sec (signal or decoder
+        lost): end what is going on rather than leave it open."""
         with self.lock:
-            return pi in self._active
+            open_ = bool(self._active or self._active_emergency)
+        if not open_:
+            return False
+        log.warning("[%s %s] no RDS for %ds: ending the open broadcast",
+                    self.receiver, self.frequency, age_sec)
+        # It ended when the station was last heard
+        data = {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%S",
+                                           time.gmtime(time.time() - age_sec))}
+        with self.lock:
+            ann = self._active
+        if ann:
+            self.on_ta_change(ann["pi"], False, data)
+        with self.lock:
+            em = self._active_emergency
+        if em:
+            self.on_pty_normal(em["pi"], "(no RDS)", data)
+        return True
 
-    def is_emergency_active(self, pi):
+    def is_active(self, pi=None):
         with self.lock:
-            return pi in self._active_emergency
+            return self._active is not None
+
+    def is_emergency_active(self, pi=None):
+        with self.lock:
+            return self._active_emergency is not None
 
     def busy(self):
         """A broadcast is going on (no calibration now)."""
@@ -350,7 +385,11 @@ class RulesEngine:
 
 
 def process_group(station, data):
-    """Route one decoded RDS group through the station's rules."""
+    """Route one decoded RDS group through the station's rules.
+
+    TA, RadioText and PTY are followed per station (frequency), not per
+    PI: P4 switches PI between its national and regional programme, also
+    in the middle of an announcement."""
     pi = data.get("pi")
     if not pi:
         return
@@ -359,29 +398,30 @@ def process_group(station, data):
     station.update_info(pi, data)
     state, engine = station.state, station.engine
     group = data.get("group", "")
+    here = STATION_KEY
 
-    # 1-3: traffic announcements. The first TA value seen (start-up, a new
-    # PI) only says where we are: off ends nothing, on starts the event.
+    # 1-3: traffic announcements. The first TA value seen (start-up) only
+    # says where we are: off ends nothing, on starts the event.
     if "ta" in data:
-        known = state.is_known(pi, "ta")
-        if state.changed(pi, "ta", data["ta"]) and (known or data["ta"]):
+        known = state.is_known(here, "ta")
+        if state.changed(here, "ta", data["ta"]) and (known or data["ta"]):
             engine.on_ta_change(pi, data["ta"], data)
             if data["ta"]:
                 # A new announcement takes the RadioText on air now, even
                 # if the same text was sent before
-                state.forget(pi, "rt")
+                state.forget(here, "rt")
 
     if group in ("2A", "2B"):
         rt = data.get("radiotext")      # complete RadioText only
-        if rt and state.changed(pi, "rt", rt) and engine.is_active(pi):
+        if rt and state.changed(here, "rt", rt) and engine.is_active():
             engine.on_radiotext(pi, rt.strip(), data)
 
     # 4: emergency broadcasts
     pty = data.get("prog_type")
-    if pty and state.changed(pi, "pty", pty):
+    if pty and state.changed(here, "pty", pty):
         if pty in ALERT_PTY:
             engine.on_pty_alert(pi, pty, data)
-        elif engine.is_emergency_active(pi):
+        elif engine.is_emergency_active():
             engine.on_pty_normal(pi, pty, data)
 
 
@@ -451,6 +491,16 @@ def _housekeeping(sat, stop_event):
             satellite_health.write(config.HEALTH_FILE, snap)
         except Exception:
             log.debug("Could not write the health file", exc_info=True)
+        for st in sat.stations():
+            try:
+                age = st.stats.snapshot().get("last_group_age_sec")
+                if age is not None and age >= SILENT_END_SEC:
+                    if st.engine.end_silent(age):
+                        # When it is heard again, its first TA says where we are
+                        st.state.forget(STATION_KEY, "ta")
+                        st.state.forget(STATION_KEY, "pty")
+            except Exception:
+                log.exception("Could not check %s for silence", st.frequency)
         if now - last_purge >= 3600:
             last_purge = now
             try:
