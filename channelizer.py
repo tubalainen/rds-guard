@@ -358,9 +358,10 @@ class Channelizer(threading.Thread):
     """
 
     def __init__(self, rtl_sdr_stdout, frequencies_hz: list, center_freq_hz: int,
-                 fs: int = _FS, fmt: str = "u8"):
+                 fs: int = _FS, fmt: str = "u8", probe=None):
         super().__init__(daemon=True, name="channelizer")
         self._src = rtl_sdr_stdout
+        self._probe = probe          # dongle_check.Probe: sees the first seconds
         self._bytes_per_sample, self._to_iq = _FORMATS[fmt]
         self._stations, self._block = make_stations(
             [freq_hz - center_freq_hz for freq_hz in frequencies_hz], fs)
@@ -382,6 +383,12 @@ class Channelizer(threading.Thread):
                     continue  # short read — skip partial block
 
                 z = self._to_iq(raw)
+                if self._probe is not None:
+                    try:
+                        self._probe.feed(len(raw), z)
+                    except Exception:
+                        log.exception("Channelizer: the dongle check failed")
+                        self._probe = None
 
                 for st in self._stations:
                     st.process(z)
@@ -389,6 +396,11 @@ class Channelizer(threading.Thread):
         except Exception:
             log.exception("Channelizer: unexpected error in IQ loop")
         finally:
+            if self._probe is not None and not self._probe.done:
+                try:
+                    self._probe.finish()
+                except Exception:
+                    log.exception("Channelizer: the dongle check failed")
             for st in self._stations:
                 st.close()
             log.info("Channelizer stopped")

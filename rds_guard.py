@@ -370,6 +370,7 @@ class Satellite:
                 "id": p.receiver.id, "serial": p.receiver.serial,
                 "name": p.receiver.name or None,
                 "state": pipe["state"], "error": pipe["error"],
+                "check": (p.check[1][:64] if getattr(p, "check", None) else None),
                 **cal,
                 "stations": [s["station"].snapshot() for s in p.stations],
             })
