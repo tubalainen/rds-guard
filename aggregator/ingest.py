@@ -482,7 +482,11 @@ async def handle_heartbeat(request):
     await _run(store.record_heartbeat, node["id"], hb["node_name"],
                hb["version"], hb["status"], clock_offset(hb["sent_at"]))
     request.app[HOOKS].on_heartbeat(await _run(store.get_node, node["id"]))
-    return web.json_response({"server_time": store.now_iso()})
+    answer = {"server_time": store.now_iso()}
+    commands = await _run(store.take_node_commands, node["id"])
+    if commands:
+        answer["commands"] = commands
+    return web.json_response(answer)
 
 
 JOIN_PATH = "/api/v1/ingest/join"

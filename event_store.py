@@ -298,7 +298,7 @@ def get_calibration(serial):
     return d
 
 
-def save_calibration(serial, frequencies, gain, ppm, result=None, reason=None):
+def save_calibration(serial, frequencies, gain, ppm, result=None, reason=None, at=None):
     with _lock:
         conn = _conn()
         conn.execute(
@@ -306,7 +306,7 @@ def save_calibration(serial, frequencies, gain, ppm, result=None, reason=None):
             "ppm, result, reason, calibrated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (serial, json.dumps(sorted(frequencies)), gain, ppm,
              json.dumps(result, ensure_ascii=False) if result is not None else None,
-             reason, _ts()))
+             reason, _ts(at)))
         conn.commit()
 
 

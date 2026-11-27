@@ -190,3 +190,29 @@ def test_old_requests_expire(agg_store):
     conn.execute("UPDATE join_requests SET last_seen_at = '2020-01-01T00:00:00Z'")
     conn.commit()
     assert agg_store.purge_join_requests(24) == 1
+
+
+async def test_recalibrate_reaches_the_satellite_once(client, web, agg_store):
+    node, token = agg_store.create_node("Kalle")
+    h = {"Authorization": f"Bearer {token}", H: "2"}
+    r = await web.post(f"/api/v1/nodes/{node['id']}/recalibrate", json={"receiver": "tak"})
+    assert r.status == 202
+    assert (await web.post(f"/api/v1/nodes/{node['id']}/recalibrate", json={})).status == 422
+    assert (await web.post("/api/v1/nodes/999/recalibrate", json={"receiver": "x"})).status == 404
+    first = await (await client.post("/api/v1/ingest/heartbeat", json={}, headers=h)).json()
+    [cmd] = first["commands"]
+    assert cmd["type"] == "recalibrate" and cmd["receiver"] == "tak" and cmd["id"]
+    second = await (await client.post("/api/v1/ingest/heartbeat", json={}, headers=h)).json()
+    assert "commands" not in second
+
+
+def test_heartbeat_receivers_are_kept(agg_store):
+    from aggregator import ingest as ing
+    hb = ing.clean_heartbeat({"receivers": [
+        {"id": "tak", "serial": "00000101", "state": "running", "gain": 28.0,
+         "gain_mode": "auto", "ppm": 7, "calibrated_at": "2026-11-27T10:00:00Z",
+         "quality": {"103.5M": 10.5}, "stations": [{"frequency": "103.5M", "pi": "0xE824"}],
+         "evil": "x" * 10_000}]})
+    [r] = hb["status"]["receivers"]
+    assert r["gain"] == 28.0 and r["quality"] == {"103.5M": 10.5}
+    assert r["stations"][0]["pi"] == "0xE824" and "evil" not in r

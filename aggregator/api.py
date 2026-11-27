@@ -633,6 +633,22 @@ async def handle_reject_join(request):
     return web.json_response({"rejected": True})
 
 
+async def handle_recalibrate(request):
+    """POST /api/v1/nodes/{id}/recalibrate {"receiver": id or serial}: the
+    satellite calibrates that receiver's gain and ppm at its next heartbeat
+    (not during a broadcast)."""
+    node_id = _node_id(request)
+    body = await _json_body(request)
+    receiver = body.get("receiver") if body else None
+    if not isinstance(receiver, str) or not receiver.strip() or len(receiver) > 32:
+        return _error(422, "invalid", "expected {\"receiver\": \"<id or serial>\"}")
+    if not node_id or await _run(store.get_node, node_id) is None:
+        return _error(404, "not_found")
+    cid = await _run(store.add_node_command, node_id,
+                     {"type": "recalibrate", "receiver": receiver.strip()})
+    return web.json_response({"queued": True, "id": cid}, status=202)
+
+
 async def handle_delete_node(request):
     node_id = _node_id(request)
     paths = await _run(store.delete_node, node_id) if node_id else None
@@ -708,6 +724,7 @@ def create_web_app(pipeline=None, mqtt=None):
     r.add_post("/api/v1/nodes", handle_create_node)
     r.add_post("/api/v1/nodes/{node_id}/rotate", handle_rotate_node)
     r.add_patch("/api/v1/nodes/{node_id}", handle_update_node)
+    r.add_post("/api/v1/nodes/{node_id}/recalibrate", handle_recalibrate)
     r.add_delete("/api/v1/nodes/{node_id}", handle_delete_node)
     if SHARED_DIR.exists():
         r.add_static("/static/shared/", SHARED_DIR, show_index=False)

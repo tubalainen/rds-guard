@@ -174,6 +174,13 @@ def init_db(db_path):
             audio_bytes     INTEGER
         );
 
+        CREATE TABLE IF NOT EXISTS node_commands (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_id         INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+            data            TEXT NOT NULL,
+            created_at      TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS join_requests (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             join_id         TEXT NOT NULL UNIQUE,
@@ -503,6 +510,28 @@ def delete_node(node_id):
         conn.commit()
     log.info("Node #%d deleted", node_id)
     return files
+
+
+def add_node_command(node_id, command):
+    """Queue a command for a node (sent in the answer to its next heartbeat)."""
+    with _lock:
+        conn = _conn()
+        cur = conn.execute("INSERT INTO node_commands (node_id, data, created_at) "
+                           "VALUES (?, ?, ?)", (node_id, json.dumps(command), now_iso()))
+        conn.commit()
+    return cur.lastrowid
+
+
+def take_node_commands(node_id):
+    """The node's queued commands, each with its id; removed once taken
+    (a command lost on the way is asked for again in Admin)."""
+    with _lock:
+        conn = _conn()
+        rows = conn.execute("SELECT id, data FROM node_commands WHERE node_id = ? "
+                            "ORDER BY id", (node_id,)).fetchall()
+        conn.execute("DELETE FROM node_commands WHERE node_id = ?", (node_id,))
+        conn.commit()
+    return [dict(json.loads(r["data"]), id=r["id"]) for r in rows]
 
 
 def set_node_location(node_id, location):

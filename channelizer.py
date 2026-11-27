@@ -43,10 +43,12 @@ def _make_lpf(cutoff_hz: float, fs: float, ntaps: int = _NTAPS) -> np.ndarray:
 class _StationDSP:
     """Per-station DSP state: phase accumulator, filter overlap, FM prev sample."""
 
-    def __init__(self, delta_f: float, fs: float = _FS):
-        # Frequency shift: phasor accumulator
+    def __init__(self, delta_f: float, fs: float = _FS, pipe: bool = True):
+        # Frequency shift down by delta_f (the station's offset from the
+        # centre): multiply by exp(-j 2 pi delta_f t). (Before v1.0 the sign
+        # was +, which picked the mirror frequency centre - delta_f.)
         self._phase = 0.0
-        self._phase_inc = 2.0 * np.pi * delta_f / fs
+        self._phase_inc = -2.0 * np.pi * delta_f / fs
 
         # FIR filter: precompute FFT of zero-padded impulse response
         lpf = _make_lpf(_LPF_CUTOFF, fs)
@@ -65,14 +67,28 @@ class _StationDSP:
         # FM discriminator: previous complex sample after decimation
         self._prev_z = np.complex64(0)
 
-        # Output pipe
-        r, w = os.pipe()
-        self.pipe_r = r
-        self._pipe_w = os.fdopen(w, "wb")
+        # Output pipe (none when used offline, e.g. by the gain calibration)
         self._dead = False
+        if pipe:
+            r, w = os.pipe()
+            self.pipe_r = r
+            self._pipe_w = os.fdopen(w, "wb")
+        else:
+            self.pipe_r = None
+            self._pipe_w = None
 
     def process(self, z: np.ndarray) -> None:
         """Run the full DSP chain on one IQ block and write PCM to the pipe."""
+        discriminated = self.demod(z)
+        if discriminated is None:
+            return
+        # 5. Scale to s16le and write to output pipe
+        #    FM deviation at 2394 kHz SR ≈ ±0.2 rad for ±75 kHz; scale by 1/π
+        self._write(to_pcm(discriminated).tobytes())
+
+    def demod(self, z: np.ndarray):
+        """One IQ block -> the station's FM multiplex at 171 kHz (radians
+        per sample), or None for an empty block."""
         n = len(z)
 
         # 1. Frequency shift to baseband
@@ -95,7 +111,7 @@ class _StationDSP:
         # 3. Decimate by 14
         decimated = filtered[::_DECIMATION]
         if len(decimated) == 0:
-            return
+            return None
 
         # 4. FM discriminator: instantaneous phase difference
         #    angle(z[n] * conj(z[n-1]))
@@ -103,14 +119,10 @@ class _StationDSP:
         product = z_ext[1:] * np.conj(z_ext[:-1])
         discriminated = np.angle(product).astype(np.float32)
         self._prev_z = decimated[-1]
-
-        # 5. Scale to s16le and write to output pipe
-        #    FM deviation at 2394 kHz SR ≈ ±0.2 rad for ±75 kHz; scale by 1/π
-        pcm = (discriminated * (32767.0 / np.pi)).clip(-32768, 32767).astype(np.int16)
-        self._write(pcm.tobytes())
+        return discriminated
 
     def _write(self, data: bytes) -> None:
-        if self._dead:
+        if self._dead or self._pipe_w is None:
             return
         try:
             self._pipe_w.write(data)
@@ -121,9 +133,32 @@ class _StationDSP:
 
     def close(self) -> None:
         try:
-            self._pipe_w.close()
+            if self._pipe_w is not None:
+                self._pipe_w.close()
         except Exception:
             pass
+
+
+def to_pcm(discriminated):
+    """MPX (radians per sample) -> s16 samples for redsea."""
+    return (discriminated * (32767.0 / np.pi)).clip(-32768, 32767).astype(np.int16)
+
+
+def iq_from_u8(raw):
+    """rtl_sdr's unsigned 8-bit IQ bytes -> normalised complex64."""
+    iq = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 127.5) / 127.5
+    return (iq[0::2] + 1j * iq[1::2]).astype(np.complex64)
+
+
+def demod_all(z, delta_f, fs=_FS):
+    """A whole IQ capture -> one station's MPX at 171 kHz (offline)."""
+    dsp = _StationDSP(delta_f, fs, pipe=False)
+    parts = []
+    for i in range(0, len(z) - _BLOCK + 1, _BLOCK):
+        out = dsp.demod(z[i:i + _BLOCK])
+        if out is not None:
+            parts.append(out)
+    return np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
 
 
 class Channelizer(threading.Thread):
@@ -160,10 +195,7 @@ class Channelizer(threading.Thread):
                 if len(raw) < bytes_per_block:
                     continue  # short read — skip partial block
 
-                # Convert unsigned-8-bit IQ to normalised complex64
-                iq = np.frombuffer(raw, dtype=np.uint8).astype(np.float32)
-                iq = (iq - 127.5) / 127.5
-                z = (iq[0::2] + 1j * iq[1::2]).astype(np.complex64)
+                z = iq_from_u8(raw)
 
                 for st in self._stations:
                     st.process(z)
