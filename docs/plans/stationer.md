@@ -1,6 +1,8 @@
 # Stationer: namn, område och identitet
 
-Status: förslag 2026-11-27, väntar på godkännande.
+Status: godkänd och byggd 2026-11-27 (gren claude-/upbeat-shannon-cu61mt).
+API: `GET /api/v1/stations`, `PATCH /api/v1/station-settings` (admin),
+`GET /api/v1/events?station=102800/E224`.
 
 ## Bakgrund
 

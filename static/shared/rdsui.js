@@ -114,7 +114,7 @@ const RDSUI = (() => {
     function headline(ev) {
         const rt = radiotext(ev);
         if (rt.length) return rt[rt.length - 1];
-        const st = ev.station_ps || ev.pi || 'okänd station';
+        const st = ev.station_name || ev.station_ps || ev.pi || 'okänd station';
         return ev.type === 'emergency'
             ? `Viktigt meddelande till allmänheten på ${st}`
             : `Trafikmeddelande på ${st}`;
@@ -122,7 +122,7 @@ const RDSUI = (() => {
 
     const evStart = (ev) => parseTs(ev.started_at || ev.created_at || ev.received_at);
     const isLive = (ev) => ['start', 'update', 'active'].includes(ev.state);
-    const stationLabel = (ev) => [ev.station_ps || ev.pi, fmtFreq(ev.frequency)].filter(Boolean).join(' · ');
+    const stationLabel = (ev) => [ev.station_name || ev.station_ps || ev.pi, fmtFreq(ev.frequency)].filter(Boolean).join(' · ');
 
     /** Escape text and wrap the search words in <mark>. */
     function hl(text, words) {
@@ -662,7 +662,8 @@ const RDSUI = (() => {
             const qs = new URLSearchParams({ limit: '50', offset: String(offset) });
             if (state.q) qs.set('q', state.q);
             if (state.typ) qs.set('type', state.typ);
-            if (state.pi) qs.set('pi', state.pi);
+            // A station key (frequency/PI) on the aggregator; a PI otherwise
+            if (state.pi) qs.set(state.pi.includes('/') ? 'station' : 'pi', state.pi);
             if (state.nod) qs.set('node', state.nod);
             if (state.dagar) qs.set('from', utcBound(addDays(new Date(), -Number(state.dagar))));
             return qs.toString();
@@ -728,7 +729,8 @@ const RDSUI = (() => {
         const engine = ev.transcription_duration_sec != null ? `klar på ${fmtDur(ev.transcription_duration_sec)}` : '';
         const tx = txHtml(ev, []);
         const kv = [
-            ['Station', ev.station_ps || ev.long_ps || '–'],
+            ['Station', ev.station_name || ev.station_ps || ev.long_ps || '–'],
+            ...(ev.station_name && ev.station_ps && ev.station_name !== ev.station_ps ? [['PS', ev.station_ps]] : []),
             ['Frekvens', fmtFreq(ev.frequency) || '–'],
             ['PI', ev.pi || '–'],
             ['Programtyp', ev.prog_type || (ev.data && ev.data.prog_type) || '–'],
@@ -856,7 +858,9 @@ const RDSUI = (() => {
         const prefix = data.mqtt.prefix;
         const allStations = stations.slice();
         draft.stations.forEach((pi) => {
-            if (!allStations.some((s) => normPi(s.pi) === normPi(pi))) allStations.push({ pi, ps: pi });
+            if (!allStations.some((s) => normPi(s.pi) === normPi(pi))) {
+                allStations.push({ pi, ps: pi.includes('/') ? pi : `PI ${pi} (alla frekvenser)` });
+            }
         });
         const allNodes = nodes ? nodes.slice() : null;
         if (allNodes) draft.nodes.forEach((n) => { if (!allNodes.includes(n)) allNodes.push(n); });

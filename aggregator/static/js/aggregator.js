@@ -41,7 +41,11 @@ const Aggregator = (() => {
 
     async function loadStations() {
         const data = await api('GET', '/stations');
-        return data.stations.map((s) => ({ pi: s.pi, ps: s.station_ps }));
+        // A station is frequency + PI: two P4 regions can share a PI
+        return data.stations.map((s) => ({
+            pi: s.station_key,
+            ps: [s.display_name || s.station_ps || s.pi, RDSUI.fmtFreq(s.frequency)].filter(Boolean).join(' · '),
+        }));
     }
 
     /** Node names. The node list is admin-only, so without a login the
@@ -66,7 +70,7 @@ const Aggregator = (() => {
 
     function nodeCard(n) {
         const state = !n.enabled ? ['', 'Inaktiverad'] : (n.online ? ['ok', 'Online'] : ['warn', 'Offline']);
-        const stationLine = (s) => [s.ps || s.pi || 'ingen station än',
+        const stationLine = (s) => [s.station_name || s.ps || s.pi || 'ingen station än',
             RDSUI.fmtFreq(s.frequency), s.pi && s.ps ? `PI ${s.pi}` : '',
             s.groups_per_sec != null ? `${s.groups_per_sec} grp/s` : '',
             s.ta ? 'TA pågår' : (s.tp ? 'TP' : '')]
@@ -291,6 +295,89 @@ const Aggregator = (() => {
         ctx.cleanup = () => clearInterval(timer);
     }
 
+    // ----------------------------------------------------------- stations
+
+    function stationCard(s) {
+        const nameFrom = s.name ? 'satt här' : (s.rds_name ? 'från RDS' : 'PS');
+        const area = s.area
+            ? `Område: ${s.area}`
+            : 'Inget område: meddelandena läses runt nodens plats';
+        return `<article class="card" data-key="${esc(s.station_key)}" style="display:flex;flex-direction:column;gap:8px">
+            <div style="display:flex;align-items:center;gap:8px">
+                <h2 style="flex:1;min-width:0;overflow-wrap:anywhere">${esc(s.display_name || s.pi)}</h2>
+                <span class="pill">${esc(RDSUI.fmtFreq(s.frequency) || '?')}</span>
+            </div>
+            <div class="small muted">${esc([`namn ${nameFrom}`, `PI ${s.pi}`, s.ps ? `PS ”${s.ps}”` : '',
+        s.rds_name && s.name ? `RDS: ${s.rds_name}` : ''].filter(Boolean).join(' · '))}</div>
+            <div class="small">${esc(area)}${!s.area && s.suggested_area
+            ? ` <span class="muted">(förslag: ${esc(s.suggested_area)})</span>` : ''}</div>
+            <div class="small muted">${esc([`${s.events} meddelanden`,
+        s.nodes.length ? `hörd av ${s.nodes.join(', ')}` : '',
+        `senast hörd ${ago(s.last_seen_at)}`].filter(Boolean).join(' · '))}</div>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:4px">
+                <a class="btn small" href="#/sok?pi=${encodeURIComponent(s.station_key)}">Meddelanden</a>
+                <button class="btn small" type="button" data-action="name">Ändra namn</button>
+                <button class="btn small" type="button" data-action="area">Ändra område</button>
+                ${!s.area && s.suggested_area ? `<button class="btn small primary" type="button" data-action="suggested">Använd ${esc(s.suggested_area)}</button>` : ''}
+            </div>
+        </article>`;
+    }
+
+    async function stationsView(root, r, ctx) {
+        root.innerHTML = `
+            <div class="page-head"><div class="grow"><h1>Stationer</h1>
+                <p>En station är en frekvens och en PI-kod: två P4-regioner kan ha samma PI.
+                Namnet visas på kartan, i meddelandena och i aviseringarna. Området är där stationens
+                trafikmeddelanden placeras på kartan, t.ex. ”Örebro län”.</p></div></div>
+            <p class="error-text" id="err" role="alert" hidden></p>
+            <div id="list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px"></div>`;
+        const list = root.querySelector('#list');
+        const err = root.querySelector('#err');
+        let stations = [];
+        async function load() {
+            try {
+                stations = (await api('GET', '/stations')).stations;
+            } catch (e) {
+                err.textContent = e.message;
+                err.hidden = false;
+                return;
+            }
+            if (!ctx.alive()) return;
+            err.hidden = true;
+            list.innerHTML = stations.length ? stations.map(stationCard).join('')
+                : '<p class="muted">Inga stationer hörda än.</p>';
+        }
+        list.addEventListener('click', async (e) => {
+            const btn = e.target.closest('button[data-action]');
+            if (!btn) return;
+            const s = stations.find((x) => x.station_key === btn.closest('[data-key]').dataset.key);
+            if (!s) return;
+            const body = { key: s.station_key, name: s.name, area: s.area };
+            if (btn.dataset.action === 'name') {
+                const v = window.prompt(`Namn på stationen på ${RDSUI.fmtFreq(s.frequency)}, t.ex. ”P4 Örebro”. Lämna tomt för att använda namnet från RDS${s.rds_name ? ` (${s.rds_name})` : ''}.`,
+                    s.name || s.display_name || '');
+                if (v === null) return;
+                body.name = v.trim() || null;
+            } else if (btn.dataset.action === 'area') {
+                const v = window.prompt('Var sänder stationen? Skriv ett län, t.ex. ”Örebro län”, eller ”Ort, Län”. Lämna tomt för att använda nodens plats.',
+                    s.area || s.suggested_area || '');
+                if (v === null) return;
+                body.area = v.trim() || null;
+            } else if (btn.dataset.action === 'suggested') {
+                body.area = s.suggested_area;
+            }
+            try {
+                await api('PATCH', '/station-settings', body);
+                toast('Stationen är sparad');
+                load();
+            } catch (x) {
+                err.textContent = x.message;
+                err.hidden = false;
+            }
+        });
+        await load();
+    }
+
     function start() {
         RDSUI.start({
             apiBase: '/api/v1',
@@ -299,7 +386,7 @@ const Aggregator = (() => {
             loadNodes,
             views: { karta: RDSMap.view },
             extraNav: [RDSMap.nav],
-            adminSections: [['noder', 'Noder', nodesView]],
+            adminSections: [['noder', 'Noder', nodesView], ['stationer', 'Stationer', stationsView]],
             cardMeta: RDSMap.cardMeta,
             eventExtras: RDSMap.eventExtras,
         });

@@ -1,0 +1,150 @@
+"""Stations are frequency + PI: two P4 regions sharing a PI (P4 Örebro and
+P4 Värmland both send 0xE224) stay apart, each with its name and area."""
+
+import gzip
+import time
+import uuid
+
+import pytest
+
+import geo_service
+import geolocate
+from aggregator import config, store
+from aggregator.pipeline import Pipeline, alert_payload
+from notify_rules import headline, matches, validate
+
+T = time.time() - 600
+
+
+def _iso(epoch):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def ev(freq, start=T, pi="0xE224", **kw):
+    d = {"rev": 1, "type": "traffic", "state": "start", "pi": pi,
+         "station_ps": "P4 SR", "long_ps": None, "frequency": freq,
+         "prog_type": None, "radiotext": [], "started_at": _iso(start),
+         "ended_at": None, "duration_sec": None, "sent_at": _iso(start),
+         "receiver": "0"}
+    d.update(kw)
+    return d
+
+
+def put(node, body, uid=None):
+    return store.upsert_event(node["id"], uid or str(uuid.uuid4()), body,
+                              config.MATCH_WINDOW_SEC,
+                              config.BROADCAST_END_GRACE_SEC)
+
+
+@pytest.fixture
+def node(agg_store):
+    n, _ = agg_store.create_node("Hemma")
+    return n
+
+
+def count_events():
+    return store._conn().execute("SELECT COUNT(*) FROM events").fetchone()[0]
+
+
+def test_station_key():
+    assert store.station_key("102.8M", "0xe224") == "102800/E224"
+    assert store.station_key("102800000", "E224") == "102800/E224"
+    assert store.station_key("102.8", "E224") == "102800/E224"
+    assert store.station_key(None, "0xE224") == "E224"
+
+
+def test_same_pi_on_two_frequencies_is_two_broadcasts(node):
+    _, _, a = put(node, ev("103.5M"))
+    _, _, b = put(node, ev("102.8M", start=T + 2))
+    assert count_events() == 2
+    assert a["station_key"] == "103500/E224" and b["station_key"] == "102800/E224"
+
+
+def test_same_station_from_two_nodes_is_one_broadcast(agg_store, node):
+    other, _ = agg_store.create_node("Lisa")
+    put(node, ev("102.8M"))
+    put(other, ev("102.8M", start=T + 3))
+    assert count_events() == 1
+
+
+def test_name_from_radiotext_and_admin(node):
+    _, _, row = put(node, ev("102.8M", radiotext=["Du lyssnar på P4 Örebro"]))
+    assert row["station_name"] == "P4 Örebro"
+    _, _, row = put(node, ev("103.5M", start=T + 1, radiotext=["P4 Extra med Lotta"]))
+    assert row["station_name"] == "P4 SR"          # a programme, not a region
+    assert store.set_station("103500/E224", "P4 Värmland", "Värmlands län")
+    assert store.get_event(row["event_uid"])["station_name"] == "P4 Värmland"
+    st = {s["station_key"]: s for s in store.list_stations()}
+    assert st["103500/E224"]["area"] == "Värmlands län"
+    assert st["102800/E224"]["display_name"] == "P4 Örebro"
+
+
+def test_long_ps_wins_over_radiotext():
+    assert store.rds_station_name("P4 SR", "P4 Örebro", ["P4 Värmland"]) == "P4 Örebro"
+    assert store.rds_station_name("P4 SR", "P4 SR", []) is None
+
+
+def test_heartbeat_registers_stations(agg_store, node):
+    agg_store.record_heartbeat(node["id"], "Hemma", "1.0", {"stations": [
+        {"frequency": "102.8M", "pi": "0xE224", "ps": "P4 SR"}]}, 0)
+    assert [s["station_key"] for s in store.list_stations()] == ["102800/E224"]
+    [named] = store.name_stations([{"frequency": "102.8M", "pi": "0xE224",
+                                    "ps": "P4 SR"}])
+    assert named["station_name"] == "P4 SR"
+
+
+def test_events_filter_by_station(node):
+    put(node, ev("103.5M"))
+    put(node, ev("102.8M", start=T + 2))
+    rows, total = store.query_events(station="102800/E224")
+    assert total == 1 and rows[0]["frequency"] == "102.8M"
+    assert store.query_events(station="E224")[1] == 2
+
+
+def test_rule_for_one_station(node):
+    rule = validate({"name": "Örebro", "event_types": ["traffic"],
+                           "stations": ["102800/0xe224"], "topic": "orebro"})
+    assert rule["stations"] == ["102800/E224"]
+    _, _, a = put(node, ev("103.5M", state="end"))
+    _, _, b = put(node, ev("102.8M", start=T + 2, state="end"))
+    assert not matches(rule, a, "Europe/Stockholm")
+    assert matches(rule, b, "Europe/Stockholm")
+    old = validate({"name": "Alla", "event_types": ["traffic"],
+                          "stations": ["E224"], "topic": "alla"})
+    assert matches(old, a, "Europe/Stockholm") and matches(old, b, "Europe/Stockholm")
+
+
+def test_suggest_area():
+    assert store.suggest_area("P4 Örebro") == "Örebro län"
+    assert store.suggest_area("P4 Värmland") == "Värmlands län"
+
+
+@pytest.fixture
+def geo(tmp_path):
+    path = tmp_path / "gaz.tsv.gz"
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        f.write("Karlstad\tcity\t59.38091\t13.50276\tS\t\n"
+                "Örebro\tcity\t59.27412\t15.2066\tT\t\n"
+                "Kumla\ttown\t59.1277\t15.1434\tT\t\n")
+    return geo_service.GeoService(geolocate.create_geolocator("rules"),
+                                  gazetteer_path=str(path))
+
+
+def test_place_of_uses_station_area(agg_store, node, geo):
+    agg_store.set_node_location(node["id"], "Karlstad, Värmlands län")
+    _, _, row = put(node, ev("102.8M"))
+    pipe = Pipeline(transcriber=None, mqtt=None, geo=geo)
+    place, label = pipe.place_of(row)
+    assert place.name == "Karlstad"                 # no area yet: the node
+    store.set_station("102800/E224", "P4 Örebro", "Örebro län")
+    place, label = pipe.place_of(store.get_event(row["event_uid"]))
+    assert place.name == "Örebro" and label == "Örebro län"
+
+
+def test_payloads_carry_the_name(node):
+    _, _, row = put(node, ev("102.8M", state="end",
+                             radiotext=["Trafik i P4 Örebro"]))
+    payload = alert_payload(row, "none")
+    assert payload["station"]["name"] == "P4 Örebro"
+    assert payload["station"]["key"] == "102800/E224"
+    assert headline(dict(row, radiotext=[])) == "Trafikmeddelande på P4 Örebro"

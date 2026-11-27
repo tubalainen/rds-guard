@@ -493,6 +493,19 @@ stations (PS, PI, decode rate), gain and ppm with **Kalibrera om**, the
 queue, and the satellites waiting to be approved. **Admin → Karta** rebuilds
 the map.
 
+**Admin → Stationer** lists every station heard. A station is a frequency
+and a PI code together: P4 regions can share a PI (P4 Örebro on 102.8 and
+P4 Värmland on 103.5 both send 0xE224), so their messages are never merged.
+Each station has:
+
+- a **name**, shown on the map, in the messages and in the pushes. It comes
+  from RDS when RDS says more than PS ("P4 SR"): Long PS, or "P4 Örebro" in
+  the RadioText. *Ändra namn* sets it by hand.
+- an **area**, where its traffic messages are placed on the map: a county
+  ("Örebro län", read from its seat) or "Ort, Län". It is suggested from the
+  name. Without an area, the messages are placed around the node's location
+  as before.
+
 ## Push notifications
 
 Every finished event is checked against the rules you set under
@@ -528,7 +541,7 @@ The message:
   "event_type": "traffic",
   "rule": {"id": 3, "name": "Pendling"},
   "matched_keywords": ["Essingeleden"],
-  "station": {"pi": "0xE203", "ps": "P4 Sthlm"},
+  "station": {"pi": "0xE203", "ps": "P4 Sthlm", "name": "P4 Stockholm"},
   "frequency": "103.3M",
   "started": "2026-11-24T16:12:04Z",
   "duration_sec": 64,
@@ -597,6 +610,11 @@ Bergviksmotet, i riktning mot Grums"):
   Grums"), a double arrow when both directions are, none when the message
   does not say
 - **grey** once a later message says the road is open again
+
+With more than one station, *Alla stationer* above the map picks one, and
+each incident shows the stations that named it. A station's messages are
+read around its area (Admin → Stationer), so an Örebro message heard in
+Karlstad finds the places in Örebro län.
 
 Several messages about the same incident update one pin. Each event card
 shows its places, and each event page has a small map.

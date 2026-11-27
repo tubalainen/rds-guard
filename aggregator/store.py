@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import secrets
 import sqlite3
 import threading
@@ -216,11 +217,244 @@ def init_db(db_path):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_receptions_node ON receptions(node_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_type_pi "
                  "ON events(type, pi, started_at)")
+    # v1.1: a station is frequency + PI (two P4 regions can share a PI)
+    _add_column(conn, "events", "station_key", "TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_station "
+                 "ON events(station_key)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS stations (
+            station_key     TEXT PRIMARY KEY,
+            pi              TEXT NOT NULL,
+            frequency_khz   INTEGER,
+            ps              TEXT,
+            rds_name        TEXT,
+            name            TEXT,
+            area            TEXT,
+            first_seen_at   TEXT NOT NULL,
+            last_seen_at    TEXT NOT NULL
+        )""")
+    _backfill_station_keys(conn)
     ensure_receptions(conn)
     geolocate.init_tables(conn)
     trafikverket.init_tables(conn)
     conn.commit()
     log.info("Aggregator store initialized at %s", _DB_PATH)
+
+
+# ---------------------------------------------------------------------------
+# Stations: frequency + PI
+# ---------------------------------------------------------------------------
+
+def freq_khz(frequency):
+    """'102.8M', '102.8', '102800k' or '102800000' -> 102800, else None."""
+    text = str(frequency or "").strip().upper().removesuffix("HZ")
+    if not text:
+        return None
+    try:
+        if text.endswith("M"):
+            khz = float(text[:-1]) * 1000
+        elif text.endswith("K"):
+            khz = float(text[:-1])
+        else:
+            value = float(text)
+            khz = value / 1000 if value > 1e6 else value if value > 1e4 else value * 1000
+    except ValueError:
+        return None
+    return int(round(khz)) if 30_000 <= khz <= 200_000 else None
+
+
+def norm_pi(pi):
+    p = str(pi or "").strip().upper()
+    return p[2:] if p.startswith("0X") else p
+
+
+def station_key(frequency, pi):
+    """'102800/E224'; just the PI when the frequency is unknown."""
+    khz = freq_khz(frequency)
+    return f"{khz}/{norm_pi(pi)}" if khz else norm_pi(pi)
+
+
+def _backfill_station_keys(conn):
+    rows = conn.execute("SELECT id, frequency, pi FROM events "
+                        "WHERE station_key IS NULL").fetchall()
+    for r in rows:
+        conn.execute("UPDATE events SET station_key = ? WHERE id = ?",
+                     (station_key(r["frequency"], r["pi"]), r["id"]))
+    seen = conn.execute(
+        "SELECT station_key, MAX(pi) AS pi, MAX(frequency) AS frequency, "
+        "MAX(station_ps) AS ps, MIN(COALESCE(started_at, received_at)) AS first, "
+        "MAX(COALESCE(started_at, received_at)) AS last FROM events "
+        "WHERE station_key IS NOT NULL AND station_key NOT IN "
+        "(SELECT station_key FROM stations) GROUP BY station_key").fetchall()
+    for r in seen:
+        conn.execute(
+            "INSERT OR IGNORE INTO stations (station_key, pi, frequency_khz, ps, "
+            "first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (r["station_key"], r["pi"], freq_khz(r["frequency"]),
+             r["ps"], r["first"], r["last"]))
+    if rows:
+        log.info("Gave %d events their station (frequency + PI)", len(rows))
+
+
+# P4 is followed by its region in RadioText ("Du lyssnar på P4 Örebro");
+# these words after P4 are programmes, not regions
+_P4_NAME = re.compile(r"\bP4\s+([A-ZÅÄÖ][a-zåäöé]+(?:[ -][A-ZÅÄÖ][a-zåäöé]+)?)")
+_NOT_REGION = {"extra", "dokumentär", "morgon", "eftermiddag", "kväll", "natt",
+               "nyheter", "sport", "musik", "live", "plus", "play", "direkt",
+               "sr", "radio", "med", "och", "i", "på"}
+
+
+def rds_station_name(ps=None, long_ps=None, radiotext=()):
+    """The station's name as RDS gives it: Long PS when it says more than PS,
+    else "P4 <Region>" found in RadioText, else None."""
+    lps = (long_ps or "").strip()
+    if lps and lps.casefold() != (ps or "").strip().casefold():
+        return lps[:64]
+    if isinstance(radiotext, str):
+        radiotext = [radiotext]
+    for text in radiotext or ():
+        for m in _P4_NAME.finditer(str(text)):
+            region = m.group(1)
+            if region.split()[0].casefold() not in _NOT_REGION:
+                return f"P4 {region}"
+    return None
+
+
+_stations_cache = {"rows": None}
+
+
+def _station_rows():
+    rows = _stations_cache["rows"]
+    if rows is None:
+        rows = {r["station_key"]: dict(r) for r in
+                _conn().execute("SELECT * FROM stations").fetchall()}
+        _stations_cache["rows"] = rows
+    return rows
+
+
+def _stations_changed():
+    _stations_cache["rows"] = None
+
+
+def station_display_name(station):
+    """Name set in Admin, else from RDS, else PS, else PI."""
+    if not station:
+        return None
+    return (station.get("name") or station.get("rds_name") or station.get("ps")
+            or station.get("pi"))
+
+
+def with_station_name(d):
+    """Add station_name (and station_area) to a row with station_key."""
+    st = _station_rows().get(d.get("station_key"))
+    d["station_name"] = station_display_name(st) or d.get("station_ps") or d.get("pi")
+    d["station_area"] = (st or {}).get("area")
+    return d
+
+
+def name_stations(stations):
+    """Copies of a node's reported stations with station_key and
+    station_name added."""
+    out = []
+    for st in stations or []:
+        if not isinstance(st, dict):
+            continue
+        d = dict(st)
+        d["station_key"] = station_key(st.get("frequency"), st.get("pi"))
+        named = _station_rows().get(d["station_key"])
+        d["station_name"] = station_display_name(named) or st.get("ps") or st.get("pi")
+        out.append(d)
+    return out
+
+
+def get_station(key):
+    return _station_rows().get(key)
+
+
+def note_station(conn, frequency, pi, ps=None, long_ps=None, radiotext=(),
+                 ts=None):
+    """Record that a station was heard (inside the caller's transaction).
+    Learns the RDS name the first time it is seen. Returns the key."""
+    key = station_key(frequency, pi)
+    if not norm_pi(pi):
+        return key
+    ts = ts or now_iso()
+    rds = rds_station_name(ps, long_ps, radiotext)
+    cur = conn.execute(
+        "UPDATE stations SET last_seen_at = ?, ps = COALESCE(?, ps), "
+        "rds_name = COALESCE(?, rds_name) WHERE station_key = ?",
+        (ts, ps or None, rds, key))
+    if cur.rowcount == 0:
+        conn.execute(
+            "INSERT OR IGNORE INTO stations (station_key, pi, frequency_khz, ps, "
+            "rds_name, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (key, pi, freq_khz(frequency), ps or None, rds, ts, ts))
+        _stations_changed()
+    else:
+        cached = _station_rows().get(key)
+        if cached is None or (rds and cached.get("rds_name") != rds) or (
+                ps and cached.get("ps") != ps):
+            _stations_changed()
+    return key
+
+
+def suggest_area(name):
+    """'P4 Örebro' -> 'Örebro län' (the county the name points at), or None."""
+    text = re.sub(r"(?i)^\s*(sr\s+)?p4\s+", "", name or "").strip()
+    if not text:
+        return None
+    code = gz.county_code(text)
+    if code is None:
+        try:
+            place = gz.locate_in_file(text)
+        except OSError:
+            place = None
+        code = place.county if place else None
+    return gz.COUNTIES.get(code) if code else None
+
+
+def list_stations():
+    """Every station heard (frequency + PI), with name, area, events and
+    the nodes that reported it."""
+    conn = _conn()
+    counts = {r["station_key"]: dict(r) for r in conn.execute(
+        "SELECT e.station_key, COUNT(*) AS events, "
+        "MAX(COALESCE(e.started_at, e.received_at)) AS last_event_at, "
+        "MAX(e.frequency) AS frequency, "
+        "(SELECT GROUP_CONCAT(DISTINCT n.name) FROM receptions r "
+        " JOIN nodes n ON n.id = r.node_id JOIN events e2 ON e2.id = r.event_id "
+        " WHERE e2.station_key = e.station_key) AS nodes "
+        "FROM events e GROUP BY e.station_key")}
+    out = []
+    for key, st in _station_rows().items():
+        c = counts.get(key, {})
+        d = dict(st)
+        d["display_name"] = station_display_name(st)
+        d["suggested_area"] = None if st.get("area") else suggest_area(d["display_name"])
+        d["events"] = c.get("events", 0)
+        d["last_event_at"] = c.get("last_event_at")
+        d["frequency"] = (f"{st['frequency_khz'] / 1000:g}M" if st.get("frequency_khz")
+                          else c.get("frequency"))
+        d["nodes"] = sorted((c.get("nodes") or "").split(",")) if c.get("nodes") else []
+        # Older clients read these
+        d["station_ps"] = d["display_name"]
+        out.append(d)
+    out.sort(key=lambda d: (d["frequency_khz"] or 0, d["station_key"]))
+    return out
+
+
+def set_station(key, name=None, area=None):
+    """Set (or with ''/None clear) the name and area the owner gave a
+    station. Returns False if no such station."""
+    with _lock:
+        conn = _conn()
+        cur = conn.execute("UPDATE stations SET name = ?, area = ? "
+                           "WHERE station_key = ?",
+                           ((name or "").strip()[:64] or None,
+                            (area or "").strip()[:80] or None, key))
+        conn.commit()
+    _stations_changed()
+    return cur.rowcount > 0
 
 
 def _add_column(conn, table, column, kind):
@@ -599,6 +833,11 @@ def record_heartbeat(node_id, reported_name, version, status, clock_offset):
             "WHERE id = ?",
             (ts, ts, reported_name, version, json.dumps(status),
              clock_offset, node_id))
+        # Stations the node hears are known before their first message
+        for st in (status or {}).get("stations") or []:
+            if isinstance(st, dict) and st.get("pi"):
+                note_station(conn, st.get("frequency"), st["pi"], st.get("ps"),
+                             st.get("long_ps"), (), ts)
         conn.commit()
 
 
@@ -645,7 +884,7 @@ LIVE_NODE_SEC = 180
 def _find_broadcast(conn, node_id, ev, window_sec, now=None):
     """The broadcast a new reception belongs to, or None.
 
-    Same type and PI and, on the aggregator's clock (each node's measured
+    Same type and station (frequency + PI) and, on the aggregator's clock (each node's measured
     offset applied), it started at most window_sec before the broadcast, or
     while the broadcast was going on: before its end if it has ended, else
     within ONGOING_MAX_SEC of its start while one of its open receptions
@@ -670,10 +909,17 @@ def _find_broadcast(conn, node_id, ev, window_sec, now=None):
     lo = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start - 6 * 3600))
     hi = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start + 6 * 3600))
     best = None
+    # Same station: frequency + PI (P4 regions can share a PI). A reception
+    # or broadcast whose frequency is unknown matches on the PI alone.
+    key = station_key(ev.get("frequency"), ev["pi"])
+    same, params = "", [ev["type"], ev["pi"], lo, hi]
+    if "/" in key:
+        same = " AND (station_key IS NULL OR station_key IN (?, ?))"
+        params += [key, norm_pi(ev["pi"])]
     for cand in conn.execute(
             "SELECT id, state FROM events WHERE type = ? AND pi = ? "
-            "AND started_at BETWEEN ? AND ? ORDER BY id DESC",
-            (ev["type"], ev["pi"], lo, hi)).fetchall():
+            "AND started_at BETWEEN ? AND ?" + same + " ORDER BY id DESC",
+            params).fetchall():
         starts, ends, open_live = [], [], False
         for r in conn.execute("SELECT node_id, state, started_at, ended_at "
                               "FROM receptions WHERE event_id = ?", (cand["id"],)):
@@ -812,9 +1058,11 @@ def upsert_event(node_id, event_uid, ev, window_sec=30, end_grace_sec=120):
                 cur = conn.execute(
                     "INSERT INTO events (event_uid, node_id, rev, "
                     + ", ".join(_EVENT_FIELDS)
-                    + ", radiotext, received_at, updated_at) VALUES (?, ?, ?, "
-                    + ", ".join("?" * len(_EVENT_FIELDS)) + ", ?, ?, ?)",
-                    [event_uid, node_id, ev["rev"]] + fields + [radiotext, ts, ts])
+                    + ", radiotext, received_at, updated_at, station_key) "
+                    "VALUES (?, ?, ?, "
+                    + ", ".join("?" * len(_EVENT_FIELDS)) + ", ?, ?, ?, ?)",
+                    [event_uid, node_id, ev["rev"]] + fields
+                    + [radiotext, ts, ts, station_key(ev.get("frequency"), ev["pi"])])
                 event_id = cur.lastrowid
             else:
                 prev_state = conn.execute("SELECT state FROM events WHERE id = ?",
@@ -827,6 +1075,8 @@ def upsert_event(node_id, event_uid, ev, window_sec=30, end_grace_sec=120):
                 [event_uid, event_id, node_id, ev.get("receiver") or "0", ev["rev"]]
                 + fields + [radiotext, ts, ts, ts if ev["state"] == "end" else None])
         _recompute(conn, event_id, ts, end_grace_sec)
+        note_station(conn, ev.get("frequency"), ev["pi"], ev.get("station_ps"),
+                     ev.get("long_ps"), ev.get("radiotext") or (), ts)
         conn.commit()
     return STORED, prev_state, get_event_by_id(event_id)
 
@@ -983,6 +1233,8 @@ def _event_dict(row):
         d["radiotext"] = json.loads(d.get("radiotext") or "[]")
     except (TypeError, ValueError):
         d["radiotext"] = []
+    if "station_key" in d:
+        with_station_name(d)
     if "node_names" in d:
         names = sorted(set((d.get("node_names") or "").split(","))) if d.get("node_names") else []
         d["node_names"] = names or ([d["node_name"]] if d.get("node_name") else [])
@@ -1032,7 +1284,7 @@ def get_event_by_id(event_id):
 
 def query_events(event_type=None, pi=None, node=None, since=None,
                  active=None, limit=50, offset=0, q=None, start=None,
-                 end=None):
+                 end=None, station=None):
     """Query events. Returns (rows, total). node is a node name.
 
     q: free text, every word must appear in the RadioText, transcription or
@@ -1056,6 +1308,14 @@ def query_events(event_type=None, pi=None, node=None, since=None,
     if pi:
         where.append("e.pi = ?")
         params.append(pi)
+    if station:
+        # A station key ("102800/E224"), or a bare PI for every station with it
+        if "/" in station:
+            where.append("e.station_key = ?")
+            params.append(station)
+        else:
+            where.append("UPPER(REPLACE(e.pi, '0x', '')) = ?")
+            params.append(norm_pi(station))
     if node:
         # Heard by that node (any of the broadcast's receptions)
         where.append("EXISTS (SELECT 1 FROM receptions rn JOIN nodes nn "
@@ -1080,24 +1340,6 @@ def query_events(event_type=None, pi=None, node=None, since=None,
         params + [max(1, min(int(limit), 200)), max(0, int(offset))]
     ).fetchall()
     return [_event_dict(r) for r in rows], total
-
-
-def list_stations():
-    """Distinct stations seen in events, with the nodes that reported them."""
-    rows = _conn().execute(
-        "SELECT e.pi, MAX(e.station_ps) AS station_ps, "
-        "MAX(e.frequency) AS frequency, COUNT(*) AS events, "
-        "MAX(COALESCE(e.started_at, e.received_at)) AS last_event_at, "
-        "(SELECT GROUP_CONCAT(DISTINCT n.name) FROM receptions r "
-        " JOIN nodes n ON n.id = r.node_id JOIN events e2 ON e2.id = r.event_id "
-        " WHERE e2.pi = e.pi) AS nodes "
-        "FROM events e GROUP BY e.pi ORDER BY station_ps").fetchall()
-    out = []
-    for r in rows:
-        d = dict(r)
-        d["nodes"] = sorted((d.get("nodes") or "").split(",")) if d.get("nodes") else []
-        out.append(d)
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1271,7 +1513,8 @@ def has_notification(event_uid):
 
 def notify_log_recent(limit=30):
     rows = _conn().execute(
-        "SELECT l.*, e.station_ps, e.started_at, e.radiotext, n.name AS node_name "
+        "SELECT l.*, e.station_ps, e.station_key, e.pi, e.started_at, e.radiotext, "
+        "n.name AS node_name "
         "FROM notify_log l LEFT JOIN events e ON e.event_uid = l.event_uid "
         "LEFT JOIN nodes n ON n.id = e.node_id "
         "WHERE l.status != ? ORDER BY l.id DESC LIMIT ?",
@@ -1284,7 +1527,7 @@ def notify_log_recent(limit=30):
             d["radiotext"] = json.loads(d["radiotext"]) if d["radiotext"] else []
         except (TypeError, ValueError):
             d["radiotext"] = []
-        out.append(d)
+        out.append(with_station_name(d) if d.get("station_key") else d)
     return out
 
 
@@ -1317,12 +1560,12 @@ def purge_notify_log(days):
 def calendar_events(since):
     """Light rows for the archive calendar and statistics (newest first)."""
     rows = _conn().execute(
-        "SELECT e.event_uid, e.type, e.pi, e.station_ps, e.started_at, "
+        "SELECT e.event_uid, e.type, e.pi, e.station_ps, e.station_key, e.started_at, "
         "e.received_at, e.duration_sec, n.name AS node_name "
         "FROM events e JOIN nodes n ON n.id = e.node_id "
         "WHERE COALESCE(e.started_at, e.received_at) >= ? "
         "ORDER BY COALESCE(e.started_at, e.received_at) DESC", (since,)).fetchall()
-    return [dict(r) for r in rows]
+    return [with_station_name(dict(r)) for r in rows]
 
 
 def events_for_preview(since):
@@ -1438,10 +1681,11 @@ def event_briefs(event_uids):
     for n in range(0, len(uids), 500):
         part = uids[n:n + 500]
         for r in _conn().execute(
-                "SELECT e.event_uid, e.started_at, e.station_ps, e.audio_path, "
-                "n.name AS node_name FROM events e JOIN nodes n ON n.id = e.node_id "
+                "SELECT e.event_uid, e.started_at, e.station_ps, e.station_key, e.pi, "
+                "e.audio_path, n.name AS node_name FROM events e "
+                "JOIN nodes n ON n.id = e.node_id "
                 f"WHERE e.event_uid IN ({','.join('?' * len(part))})", part):
-            out[r["event_uid"]] = dict(r)
+            out[r["event_uid"]] = with_station_name(dict(r))
     return out
 
 
