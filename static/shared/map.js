@@ -561,6 +561,18 @@ const RDSMap = (() => {
         let backfillAsked = false;   // started (or tried) from this page
         let backfillRunning = false;
         let timer = null;
+        // A refresh rebuilds every marker, which closes an open popup. The
+        // timed refresh waits until the popup is closed instead.
+        let popupOpen = false;
+        let refreshWaiting = false;
+        map.on('popupopen', () => { popupOpen = true; });
+        map.on('popupclose', () => {
+            popupOpen = false;
+            if (refreshWaiting) {
+                refreshWaiting = false;
+                setTimeout(() => { if (ctx.alive()) refresh(true); }, 0);
+            }
+        });
 
         box.addEventListener('change', () => {
             history = box.checked;
@@ -585,7 +597,8 @@ const RDSMap = (() => {
             schedule();
         }
 
-        async function refresh() {
+        async function refresh(timed = false) {
+            if (timed && popupOpen) { refreshWaiting = true; return; }
             let data;
             const asked = history;
             try {
@@ -605,6 +618,8 @@ const RDSMap = (() => {
                 root.querySelector('#map-trv-label').hidden = true;   // older server
             }
             if (!ctx.alive() || asked !== history) return;
+            // A popup opened while the data was being fetched
+            if (timed && popupOpen) { refreshWaiting = true; return; }
             const incidents = (data.incidents || []).filter((i) => history || ageHours(i) <= HOURS);
             if (first && !history && focus && !incidents.some((i) => String(i.id) === focus)) {
                 // A link to an older incident (from the archive): show the history
@@ -713,7 +728,7 @@ const RDSMap = (() => {
             clearTimeout(timer);
             timer = setTimeout(async () => {
                 if (!ctx.alive()) return;
-                if (!document.hidden) await refresh();
+                if (!document.hidden) await refresh(true);
                 schedule();
             }, backfillRunning ? 4000 : 60000);
         }
