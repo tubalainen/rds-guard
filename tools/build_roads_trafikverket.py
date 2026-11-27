@@ -1,11 +1,12 @@
 """Build the road and junction registries from Trafikverket's road database.
 
 Fetches from Trafikverket's open API (NVDB):
-  - Vägnummer: every numbered road (E-roads, riksvägar, länsvägar) with its
-    line -> geodata/roads-se.tsv.gz, the same format as tools/build_roads.py
+  - Vägnummer: the E-roads, riksvägar and länsvägar with their lines -> geodata/roads-se.tsv.gz, the same format as tools/build_roads.py
     (OpenStreetMap), read by roads.py
-  - Korsning: the named interchanges and junctions (trafikplatser, "motet")
-    -> geodata/junctions-se.tsv.gz, read by gazetteer.py next to the
+  - Korsning: the interchanges (trafikplatser, "Bergviksmotet"), and the
+    names of Trafikverket's traffic cameras, speed cameras and road weather
+    stations ("Stolpen västergående" on E18 -> Stolpen by E18)
+    -> geodata/places-trafikverket.tsv.gz, read by gazetteer.py next to the
     OpenStreetMap names
 
 Needs a free key from https://data.trafikverket.se/ in TRAFIKVERKET_API_KEY
@@ -55,11 +56,12 @@ def xml_escape(text):
             .replace("<", "&lt;").replace(">", "&gt;"))
 
 
-def request(key, objecttype, filters="", includes=(), limit=PAGE, skip=0):
+def request(key, objecttype, filters="", includes=(), limit=PAGE, skip=0,
+            namespace=NAMESPACE, schema=SCHEMA):
     inc = "".join(f"<INCLUDE>{i}</INCLUDE>" for i in includes)
     body = (f'<REQUEST><LOGIN authenticationkey="{xml_escape(key)}"/>'
-            f'<QUERY objecttype="{objecttype}" namespace="{NAMESPACE}" '
-            f'schemaversion="{SCHEMA}" limit="{limit}" skip="{skip}">'
+            f'<QUERY objecttype="{objecttype}" namespace="{namespace}" '
+            f'schemaversion="{schema}" limit="{limit}" skip="{skip}">'
             f"<FILTER>{filters}</FILTER>{inc}</QUERY></REQUEST>")
     req = urllib.request.Request(API_URL, data=body.encode("utf-8"),
                                  headers={"Content-Type": "text/xml"})
@@ -87,7 +89,7 @@ def request(key, objecttype, filters="", includes=(), limit=PAGE, skip=0):
     return result.get(objecttype, [])
 
 
-def fetch_all(key, objecttype, filters, includes, cache, label):
+def fetch_all(key, objecttype, filters, includes, cache, label, **kw):
     """All rows, page by page, each page cached."""
     rows, skip, page = [], 0, 1
     while True:
@@ -98,7 +100,7 @@ def fetch_all(key, objecttype, filters, includes, cache, label):
             log(f"{objecttype} {label} page {page}: {len(part)} rows (cached)")
         else:
             t0 = time.time()
-            part = request(key, objecttype, filters, includes, PAGE, skip)
+            part = request(key, objecttype, filters, includes, PAGE, skip, **kw)
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(part, f)
             log(f"{objecttype} {label} page {page}: {len(part)} rows "
@@ -149,35 +151,102 @@ def still_valid(row, today):
     return not to or to >= today
 
 
+# Sweden's E-roads; no riksväg has these numbers. (NVDB's Europaväg flag
+# is not reliable: E18 is 0 in Värmland and -1 in Örebro län.)
+E_ROADS = {4, 6, 10, 12, 14, 16, 18, 20, 22, 45, 47, 55, 65}
+
+
 def road_key(row):
+    """'E18', or the road number ('61', '236'). Länsvägar keep their county
+    letter in the registry: their numbers repeat from county to county."""
     num = row.get("Huvudnummer")
-    if num is None:
+    if num is None or int(num) <= 0:
         return None
-    return f"E{int(num)}" if row.get("Europaväg") in (1, True, "1", "true") else str(int(num))
+    return f"E{int(num)}" if int(num) in E_ROADS else str(int(num))
+
+
+def road_county(key, letter):
+    return letter if key.isdigit() and int(key) >= 100 else ""
 
 
 def junction_names(row):
-    """Names the radio may use: 'Bergvik' -> 'Bergvik', 'Bergviksmotet'."""
-    names = []
-    for raw in (row.get("Trafikplatsnamn"), row.get("Namn")):
-        name = re.sub(r"(?i)^(trafikplats|tpl)\s+", "", (raw or "").strip())
-        if not name or name in names:
-            continue
-        names.append(name)
-    return names
+    """The interchange's name ('Bergviksmotet', 'Hynboholm'); street pairs
+    ('Horsengatan/Mossgatan') are left out."""
+    name = re.sub(r"(?i)^(trafikplats|tpl)\s+", "", (row.get("Trafikplatsnamn") or "").strip())
+    return [name] if name and "/" not in name else []
 
 
 ROAD_FIELDS = ("Huvudnummer", "Undernummer", "Europaväg", "Länstillhörighet",
                "Geometry", "Deleted", "Valid_To")
-JUNCTION_FIELDS = ("Trafikplatsnamn", "Trafikplatsnummer", "Namn",
-                   "Geometry", "Deleted", "Valid_To")
-JUNCTION_FILTER = ('<OR><EXISTS name="Trafikplatsnamn" value="true"/>'
-                   '<EXISTS name="Namn" value="true"/></OR>')
+JUNCTION_FIELDS = ("Trafikplatsnamn", "Trafikplatsnummer", "Geometry",
+                   "Deleted", "Valid_To")
+JUNCTION_FILTER = '<EXISTS name="Trafikplatsnamn" value="true"/>'
+ROAD_FILTER = '<GT name="Huvudnummer" value="0"/>'
+
+
+_HEADING = re.compile(r"(?i)[,\s]*\b(?:(?:söder|norr|öster|väster)gående|riktning\s+\S+|"
+                      r"mot\s+.+|norra|södra|östra|västra|[nsöv])\s*$")
+ROAD_IN_TEXT = re.compile(r"\b(?:E\s?(\d{1,2})|(?:väg|riksväg|rv)\s+(\d{1,3}))\b", re.I)
+
+
+def spot_name(name):
+    """'Kroksvik, östergående ' -> 'Kroksvik'; 'Nikkalakorsning mot Kalix'
+    -> 'Nikkalakorsning'."""
+    name = (name or "").strip()
+    while True:
+        cut = _HEADING.sub("", name).strip(" ,")
+        if cut == name or not cut:
+            return name
+        name = cut
+
+
+def spot_road(text):
+    """'E4', '61', 'Kameran är placerad på E45 vid …' -> 'E45' / '61'."""
+    text = (text or "").strip()
+    if re.fullmatch(r"E?\s?\d{1,3}", text):
+        num = int(re.sub(r"\D", "", text))
+        return f"E{num}" if num in E_ROADS else (str(num) if num < 100 else "")
+    m = ROAD_IN_TEXT.search(text)
+    if not m:
+        return ""
+    if m.group(1):
+        return f"E{int(m.group(1))}"
+    num = int(m.group(2))
+    return (f"E{num}" if num in E_ROADS else str(num)) if num < 100 else ""
+
+
+SPOT_SOURCES = (
+    # objecttype, namespace, schema, fields, road field
+    ("TrafficSafetyCamera", "Road.Infrastructure", "1.0",
+     ("Name", "RoadNumber", "Geometry", "Deleted"), "RoadNumber"),
+    ("Camera", "Road.Infrastructure", "1.0",
+     ("Name", "Description", "Geometry", "Deleted"), "Description"),
+    ("WeatherMeasurepoint", "Road.WeatherInfo", "2.1",
+     ("Name", "Geometry"), None),
+)
+
+
+def fetch_spots(key, cache):
+    """[(name, lat, lon, road)] from cameras and weather stations."""
+    out = []
+    for objecttype, ns, schema, fields, road_field in SPOT_SOURCES:
+        rows = fetch_all(key, objecttype, "", fields, cache, "all",
+                         namespace=ns, schema=schema)
+        for r in rows:
+            p = wkt_point(wgs84(r))
+            name = spot_name(r.get("Name"))
+            if p is None or r.get("Deleted") or not name or "/" in name:
+                continue
+            road = spot_road(r.get(road_field)) if road_field else ""
+            out.append((name, p[0], p[1], road))
+        log(f"{objecttype}: {len(rows)} rows")
+    return out
 
 
 def probe(key):
     for objecttype, filters, fields in (
-            ("Vägnummer", '<EQ name="Länstillhörighet" value="17"/>', ROAD_FIELDS),
+            ("Vägnummer", ROAD_FILTER + '<EQ name="Länstillhörighet" value="17"/>',
+             ROAD_FIELDS),
             ("Vägnummer", '<EQ name="Huvudnummer" value="18"/>', ROAD_FIELDS),
             ("Korsning", JUNCTION_FILTER, JUNCTION_FIELDS)):
         rows = request(key, objecttype, filters, fields, limit=3)
@@ -208,8 +277,8 @@ def main():
     by_key, skipped = {}, 0
     for n, (code, letter) in enumerate(sorted(COUNTIES.items()), 1):
         rows = fetch_all(key, "Vägnummer",
-                         f'<EQ name="Länstillhörighet" value="{code}"/>',
-                         ROAD_FIELDS, cache, letter)
+                         ROAD_FILTER + f'<EQ name="Länstillhörighet" value="{code}"/>',
+                         ROAD_FIELDS, cache, "all_" + letter)
         kept = 0
         for r in rows:
             k = road_key(r)
@@ -217,8 +286,7 @@ def main():
             if k is None or not lines or not still_valid(r, today):
                 skipped += 1
                 continue
-            county = "" if k.startswith("E") or int(k) < 100 else letter
-            by_key.setdefault((k, county), []).extend(lines)
+            by_key.setdefault((k, road_county(k, letter)), []).extend(lines)
             kept += 1
         log(f"county {n}/{len(COUNTIES)} {letter}: {len(rows)} rows, {kept} kept, "
             f"{len(by_key)} roads so far")
@@ -241,15 +309,15 @@ def main():
     log(f"Wrote {len(rows_out)} lines ({points} points) for {len(by_key)} roads "
         f"to {out} ({os.path.getsize(out) // 1024} kB); {skipped} rows skipped")
 
-    # Junctions: the nodes of one interchange are averaged into one point
+    # Interchanges: the nodes of one are averaged into one point
     rows = fetch_all(key, "Korsning", JUNCTION_FILTER, JUNCTION_FIELDS, cache, "all")
     groups = {}
     for r in rows:
         p = wkt_point(wgs84(r))
         if p is None or not still_valid(r, today):
             continue
-        kind = "junction" if r.get("Trafikplatsnamn") else "crossing"
-        number = r.get("Trafikplatsnummer") if kind == "junction" else None
+        kind = "junction"
+        number = r.get("Trafikplatsnummer")
         for name in junction_names(r):
             # Nodes of one interchange lie close together; the same name
             # far away is another place
@@ -260,10 +328,21 @@ def main():
                 clusters.append([p])
             else:
                 near.append(p)
-    out = os.path.join(outdir, "junctions-se.tsv.gz")
+    # Cameras and weather stations: one spot per name and place
+    spots = []
+    for name, lat, lon, road in fetch_spots(key, cache):
+        same = next((s for s in spots if s[0] == name
+                     and abs(s[1] - lat) < 0.01 and abs(s[2] - lon) < 0.02), None)
+        if same is None:
+            spots.append([name, lat, lon, road])
+        elif road and not same[3]:
+            same[3] = road
+
+    out = os.path.join(outdir, "places-trafikverket.tsv.gz")
     count = 0
     with gzip.open(out, "wt", encoding="utf-8") as f:
-        f.write("# RDS Guard junction registry. Data: Trafikverket, NVDB (CC0)\n")
+        f.write("# RDS Guard places from Trafikverket: interchanges (NVDB), "
+                "cameras, weather stations. Data: Trafikverket (CC0)\n")
         f.write(f"# built {today} by tools/build_roads_trafikverket.py\n")
         f.write("# name\tkind\tlat\tlon\tcounty\tref\n")
         for (name, kind, number), clusters in sorted(groups.items(), key=lambda kv: kv[0][:2]):
@@ -272,7 +351,10 @@ def main():
                 lon = sum(q[1] for q in pts) / len(pts)
                 f.write(f"{name}\t{kind}\t{lat:.5f}\t{lon:.5f}\t\t{number or ''}\n")
                 count += 1
-    log(f"Wrote {count} junctions from {len(rows)} rows to {out}")
+        for name, lat, lon, road in sorted(spots):
+            f.write(f"{name}\tlandmark\t{lat:.5f}\t{lon:.5f}\t\t{road}\n")
+            count += 1
+    log(f"Wrote {count} places ({len(spots)} cameras and weather stations) from {len(rows)} rows to {out}")
 
 
 if __name__ == "__main__":

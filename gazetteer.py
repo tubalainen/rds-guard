@@ -34,10 +34,10 @@ DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # the same name that traffic messages mean. Plain text, edited in the repo.
 LOCAL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "geodata", "places-local.tsv")
-# Interchanges and named junctions from Trafikverket's road database (NVDB),
-# built by tools/build_roads_trafikverket.py; optional
+# Interchanges (trafikplatser, NVDB), camera and road weather station names
+# from Trafikverket, built by tools/build_roads_trafikverket.py; optional
 JUNCTIONS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              "geodata", "junctions-se.tsv.gz")
+                              "geodata", "places-trafikverket.tsv.gz")
 LOCAL_REPLACES_KM = 5     # an OSM name this close to a local one is the same place
 LOCAL_BONUS = 3           # a local name wins over others with the same name
 
@@ -57,14 +57,14 @@ KIND_WEIGHT = {
     "city": 6, "town": 5, "village": 4, "junction": 4, "roundabout": 3,
     "tunnel": 3, "bridge": 3, "rest_area": 3, "suburb": 3, "quarter": 2,
     "neighbourhood": 2, "hamlet": 2, "locality": 1, "isolated_dwelling": 1,
-    "water": 1, "airport": 3, "landmark": 3, "crossing": 2,
+    "water": 1, "airport": 3, "landmark": 3,
 }
 KIND_RADIUS_M = {
     "junction": 500, "roundabout": 300, "tunnel": 500, "bridge": 400,
     "rest_area": 400, "isolated_dwelling": 800, "hamlet": 1000,
     "neighbourhood": 1000, "quarter": 1000, "suburb": 1500, "locality": 1500,
     "village": 1500, "airport": 1500, "water": 2500, "town": 3000,
-    "city": 4000, "landmark": 600, "crossing": 300,
+    "city": 4000, "landmark": 600,
 }
 SETTLEMENTS = ("city", "town", "village", "suburb", "quarter",
                "neighbourhood", "hamlet", "locality", "isolated_dwelling")
@@ -455,7 +455,8 @@ def junction_aliases(name):
 
 
 def read_junctions(path, existing, keep=lambda lat, lon: True):
-    """Trafikverket's interchanges (kind junction) and named crossings, less
+    """Trafikverket's interchanges (kind junction) and camera and weather
+    station names (kind landmark, ref the road), less
     the names an existing place already has within LOCAL_REPLACES_KM."""
     if not path or not os.path.exists(path):
         return []

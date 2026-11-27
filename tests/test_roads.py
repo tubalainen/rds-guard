@@ -145,9 +145,16 @@ def test_wkt_lines_and_points():
 
 
 def test_nvdb_road_keys():
-    assert tv.road_key({"Huvudnummer": 18, "Europaväg": True}) == "E18"
-    assert tv.road_key({"Huvudnummer": 61, "Europaväg": False}) == "61"
+    assert tv.road_key({"Huvudnummer": 18, "Europaväg": 0}) == "E18"
+    assert tv.road_key({"Huvudnummer": 61, "Europaväg": -1}) == "61"
+    assert tv.road_key({"Huvudnummer": 236}) == "236"
+    assert tv.road_county("236", "S") == "S" and tv.road_county("61", "S") == ""
     assert tv.road_key({}) is None
+
+
+def test_street_pairs_are_not_interchanges():
+    assert tv.junction_names({"Trafikplatsnamn": "Bergviksmotet"}) == ["Bergviksmotet"]
+    assert tv.junction_names({"Trafikplatsnamn": "Horsengatan/Mossgatan"}) == []
 
 
 def test_old_and_deleted_rows_are_left_out():
@@ -181,3 +188,20 @@ def test_trafikverket_junctions_join_the_registry(tmp_path):
     assert names.count("Bergviksmotet") == 1
     assert "Bergvik" in names and "Skutberget" in names and "Skutbergetsmotet" in names
     assert "Karlstad" not in names
+
+
+@pytest.mark.parametrize("raw,name", [
+    ("Kroksvik, östergående ", "Kroksvik"), ("Stolpen västergående", "Stolpen"),
+    ("Nikkalakorsning mot Kalix", "Nikkalakorsning"), ("Falutorget Norra", "Falutorget"),
+    ("Bodetta", "Bodetta"), ("Nyeds kyrka, södergående", "Nyeds kyrka"),
+])
+def test_camera_names(raw, name):
+    assert tv.spot_name(raw) == name
+
+
+@pytest.mark.parametrize("text,road", [
+    ("E4", "E4"), ("61", "61"), ("720", ""), ("Kameran är placerad på E45 vid Falutorget", "E45"),
+    ("Kameran sitter på väg 63 vid Ökna", "63"), ("", ""),
+])
+def test_camera_roads(text, road):
+    assert tv.spot_road(text) == road
