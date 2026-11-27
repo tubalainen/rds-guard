@@ -205,10 +205,11 @@ class Pipeline(Hooks):
         if self._geo is None:
             return None, None
         st = store.get_station(row.get("station_key")) if row.get("station_key") else None
-        if st and st.get("area"):
-            place = self._geo.locate_area(st["area"])
+        area = store.station_area(st)
+        if area:
+            place = self._geo.locate_area(area)
             if place is not None:
-                return place, st["area"]
+                return place, area
         ids = [row["node_id"]] + [i for i in store.event_node_ids(row["id"])
                                   if i != row["node_id"]]
         for node_id in ids:

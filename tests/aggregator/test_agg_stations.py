@@ -208,3 +208,49 @@ async def test_station_settings_api(web, node):
     data = await (await web.get("/api/v1/stations")).json()
     assert {s["station_key"]: s["display_name"] for s in data["stations"]} == {
         "102800/E224": "P4 Örebro", "103500/E224": "P4 SR"}
+
+
+def test_cut_short_ps_names_its_p4_region():
+    assert store.rds_station_name("P4 Värml") == "P4 Värmland"
+    assert store.rds_station_name("P4 Örebr") == "P4 Örebro"
+    assert store.rds_station_name("P4 Väst") == "P4 Väst"
+    assert store.rds_station_name("P4 Väster") is None      # two regions
+    assert store.rds_station_name("P4 SR") is None
+    assert store.rds_station_name("P4 Extra") is None
+    assert store.suggest_area("P4 Värml") == "Värmlands län"
+
+
+def test_shared_programme_pi_takes_the_name_of_its_frequency(node):
+    # 103.5 in the regional hours (0xE824 "P4 Värml"), and in the evening
+    # with the shared P4 programme (0xE224 "P4 SR")
+    put(node, ev("103.5M", pi="0xE824", station_ps="P4 Värml"))
+    _, _, row = put(node, ev("103.5M", start=T + 3600))
+    put(node, ev("100.3M", start=T + 3700))
+    st = {s["station_key"]: s for s in store.list_stations()}
+    assert st["103500/E824"]["display_name"] == "P4 Värmland"
+    assert st["103500/E224"]["display_name"] == "P4 Värmland"
+    assert st["103500/E224"]["inherited_from"] == "103500/E824"
+    assert st["100300/E224"]["display_name"] == "P4 SR"     # nothing to go by
+    store.set_station("103500/E824", None, "Värmlands län")
+    assert store.with_station_name(dict(row))["station_area"] == "Värmlands län"
+    assert store.list_stations()[1]["suggested_area"] is None
+    # A name of its own wins
+    store.set_station("103500/E224", "P4 Riks", None)
+    assert store.get_station("103500/E224")["inherited_name"] is None
+    assert store.with_station_name(dict(row))["station_name"] == "P4 Riks"
+
+
+def test_two_names_on_one_frequency_are_not_guessed(node):
+    put(node, ev("102.8M", pi="0xE524", station_ps="P4 Örebr"))
+    put(node, ev("102.8M", pi="0xE624", station_ps="P4 Värml", start=T + 60))
+    put(node, ev("102.8M", start=T + 3600))
+    assert store.get_station("102800/E224")["inherited_name"] is None
+
+
+def test_older_cut_short_ps_is_learned_at_start(agg_store, node):
+    put(node, ev("103.5M", pi="0xE824", station_ps="P4 Värml"))
+    conn = store._conn()
+    conn.execute("UPDATE stations SET rds_name = NULL")
+    conn.commit()
+    store.init_db(store._DB_PATH)
+    assert store.get_station("103500/E824")["rds_name"] == "P4 Värmland"

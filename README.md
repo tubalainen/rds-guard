@@ -522,9 +522,14 @@ merged.
 Each station has:
 
 - a **name**, shown on the map, in the messages and in the pushes. It comes
-  from RDS when RDS says more than PS ("P4 SR"): Long PS, or one of the 25
-  P4 regions named in the RadioText ("P4 Örebro"), learnt the first time.
-  *Ändra namn* sets it by hand.
+  from RDS when RDS says more than PS ("P4 SR"): Long PS, a PS that names
+  one of the 25 P4 regions even when cut short to 8 characters ("P4 Värml"
+  is P4 Värmland), or a region named in the RadioText ("P4 Örebro"), learnt
+  the first time. A station with no name of its own takes the name and area
+  of the other PI on the same frequency: P4 sends its region's PI and PS
+  ("0xE824", "P4 Värml") in the regional hours, and the shared PI and PS
+  ("0xE224", "P4 SR") when it sends the common P4 programme in the evenings
+  and at weekends. *Ändra namn* sets it by hand.
 - an **area**, where its traffic messages are placed on the map: a county
   ("Örebro län", read from its seat) or "Ort, Län". It is suggested from the
   name. Without an area, the messages are placed around the node's location

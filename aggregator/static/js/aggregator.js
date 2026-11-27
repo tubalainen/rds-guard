@@ -298,9 +298,11 @@ const Aggregator = (() => {
     // ----------------------------------------------------------- stations
 
     function stationCard(s) {
-        const nameFrom = s.name ? 'satt här' : (s.rds_name ? 'från RDS' : 'PS');
+        const nameFrom = s.name ? 'satt här' : (s.rds_name ? 'från RDS'
+            : (s.inherited_name ? `från ${s.inherited_from} (samma frekvens)` : 'PS'));
         const area = s.area
             ? `Område: ${s.area}`
+            : s.inherited_area ? `Område: ${s.inherited_area} (från ${s.inherited_from})`
             : 'Inget område: meddelandena läses runt nodens plats';
         return `<article class="card" data-key="${esc(s.station_key)}" style="display:flex;flex-direction:column;gap:8px">
             <div style="display:flex;align-items:center;gap:8px">
