@@ -298,3 +298,157 @@ def test_an_airspy_with_a_fixed_gain_is_not_calibrated():
     rtl = receivers.parse({"receivers": [{"serial": "1", "frequencies": ["103.5M"],
                                           "gain": 19.7}]})[0]
     assert gt.Tuner._auto(rtl)                       # its ppm is still measured
+
+
+# ------------------------------------------------- LNA / Mixer / VGA by hand
+
+def _airspy_receiver(**extra):
+    return receivers.parse({"receivers": [{"serial": "0x62CC68FF3584805B",
+                                           "frequencies": ["102.8M"], **extra}]})[0]
+
+
+def test_the_linearity_table_is_libairspys():
+    assert sdr.AIRSPY_LINEARITY[0] == (0, 0, 4)
+    assert sdr.AIRSPY_LINEARITY[8] == (3, 0, 10)
+    assert sdr.AIRSPY_LINEARITY[21] == (14, 12, 13)
+    assert len(sdr.AIRSPY_LINEARITY) == 22
+
+
+def test_stages_in_receivers_yml_are_optional_and_checked():
+    r = _airspy_receiver()
+    assert r.stages == {} and not r.gain_fixed
+    r = _airspy_receiver(lna=4, mixer=3, vga=9)
+    assert r.stages == {"lna": 4, "mixer": 3, "vga": 9} and r.gain_fixed
+    r = _airspy_receiver(lna=4)
+    assert r.stages == {"lna": 4} and not r.gain_fixed      # the rest is calibrated
+    r = _airspy_receiver(lna=4, mixer=3, vga=9, gain=10)
+    assert any("gain: is not used" in w for w in r.warnings)
+    with pytest.raises(receivers.ReceiverError, match="lna must be 0-14"):
+        _airspy_receiver(lna=15)
+    with pytest.raises(receivers.ReceiverError, match="vga must be a whole number"):
+        _airspy_receiver(vga="hög")
+    rtl = receivers.parse({"receivers": [{"serial": "00000101", "frequencies": ["102.8M"],
+                                          "lna": 4}]})[0]
+    assert rtl.stages == {} and any("for an Airspy" in w for w in rtl.warnings)
+
+
+def _arg(cmd, flag):
+    return cmd[cmd.index(flag) + 1]
+
+
+def test_stages_by_hand_go_to_airspy_rx_instead_of_g():
+    all3 = sdr.Airspy("0x62CC68FF3584805B", [2_500_000], "Airspy R2",
+                      {"lna": 4, "mixer": 3, "vga": 9})
+    cmd = all3.stream_cmd(102_800_000, 12, 0)
+    assert "-g" not in cmd
+    assert (_arg(cmd, "-l"), _arg(cmd, "-m"), _arg(cmd, "-v")) == ("4", "3", "9")
+    # Only LNA by hand: Mixer and VGA follow the linearity step
+    lna = sdr.Airspy("0x1", [2_500_000], stages={"lna": 4})
+    cmd = lna.capture_cmd(102_800_000, 8, 0, 1000)
+    assert (_arg(cmd, "-l"), _arg(cmd, "-m"), _arg(cmd, "-v")) == ("4", "0", "10")
+    cmd = lna.capture_cmd(102_800_000, 21, 0, 1000)
+    assert (_arg(cmd, "-l"), _arg(cmd, "-m"), _arg(cmd, "-v")) == ("4", "12", "13")
+    # None by hand: -g as before
+    plain = sdr.Airspy("0x1", [2_500_000])
+    assert _arg(plain.stream_cmd(102_800_000, 8, 0), "-g") == "8"
+    assert "-l" not in plain.stream_cmd(102_800_000, 8, 0)
+    assert plain.describe_gain(8) == "LNA 3, Mixer 0, VGA 10 (linearity 8)"
+    assert all3.describe_gain(8) == "LNA 4, Mixer 3, VGA 9 (by hand)"
+
+
+def test_the_agc_is_turned_off_before_a_run_by_hand():
+    seen = []
+    sdr.Airspy("0x1", [3_000_000]).prepare(agc_off=seen.append)
+    assert seen == []                                    # -g turns it off itself
+    sdr.Airspy("0x1", [3_000_000], stages={"vga": 9}).prepare(agc_off=seen.append)
+    assert seen == ["0x0000000000000001"]
+
+
+def test_agc_off_through_libairspy(monkeypatch):
+    import ctypes
+    calls = []
+
+    class Fn:
+        def __init__(self, name, rc=0):
+            self.name, self.rc = name, rc
+
+        def __call__(self, *args):
+            calls.append((self.name, args))
+            return self.rc
+
+    class Lib:
+        def __init__(self, path):
+            assert path == "libairspy.so.0"
+            for n in ("airspy_open_sn", "airspy_set_lna_agc", "airspy_set_mixer_agc",
+                      "airspy_close"):
+                setattr(self, n, Fn(n))
+    monkeypatch.setattr(ctypes, "CDLL", Lib)
+    sdr._airspy_agc_off("0x62CC68FF3584805B")
+    assert [c[0] for c in calls] == ["airspy_open_sn", "airspy_set_lna_agc",
+                                     "airspy_set_mixer_agc", "airspy_close"]
+    assert calls[0][1][1] == 0x62CC68FF3584805B
+    assert calls[1][1][1] == 0 and calls[2][1][1] == 0
+
+    class Busy(Lib):
+        def __init__(self, path):
+            super().__init__(path)
+            self.airspy_open_sn = Fn("airspy_open_sn", rc=-1000)
+    monkeypatch.setattr(ctypes, "CDLL", Busy)
+    with pytest.raises(dongles.DongleError, match="AGC"):
+        sdr._airspy_agc_off("0x1")
+
+
+def test_all_three_by_hand_is_not_calibrated_but_one_is():
+    assert not gt.Tuner._auto(_airspy_receiver(lna=4, mixer=3, vga=9))
+    assert gt.Tuner._auto(_airspy_receiver(lna=4))
+
+
+def test_a_calibration_keeps_the_stages_set_by_hand():
+    r = _airspy_receiver(lna=4)
+    radio = sdr.Airspy(r.serial, [2_500_000], "Airspy R2", r.stages)
+    cmds = []
+
+    def run(cmd, **kw):
+        import types
+        cmds.append(cmd)
+        n = int(radio.fs * 0.6)
+        return types.SimpleNamespace(stdout=to_s16(fm_station(n, 250_000, radio.fs), 0.3),
+                                     stderr=b"")
+    capture = lambda i, c, g, p, s: sdr.capture(radio, c, g, p, s, run=run)
+    gt.calibrate(r, None, [0.0, 8.0, 21.0], capture_fn=capture,
+                 quality_fn=lambda pcm, s: (5.0, 0), progress=lambda m: None, radio=radio)
+    assert cmds and all(_arg(c, "-l") == "4" and "-g" not in c for c in cmds)
+    assert {_arg(c, "-v") for c in cmds} >= {"4", "13"}         # VGA still swept
+
+
+def test_steps_that_give_the_same_stages_are_swept_once():
+    r = _airspy_receiver(lna=4, mixer=3)
+    radio = sdr.Airspy(r.serial, [2_500_000], "Airspy R2", r.stages)
+    swept = []
+
+    def capture(i, c, g, p, s):
+        if s == gt.SWEEP_SEC:
+            swept.append(g)
+        return to_s16(fm_station(int(radio.fs * 0.3), 250_000, radio.fs), 0.3)
+    gt.calibrate(r, None, radio.gains, capture_fn=capture,
+                 quality_fn=lambda pcm, s: (5.0, 0), progress=lambda m: None, radio=radio)
+    # Only VGA moves: 4..13, each once, at its lowest step
+    assert [radio.stage_values(g)[2] for g in swept] == list(range(4, 14))
+    assert len(set(radio.stage_values(g) for g in swept)) == len(swept)
+
+
+def test_changed_stages_calibrate_again(monkeypatch):
+    import event_store
+    store = {}
+    monkeypatch.setattr(event_store, "get_calibration", lambda serial: store.get(serial))
+    r = _airspy_receiver(lna=4)
+    tuner = gt.Tuner(sat=None)
+    store[r.serial] = {"frequencies": ["102.8M"], "gain": 9.0, "ppm": None,
+                       "calibrated_at": "2026-11-27T20:00:00",
+                       "result": {"stations": {}, "stages": {"lna": 4}}}
+    assert tuner._stored(r) is not None
+    assert tuner._stored(_airspy_receiver(lna=8)) is None          # pin changed
+    assert tuner._stored(_airspy_receiver()) is None               # pin removed
+    # A calibration saved before stages existed counts as none by hand
+    store[r.serial]["result"] = {"stations": {}}
+    assert tuner._stored(_airspy_receiver()) is not None
