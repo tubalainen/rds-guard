@@ -85,7 +85,7 @@ def test_probe_collects_then_reports_once():
     assert len(got) == 1
     kept, n, elapsed = got[0]
     assert dc.KEEP_SEC * FS <= kept < dc.KEEP_SEC * FS + 16_380
-    assert elapsed >= dc.PROBE_SEC and n > 0
+    assert elapsed >= dc.PROBE_SEC - dc.SETTLE_SEC - 0.01 and n > 0   # counted after settling
 
 
 def test_channelizer_output_is_the_same_with_a_probe():
@@ -151,3 +151,20 @@ def test_a_dongle_that_gives_flat_samples_stops_the_receiver(monkeypatch):
     assert ok is False
     snap = p.status.snapshot()
     assert snap["state"] == "error" and "do not change" in snap["error"]
+
+
+def test_the_rate_is_measured_after_the_dongle_has_started():
+    """On docker01 an Airspy R2 measured 2.09 of 2.5 MS/s (84 %) because the
+    first, slow blocks of its start were counted. They are not any more."""
+    t = [0.0]
+    got = []
+    p = dc.Probe(FS, lambda iq, n, el: got.append((n, el)), clock=lambda: t[0])
+    block = np.zeros(16_380, np.complex64)
+    nbytes_block = len(block) * 2
+    while t[0] < dc.PROBE_SEC + 0.5:
+        p.feed(nbytes_block, block)
+        # Half speed while starting up, full speed after
+        t[0] += len(block) / FS * (2 if t[0] < dc.SETTLE_SEC else 1)
+    n, elapsed = got[0]
+    rate = n / 2 / elapsed
+    assert rate > 0.97 * FS
