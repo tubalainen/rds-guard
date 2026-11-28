@@ -161,7 +161,9 @@ class Station:
             had_ps = "ps" in self.info
             if "ps" in data:
                 self.info["ps"] = data["ps"].strip()
-            elif "partial_ps" in data and "ps" not in self.info:
+            elif "partial_ps" in data and "ps" not in self.info \
+                    and data["partial_ps"].strip():
+                # A PS not yet complete; blanks are no name ("Locked on to  ")
                 self.info["ps"] = data["partial_ps"].strip()
             for key in ("long_ps", "radiotext"):
                 if key in data:
