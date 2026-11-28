@@ -91,17 +91,23 @@ _QUIET = ("Streaming at",)
 _STREAMING_RE = re.compile(r"Streaming at\s+([\d.]+)\s*MSPS")
 SHORT_RATE = 0.97             # below this share of the rate: a warning …
 SHORT_EVERY_SEC = 60          # … at most this often
+# The first readings (one a second) include the stream starting up: an R2
+# at 2.5 MS/s reports about 2.35 there and full rate after, so they never warn
+SHORT_SKIP_FIRST = 5
 
 
 def _stderr_reader(stream, prefix, expected_sps=None):
     last_warned = None           # (monotonic time can be under a minute after boot)
+    readings = 0
     try:
         for raw in iter(stream.readline, b""):
             text = raw.decode("utf-8", errors="replace").rstrip()
             if text and text.startswith(_QUIET):
                 m = _STREAMING_RE.search(text)
                 rate = float(m.group(1)) * 1e6 if m else None
+                readings += 1
                 if (expected_sps and rate is not None and rate < SHORT_RATE * expected_sps
+                        and readings > SHORT_SKIP_FIRST
                         and (last_warned is None
                              or time.monotonic() - last_warned >= SHORT_EVERY_SEC)):
                     last_warned = time.monotonic()
