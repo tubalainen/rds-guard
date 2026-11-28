@@ -97,6 +97,12 @@ UPLINK_HEARTBEAT_SEC = max(10, _int(os.environ.get("UPLINK_HEARTBEAT_SEC"), 10))
 UPLINK_MAX_AGE_HOURS = max(1, _int(os.environ.get("UPLINK_MAX_AGE_HOURS"), 168))
 
 UPLINK_ENABLED: bool = bool(UPLINK_URL)
+# More aggregators to report to as well, comma-separated (e.g. a friend's):
+# each its own identity, queue and approval. JOIN_KEY, UPLINK_TOKEN and the
+# commands (Kalibrera om) stay with AGGREGATOR_URL
+ALSO_REPORT_TO = list(dict.fromkeys(
+    u.strip().rstrip("/") for u in os.environ.get("ALSO_REPORT_TO", "").split(",")
+    if u.strip() and u.strip().rstrip("/") != UPLINK_URL))
 
 # Settings only the satellite had before v1.0 and no longer uses (those the
 # aggregator reads, e.g. MQTT_* in a shared .env, are not named)
@@ -119,6 +125,10 @@ def problems():
             "map, push and MQTT are the aggregator's. See the README.")
     elif not UPLINK_URL.lower().startswith(("http://", "https://")):
         out.append(f"AGGREGATOR_URL must start with http:// or https:// (got '{UPLINK_URL}')")
+    for url in ALSO_REPORT_TO:
+        if not url.lower().startswith(("http://", "https://")):
+            out.append(f"ALSO_REPORT_TO: each address must start with http:// or "
+                       f"https:// (got '{url}')")
     return out
 
 

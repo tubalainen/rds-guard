@@ -429,6 +429,26 @@ frequency, programme type, RadioText, start and end), its recording (about
 decode rate, gain, ppm, version, queue length). Nothing else leaves your
 network.
 
+### Reporting to several aggregators
+
+A satellite can report to more than one aggregator: your own, and a
+friend's too. Your own stays in `AGGREGATOR_URL` (the combined compose sets
+it); the others go in `ALSO_REPORT_TO`, comma-separated:
+
+```bash
+ALSO_REPORT_TO=https://rds.example.com # A friend's aggregator
+```
+
+Each aggregator gets every announcement, recording and status report, and
+shows the satellite as an ordinary node. Each has its own queue, so one
+that is down never holds up the other; a recording is kept on the satellite
+until every aggregator has it (or `UPLINK_MAX_AGE_HOURS` gives up). Each also
+has its own identity: the satellite asks to join with its own code (in its
+log, with the aggregator's address), and that aggregator's owner approves it.
+`JOIN_KEY` and `UPLINK_TOKEN` are only sent to your own aggregator, and
+only your own can recalibrate the receivers. Taking an address out of
+`ALSO_REPORT_TO` drops what was still queued for it.
+
 To run an aggregator for friends' satellites, see
 [aggregator/README.md](aggregator/README.md): it goes behind your own HTTPS
 reverse proxy or a Cloudflare Tunnel.
@@ -482,6 +502,7 @@ The satellite's:
 | `AGGREGATOR_URL` (or `UPLINK_URL`) | | The aggregator's address. Required; the combined compose sets it |
 | `JOIN_KEY` | | The same secret as the aggregator's approves the satellite at once |
 | `UPLINK_TOKEN` | | A node token from the aggregator (*Lägg till nod*, or the import). Empty = the satellite makes its own and asks to join |
+| `ALSO_REPORT_TO` | | More aggregators to report to as well, comma-separated (see [Reporting to several aggregators](#reporting-to-several-aggregators)) |
 | `NODE_NAME` | | Shown on the aggregator |
 | `NODE_LOCATION` | | Where the receiver is, as `Ort, Län`; a suggestion, the aggregator's Admin has the last word |
 | `RECEIVERS_FILE` | `/data/receivers.yml` | The receivers and their stations (see [Dongles](#dongles-receiversyml)) |

@@ -540,7 +540,8 @@ class Satellite:
         self.receivers = []          # receivers.Receiver
         self.pipelines = []          # pipeline.ReceiverPipeline
         self.error = None            # why no receiver runs (no dongle …)
-        self.uplink = None
+        self.uplink = None           # to the own aggregator (AGGREGATOR_URL)
+        self.also = []               # to ALSO_REPORT_TO
         self.tuner = None            # gain_tuner.Tuner (set in main)
 
     def stations(self):
@@ -592,6 +593,7 @@ def _housekeeping(sat, stop_event):
         try:
             snap = sat.status()
             snap["uplink"] = sat.uplink.snapshot() if sat.uplink else None
+            snap["also_report_to"] = [u.snapshot() for u in sat.also]
             satellite_health.write(config.HEALTH_FILE, snap)
         except Exception:
             log.debug("Could not write the health file", exc_info=True)
@@ -643,6 +645,8 @@ def main():
     log.info("════════════════════════════════════════════")
     log.info("  RDS Guard satellite %s", config.BUILD_VERSION)
     log.info("  Aggregator: %s", config.UPLINK_URL)
+    for url in config.ALSO_REPORT_TO:
+        log.info("  Also to:    %s", url)
     log.info("  Node name:  %s", config.NODE_NAME or "(not set)")
     log.info("════════════════════════════════════════════")
     if config.ENV_COMMENTS_DROPPED:
@@ -661,20 +665,26 @@ def main():
     event_store.migrate_from(config.OLD_DB_PATH, config.OLD_AUDIO_DIR, config.SPOOL_DIR)
 
     sat = Satellite()
-    sat.uplink = Uplink(
-        base_url=config.UPLINK_URL, token=config.UPLINK_TOKEN,
-        audio_dir=config.SPOOL_DIR, node_name=config.NODE_NAME,
-        version=config.BUILD_VERSION, status_fn=sat.status,
-        heartbeat_sec=config.UPLINK_HEARTBEAT_SEC,
-        max_age_hours=config.UPLINK_MAX_AGE_HOURS, join_key=config.JOIN_KEY,
-        suggested_location=config.NODE_LOCATION or None)
-    event_store.enable_outbox(sat.uplink.notify)
+    common = dict(audio_dir=config.SPOOL_DIR, node_name=config.NODE_NAME,
+                  version=config.BUILD_VERSION, status_fn=sat.status,
+                  heartbeat_sec=config.UPLINK_HEARTBEAT_SEC,
+                  max_age_hours=config.UPLINK_MAX_AGE_HOURS,
+                  suggested_location=config.NODE_LOCATION or None)
+    sat.uplink = Uplink(base_url=config.UPLINK_URL, token=config.UPLINK_TOKEN,
+                        join_key=config.JOIN_KEY, **common)
+    # Other aggregators: their own token and approval, never our JOIN_KEY
+    sat.also = [Uplink(base_url=url, token="", join_key="", target=url, **common)
+                for url in config.ALSO_REPORT_TO]
+    links = [sat.uplink, *sat.also]
+    event_store.enable_outbox(lambda: [u.notify() for u in links],
+                              targets=[event_store.PRIMARY, *config.ALSO_REPORT_TO])
     event_store.close_stale_events()
 
     stop_event = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop_event.set())
     signal.signal(signal.SIGINT, lambda *_: stop_event.set())
-    sat.uplink.start(stop_event)
+    for u in links:
+        u.start(stop_event)
     threading.Thread(target=_housekeeping, args=(sat, stop_event), daemon=True,
                      name="housekeeping").start()
 

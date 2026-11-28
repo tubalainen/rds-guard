@@ -20,6 +20,12 @@ aggregators are updated together.
 
 Transcriptions are never sent. The aggregator transcribes the audio itself.
 
+A satellite with `ALSO_REPORT_TO` speaks this protocol to each of those
+aggregators too, as a separate node: its own token and join id per
+aggregator, its own queue, and the same events, audio and heartbeats. It
+sends `join_key` only to its own aggregator (`AGGREGATOR_URL`) and runs
+only that one's `commands`.
+
 ## Common rules
 
 | | |
