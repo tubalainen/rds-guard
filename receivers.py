@@ -12,8 +12,9 @@ receivers.yml.
         # An Airspy only, optional: sample_rate: 10M (R2) or 6M (Mini), for
         # stations up to ~7.8 / ~4.6 MHz apart and up to 8 of them
 
-Without the file and with one dongle, FM_FREQUENCY / FM_FREQUENCIES are used
-on it (as before v1.0). With several dongles the file is needed.
+The file is the only place for the radio. Without it the satellite writes
+one: from FM_FREQUENCY in .env once (the move from before v1.1), otherwise
+a template with the connected receivers commented out, to be filled in.
 """
 
 import os
@@ -274,42 +275,177 @@ def parse(data):
     return out
 
 
+# ---------------------------------------------------------------------------
+# receivers.yml: the template the satellite writes, and the one-time move
+# from FM_FREQUENCY in .env (before v1.1)
+# ---------------------------------------------------------------------------
+
+_HEAD = """\
+# rds-data/receivers.yml: which receiver listens to which stations.
+#
+# Remove the # at the start of the lines for your receiver (just the #),
+# change the frequencies (and the serial number, if it is an example) and
+# save. A satellite waiting for this file picks it up within a minute; a
+# running one needs: docker compose restart rds-guard
+#
+# Serial numbers: the satellite's log lists the receivers it finds, or
+#   docker compose exec rds-guard python3 -m dongles
+# Frequencies: your local P4 station, e.g. 103.5M (README: "P4 regional
+# frequencies"). Up to 4 stations within 2 MHz on one receiver.
+
+receivers:
+"""
+
+# Per kind: (heading, an example serial number, example frequencies)
+_EXAMPLES = {
+    "rtlsdr": ("An RTL-SDR dongle", "00000001", ["103.5M"]),
+    "airspy": ("An Airspy Mini or R2", "0x644064DC2B1C2E4F", ["103.5M", "102.9M"]),
+}
+
+_TAIL = """
+# --- More, all optional. Copy a line under a receiver, below its
+# frequencies:, and remove the # at the start ---
+#    name: tak           # shown on the aggregator
+#    gain: 28.0          # fixed gain in dB (default: calibrated by itself)
+#    ppm: 12             # fixed frequency correction (an RTL-SDR only)
+#  An Airspy only:
+#    sample_rate: 10M    # a wider capture, 10M (R2) or 6M (Mini): up to 8
+#                        # stations within 7.8 / 4.6 MHz
+#    lna: 4              # its stages by hand: lna 0-14, mixer 0-15,
+#    mixer: 3            # vga 0-15 (all three: no gain calibration)
+#    vga: 9
+#
+# Two dongles with the same serial number (00000001 is common) cannot be
+# told apart: give one a new number with rtl_eeprom (the log says how).
+"""
+
+EMPTY = ("Fill in {path}: remove the # in front of the lines for your receiver "
+         "and set its frequencies (the file says how)")
+NO_RECEIVER = ("No RTL-SDR dongle or Airspy found. Check that it is plugged in, "
+               "passed to the container (devices: /dev/bus/usb) and, for an "
+               "RTL-SDR, that the DVB driver is blacklisted on the host")
+_ENV_KEYS = "FM_FREQUENCY, FM_FREQUENCIES and RTL_DEVICE_SERIAL"
+
+
+def _entry(title, serial, freqs, commented):
+    c = "#" if commented else ""
+    return (f"\n  # --- {title} ---\n"
+            f"  {c}- serial: \"{serial}\"\n"
+            f"  {c}  frequencies: [{', '.join(freqs)}]\n")
+
+
+def template(connected=(), active=None):
+    """receivers.yml as the satellite writes it. connected: the receivers
+    found (dongles.Dongle), first, with their real serial numbers and
+    commented out. active: a Receiver written uncommented, as the one in use
+    (the move from .env). A kind with nothing connected gets an example."""
+    import dongles
+    out = [_HEAD]
+    kinds = set()
+    if active is not None:
+        out.append(_entry("In use (moved from FM_FREQUENCY in .env)",
+                          active.serial, active.frequencies, False))
+        kinds.add("airspy" if dongles.is_airspy_serial(active.serial) else "rtlsdr")
+    for d in connected:
+        if active is not None and d.serial == active.serial:
+            continue
+        kind = "airspy" if d.kind == "airspy" else "rtlsdr"
+        kinds.add(kind)
+        title = "This Airspy" if kind == "airspy" else "This RTL-SDR dongle"
+        out.append(_entry(f"{title} (connected now)", d.serial, ["103.5M"], True))
+    for kind, (title, serial, freqs) in _EXAMPLES.items():
+        if kind not in kinds:
+            out.append(_entry(title, serial, freqs, True))
+    out.append(_TAIL)
+    return "".join(out)
+
+
+def _write_new(path, text):
+    """Write a receivers.yml that is not there yet, owned like its folder so
+    that it can be edited without sudo (the container runs as root).
+    Returns False when it could not be written."""
+    folder = os.path.dirname(os.path.abspath(path))
+    try:
+        os.makedirs(folder, exist_ok=True)
+        with open(path, "x", encoding="utf-8") as f:
+            f.write(text)
+    except FileExistsError:
+        return True
+    except OSError:
+        return False
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        try:
+            st = os.stat(folder)
+            os.chown(path, st.st_uid, st.st_gid)
+        except OSError:
+            pass
+    return True
+
+
+def _from_env():
+    """The frequencies FM_FREQUENCY / FM_FREQUENCIES in .env (before v1.1)."""
+    return list(config.FM_FREQUENCIES) or ([config.FM_FREQUENCY] if config.FM_FREQUENCY else [])
+
+
 def load(path=None, dongles=None):
-    """The receivers to run. dongles: the connected ones (dongles.find_all),
-    used when there is no receivers.yml."""
+    """The receivers to run, from receivers.yml. dongles: the connected ones
+    (dongles.find_all), used only when there is no receivers.yml yet.
+
+    Without the file the satellite writes one: from FM_FREQUENCY in .env
+    when that is set (the move from before v1.1), otherwise a template with
+    the connected receivers, and says to fill it in (ReceiverError)."""
     path = path or config.RECEIVERS_FILE
-    if os.path.isfile(path):
-        import yaml
-        with open(path, encoding="utf-8") as f:
-            try:
-                data = yaml.safe_load(f)
-            except yaml.YAMLError as e:
-                raise ReceiverError(f"{path} is not valid YAML: {e}")
-        return parse(data)
-    # No file: one dongle, the frequencies from .env
-    freqs = config.FM_FREQUENCIES or [config.FM_FREQUENCY]
+    if not os.path.isfile(path):
+        _create(path, dongles)
+    import yaml
+    with open(path, encoding="utf-8") as f:
+        try:
+            data = yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            raise ReceiverError(f"{path} is not valid YAML: {e}")
+    # Everything still commented out
+    if data is None or (isinstance(data, dict) and data.get("receivers") is None):
+        raise ReceiverError(EMPTY.format(path=path))
+    out = parse(data)
+    if _from_env() or config.RTL_DEVICE_SERIAL:
+        out[0].warnings.append(f"{_ENV_KEYS} in .env are not used: the receivers "
+                               f"are in {path}. Remove them from .env")
+    return out
+
+
+def _create(path, dongles):
+    """No receivers.yml: write one (see load). Returns when the file it
+    wrote has a receiver in use; raises ReceiverError otherwise."""
     import dongles as dg
-    serial = dg.normalize_serial(config.RTL_DEVICE_SERIAL)
-    if not serial:
-        if dongles is None:
+    if dongles is None:
+        try:
             dongles = dg.find_all()
+        except Exception:
+            dongles = []
+    cannot = (f"Could not write {path}: is the data folder writable? Write it "
+              "yourself (see receivers.example.yml)")
+    freqs = _from_env()
+    if freqs:
+        serial = dg.normalize_serial(config.RTL_DEVICE_SERIAL)
+        if not serial and len(dongles) == 1:
+            serial = dongles[0].serial
+        if serial:
+            r = Receiver(serial=serial,
+                         frequencies=[_freq(f, "FM_FREQUENCY") for f in freqs])
+            check(r, "FM_FREQUENCIES")
+            if not _write_new(path, template(dongles, active=r)):
+                raise ReceiverError(cannot)
+            import logging
+            logging.getLogger("rds-guard").warning(
+                "Moved FM_FREQUENCY from .env to %s (receiver %s: %s). The radio is "
+                "set there from now on; remove %s from .env",
+                path, serial, ", ".join(r.frequencies), _ENV_KEYS)
+            return
         if not dongles:
-            raise ReceiverError("No RTL-SDR dongle or Airspy found. Check that it is "
-                                "plugged in, passed to the container (devices: "
-                                "/dev/bus/usb) and, for an RTL-SDR, that the DVB driver "
-                                "is blacklisted on the host")
-        if len(dongles) > 1:
-            raise ReceiverError(
-                f"{len(dongles)} receivers are connected ("
-                + ", ".join(d.serial for d in dongles)
-                + "): say which listens to what in receivers.yml (see "
-                "receivers.example.yml)")
-        serial = dongles[0].serial
-    r = Receiver(serial=serial, frequencies=[_freq(f, "FM_FREQUENCY") for f in freqs])
-    check(r, "FM_FREQUENCIES")
-    _mirror_warning(r)
-    if config.RTL_GAIN or config.PPM_CORRECTION:
-        r.warnings.append("RTL_GAIN and PPM_CORRECTION in .env are not used any more: "
-                          "RDS Guard finds the best gain and ppm itself. To fix them, "
-                          "put gain:/ppm: in receivers.yml (see receivers.example.yml)")
-    return [r]
+            # Nothing to write the move for yet: try again when it is there
+            raise ReceiverError(NO_RECEIVER)
+    listed = (f" Connected now: {', '.join(d.serial for d in dongles)}." if dongles
+              else f" {NO_RECEIVER}.")
+    if not _write_new(path, template(dongles)):
+        raise ReceiverError(cannot + "." + listed)
+    raise ReceiverError(EMPTY.format(path=path) + "." + listed)
