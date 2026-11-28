@@ -1018,8 +1018,8 @@ docker-compose.yml), run `git pull` first, then
 `docker compose up -d --build`.
 
 **Pinning a version:** `:latest` follows `master`. To stay on a release, set
-both images to the same version, e.g. `ghcr.io/tubalainen/rds-guard:1.0.19`
-and `ghcr.io/tubalainen/rds-guard-aggregator:1.0.19` (or `:1.0` for patch
+both images to the same version, e.g. `ghcr.io/tubalainen/rds-guard:1.1.0`
+and `ghcr.io/tubalainen/rds-guard-aggregator:1.1.0` (or `:1.1` for patch
 releases). The satellite and the aggregator must speak the same protocol;
 an older or newer satellite logs `Uplink incompatible` and keeps its queue.
 
