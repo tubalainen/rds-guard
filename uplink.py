@@ -517,11 +517,10 @@ class Uplink:
         last_purge = 0.0
         while not stop_event.is_set():
             now = time.time()
-            # Another aggregator that never approves (or removed) this node
-            # must not keep events and recordings here for ever: its queue
-            # ages out also while it waits
-            ages_out = self._ready.is_set() or self._target
-            if lane is EVENTS and ages_out and now - last_purge >= 3600:
+            # An aggregator that never approves (or removed) this node must
+            # not keep events and recordings here for ever: the queue ages
+            # out (UPLINK_MAX_AGE_HOURS) also while it waits for approval
+            if lane is EVENTS and now - last_purge >= 3600:
                 try:
                     event_store.outbox_purge(self._max_age_hours, self._target)
                 except Exception:

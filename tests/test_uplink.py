@@ -310,3 +310,31 @@ def test_back_online_wakes_the_queue_at_once(store, link):
         w.clear()
     link._set_state("connected", None, ok=True)         # no change: nothing to wake
     assert not any(w.is_set() for w in link._wakes)
+
+
+def test_queue_ages_out_while_waiting_for_approval(store, tmp_path):
+    """A node its aggregator never approves (or removed) must not keep its
+    events and recordings for ever: the queue ages out after
+    UPLINK_MAX_AGE_HOURS also while it waits, and purge then frees them."""
+    import threading
+    import time
+    u, _ = _joining(store, tmp_path, [], max_age_hours=72)
+    store.enable_outbox(u.notify)
+    event_id = _traffic_event(store, tmp_path)
+    conn = store._conn()
+    conn.execute("UPDATE outbox SET created_at = '2000-01-01T00:00:00'")
+    conn.execute("UPDATE events SET created_at = '2000-01-01T00:00:00'")
+    conn.commit()
+    assert not u._ready.is_set()
+    stop = threading.Event()
+    t = threading.Thread(target=u._run_lane, args=(stop, up.EVENTS, threading.Event()))
+    t.start()
+    deadline = time.time() + 5
+    while store.outbox_depth() and time.time() < deadline:
+        time.sleep(0.05)
+    stop.set()
+    t.join(5)
+    assert store.outbox_depth() == 0
+    store.purge(7, str(tmp_path))
+    assert store.get_event(event_id) is None
+    assert not (tmp_path / f"{event_id}.ogg").exists()
