@@ -172,8 +172,8 @@ def test_a_friend_that_never_approves_does_not_keep_events_for_ever(store, tmp_p
     event_id = _traffic_event(store, tmp_path)
     _drain(own)
     conn = store._conn()
-    conn.execute("UPDATE outbox SET created_at = 2000-01-01T00:00:00")
-    conn.execute("UPDATE events SET created_at = 2000-01-01T00:00:00")
+    conn.execute("UPDATE outbox SET created_at = '2000-01-01T00:00:00'")
+    conn.execute("UPDATE events SET created_at = '2000-01-01T00:00:00'")
     conn.commit()
     assert not friend._ready.is_set()
     stop = threading.Event()
@@ -207,7 +207,9 @@ def test_both_aggregators_get_the_event_with_the_real_threads(store, tmp_path, m
         assert store.outbox_depth() == 0
         for u in (own, friend):
             puts = [c["url"] for c in u._http.calls if c["method"] == "PUT"]
-            assert len(puts) == 2 and puts[1].endswith("/audio")
+            # Snapshots go out live as the event changes; the audio once, last
+            audio = [p for p in puts if p.endswith("/audio")]
+            assert len(audio) == 1 and puts[-1] == audio[0] and len(puts) >= 2
         assert friend._http.calls[0]["url"] == f"{FRIEND}/api/v1/ingest/join"
     finally:
         stop.set()
