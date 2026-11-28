@@ -245,9 +245,12 @@ def test_two_dongles_with_the_same_station_keep_their_own_state(store):
     store.enable_outbox()
     a, b = rg.Station("tak", "103.5M"), rg.Station("källare", "103.5M")
     for st in (a, b):
-        rg.process_group(st, {"pi": "0xE824", "ta": False, "timestamp": "2026-11-27T10:00:00"})
-    rg.process_group(a, {"pi": "0xE824", "ta": True, "timestamp": "2026-11-27T10:00:05"})
-    rg.process_group(b, {"pi": "0xE824", "ta": True, "timestamp": "2026-11-27T10:00:06"})
+        for _ in range(rg.TA_CONFIRM_GROUPS):
+            rg.process_group(st, {"pi": "0xE824", "ta": False, "timestamp": "2026-11-27T10:00:00"})
+    for _ in range(rg.TA_CONFIRM_GROUPS):
+        rg.process_group(a, {"pi": "0xE824", "ta": True, "timestamp": "2026-11-27T10:00:05"})
+    for _ in range(rg.TA_CONFIRM_GROUPS):
+        rg.process_group(b, {"pi": "0xE824", "ta": True, "timestamp": "2026-11-27T10:00:06"})
     rows, total = store.query_events()
     assert total == 2 and sorted(r["receiver"] for r in rows) == ["källare", "tak"]
     assert a.engine.busy() and b.engine.busy()
@@ -256,10 +259,12 @@ def test_two_dongles_with_the_same_station_keep_their_own_state(store):
 def test_first_ta_on_starts_but_first_ta_off_ends_nothing(store):
     import rds_guard as rg
     st = rg.Station("tak", "103.5M")
-    rg.process_group(st, {"pi": "0x1", "ta": False, "timestamp": "2026-11-27T10:00:00"})
+    for _ in range(rg.TA_CONFIRM_GROUPS):
+        rg.process_group(st, {"pi": "0x1", "ta": False, "timestamp": "2026-11-27T10:00:00"})
     assert store.query_events()[1] == 0
     st2 = rg.Station("tak", "99.1M")
-    rg.process_group(st2, {"pi": "0x2", "ta": True, "timestamp": "2026-11-27T10:00:00"})
+    for _ in range(rg.TA_CONFIRM_GROUPS):
+        rg.process_group(st2, {"pi": "0x2", "ta": True, "timestamp": "2026-11-27T10:00:00"})
     assert store.query_events()[1] == 1
 
 

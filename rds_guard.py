@@ -32,6 +32,7 @@ ALERT_PTY = {"Alarm", "Alarm - Loss of radio"}
 MIN_EVENT_SEC = 10          # shorter "events" are RDS noise
 SILENT_END_SEC = 180        # no RDS this long: an open broadcast ends
 STATION_KEY = "station"     # TA/RT/PTY state is per station, not per PI
+TA_CONFIRM_GROUPS = 3       # TA changes when this many groups in a row agree
 
 
 def now_iso():
@@ -144,6 +145,10 @@ class Station:
         self.engine.station = self
         self._errors = 0
         self._first = True
+        self.ta = None               # the confirmed TA flag (None: not yet)
+        self._ta_run = None          # [value, first group, count] not yet confirmed
+        self.ta_blips = 0            # single groups that disagreed, since the last log
+        self._blip_logged = 0.0
         self._last_log = time.time()
         self._lock = threading.Lock()
 
@@ -179,6 +184,43 @@ class Station:
                          self.receiver_id, self.frequency, self.info["ps"], pi,
                          self.info.get("prog_type", "?"),
                          "yes" if self.info.get("tp") else "no")
+
+    def confirm_ta(self, ta, data):
+        """A TA flag from one group. It changes only when TA_CONFIRM_GROUPS
+        TA-bearing groups in a row say so: a single corrupted group (weak
+        signal) is no announcement, and does not end one either. Returns
+        (previous value, first group of the run) when it changes, else None."""
+        ta = bool(ta)
+        if ta == self.ta:
+            run, self._ta_run = self._ta_run, None
+            if run:
+                self._blip(run)
+            return None
+        run = self._ta_run
+        if run and run[0] == ta:
+            run[2] += 1
+        else:
+            run = self._ta_run = [ta, data, 1]
+        if run[2] < TA_CONFIRM_GROUPS:
+            return None
+        self._ta_run = None
+        prev, self.ta = self.ta, ta
+        return prev, run[1]
+
+    def reset_ta(self):
+        """Heard again after silence: the first TA only says where we are."""
+        self.ta = None
+        self._ta_run = None
+
+    def _blip(self, run):
+        self.ta_blips += 1
+        now = time.time()
+        if now - self._blip_logged >= 60:
+            self._blip_logged = now
+            first = run[1]
+            log.info("[%s %s] TA %s in %d group(s) only, ignored (group %s, BLER %s)",
+                     self.receiver_id, self.frequency, "on" if run[0] else "off",
+                     run[2], first.get("group", "?"), first.get("bler", "?"))
 
     def snapshot(self):
         with self._lock:
@@ -217,9 +259,11 @@ class Station:
         if now - self._last_log >= 300:
             self._last_log = now
             s = self.snapshot()
-            log.info("[%s %s] %s: %d groups, %.1f grp/s", self.receiver_id,
+            blips, self.ta_blips = self.ta_blips, 0
+            log.info("[%s %s] %s: %d groups, %.1f grp/s%s", self.receiver_id,
                      self.frequency, s.get("ps") or s.get("pi") or "?",
-                     s["groups_total"], s["groups_per_sec"])
+                     s["groups_total"], s["groups_per_sec"],
+                     f", {blips} TA blip(s) ignored" if blips else "")
 
 
 # ---------------------------------------------------------------------------
@@ -277,25 +321,28 @@ class RulesEngine:
                     station_ps=self._ps(pi), frequency=self.frequency,
                     started_at=ts, receiver=self.receiver)
                 self._active = {"event_id": event_id, "pi": pi, "since": ts,
-                                "radiotext": []}
+                                "radiotext": [], "ta_on": 0, "ta_off": 0}
                 self._record("traffic", event_id)
-                log.info("EVENT traffic start on %s %s (#%d)", pi, self.frequency, event_id)
+                log.info("EVENT traffic start on %s %s (#%d; group %s, BLER %s)", pi,
+                         self.frequency, event_id, data.get("group", "?"),
+                         data.get("bler", "?"))
                 return
             ann, self._active = self._active, None
             if not ann:
                 return
             self._stop_recording()
             duration = self._duration(ann["since"], ts)
+            groups = f"TA on in {ann['ta_on']} of {ann['ta_on'] + ann['ta_off']} groups"
             if duration < MIN_EVENT_SEC:
                 event_store.delete_event(ann["event_id"])
-                log.info("Discarded short traffic event #%d on %s %s (%ds)",
-                         ann["event_id"], ann["pi"], self.frequency, duration)
+                log.info("Discarded short traffic event #%d on %s %s (%ds, %s)",
+                         ann["event_id"], ann["pi"], self.frequency, duration, groups)
                 return
             event_store.end_event(event_id=ann["event_id"], ended_at=ts,
                                   duration_sec=duration,
                                   radiotext_list=ann["radiotext"])
-            log.info("EVENT traffic end on %s %s (%ds, %d RadioText)%s", ann["pi"],
-                     self.frequency, duration, len(ann["radiotext"]),
+            log.info("EVENT traffic end on %s %s (%ds, %d RadioText, %s)%s", ann["pi"],
+                     self.frequency, duration, len(ann["radiotext"]), groups,
                      "" if pi == ann["pi"] else f" (ended on PI {pi})")
 
     def on_radiotext(self, pi, rt, data):
@@ -338,6 +385,12 @@ class RulesEngine:
         event_store.end_event(event_id=em["event_id"], ended_at=ts, duration_sec=duration)
         log.info("EVENT emergency end on %s %s (PTY %s, %ds)", em["pi"],
                  self.frequency, pty, duration)
+
+    def count_ta(self, ta):
+        """One TA-bearing group during the announcement (for the end log)."""
+        with self.lock:
+            if self._active:
+                self._active["ta_on" if ta else "ta_off"] += 1
 
     def end_silent(self, age_sec):
         """The station has sent nothing for age_sec (signal or decoder
@@ -400,16 +453,22 @@ def process_group(station, data):
     group = data.get("group", "")
     here = STATION_KEY
 
-    # 1-3: traffic announcements. The first TA value seen (start-up) only
-    # says where we are: off ends nothing, on starts the event.
+    # 1-3: traffic announcements. TA changes when a few groups in a row
+    # agree (Station.confirm_ta), from the first of them. The first TA
+    # value (start-up) only says where we are: off ends nothing, on starts
+    # the event.
     if "ta" in data:
-        known = state.is_known(here, "ta")
-        if state.changed(here, "ta", data["ta"]) and (known or data["ta"]):
-            engine.on_ta_change(pi, data["ta"], data)
-            if data["ta"]:
-                # A new announcement takes the RadioText on air now, even
-                # if the same text was sent before
-                state.forget(here, "rt")
+        engine.count_ta(bool(data["ta"]))
+        change = station.confirm_ta(data["ta"], data)
+        if change:
+            prev, first = change
+            ta = station.ta
+            if prev is not None or ta:
+                engine.on_ta_change(str(first.get("pi") or pi), ta, first)
+                if ta:
+                    # A new announcement takes the RadioText on air now,
+                    # even if the same text was sent before
+                    state.forget(here, "rt")
 
     if group in ("2A", "2B"):
         rt = data.get("radiotext")      # complete RadioText only
@@ -497,7 +556,7 @@ def _housekeeping(sat, stop_event):
                 if age is not None and age >= SILENT_END_SEC:
                     if st.engine.end_silent(age):
                         # When it is heard again, its first TA says where we are
-                        st.state.forget(STATION_KEY, "ta")
+                        st.reset_ta()
                         st.state.forget(STATION_KEY, "pty")
             except Exception:
                 log.exception("Could not check %s for silence", st.frequency)

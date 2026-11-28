@@ -282,10 +282,12 @@ def test_first_start_calibrates_then_uses_the_result(setup):
 def test_not_during_a_broadcast(setup, store):
     import rds_guard as rg
     tuner, p, st, clock, runs = setup
-    rg.process_group(st, {"pi": "0x1", "ta": True, "timestamp": "2026-11-27T10:00:00"})
+    for _ in range(rg.TA_CONFIRM_GROUPS):
+        rg.process_group(st, {"pi": "0x1", "ta": True, "timestamp": "2026-11-27T10:00:00"})
     assert tuner.step(p) == "waiting" and runs == []
     assert tuner.describe(p)["calibration"] == "väntar på sändning"
-    rg.process_group(st, {"pi": "0x1", "ta": False, "timestamp": "2026-11-27T10:01:00"})
+    for _ in range(rg.TA_CONFIRM_GROUPS):
+        rg.process_group(st, {"pi": "0x1", "ta": False, "timestamp": "2026-11-27T10:01:00"})
     assert tuner.step(p) == "calibrated"
 
 
