@@ -1,41 +1,36 @@
-# The satellite's receivers: one entry per RTL-SDR dongle or Airspy (Mini, R2).
-# Put this file in the satellite's data folder as rds-data/receivers.yml.
-# Without it, one dongle listens to FM_FREQUENCY / FM_FREQUENCIES from .env.
+# rds-data/receivers.yml: which receiver listens to which stations.
 #
-# A dongle is known by its serial number, never by its USB order. List them:
+# Remove the # at the start of the lines for your receiver (just the #),
+# change the frequencies (and the serial number, if it is an example) and
+# save. A satellite waiting for this file picks it up within a minute; a
+# running one needs: docker compose restart rds-guard
+#
+# Serial numbers: the satellite's log lists the receivers it finds, or
 #   docker compose exec rds-guard python3 -m dongles
-# Two dongles with the same serial number (00000001 is common) cannot be
-# told apart: give one a new number with rtl_eeprom (the command says how).
-# An Airspy's serial number is 64 bits in hex, e.g. "0x644064DC2B1C2E4F";
-# its gain is the linearity gain 0-21 (or lna:/mixer:/vga: by hand), and it
-# has no ppm (TCXO).
-#
-# Gain and ppm are found automatically for each dongle, for all its stations
-# together (at the first start, when decoding drops, and with Admin ->
-# Noder -> Kalibrera om). gain:/ppm: here fix them instead.
+# Frequencies: your local P4 station, e.g. 103.5M (README: "P4 regional
+# frequencies"). Up to 4 stations within 2 MHz on one receiver.
 
 receivers:
-  - serial: "00000101"            # required
-    name: tak                     # optional, shown on the aggregator
-    # Up to 4 stations within 2 MHz on one dongle
-    frequencies: [103.5M, 102.9M]
-    # gain: auto                  # default; or e.g. 28.0 (dB) to fix it
-    # ppm: auto                   # default; or e.g. 12
 
-  # - serial: "00000102"
-  #   name: källare
-  #   frequencies: [99.1M]
-  #   gain: 19.7
+  # --- An RTL-SDR dongle ---
+  #- serial: "00000001"
+  #  frequencies: [103.5M]
 
-  # - serial: "0x644064DC2B1C2E4F"  # an Airspy Mini or R2
-  #   name: mast
-  #   frequencies: [103.5M, 102.9M]
-  #   gain: 10                      # linearity 0-21; or leave it out (auto)
-  #   # Optional, an Airspy only: a wider capture. 10M (R2) or 6M (Mini):
-  #   # up to 8 stations, 7.8 / 4.6 MHz apart (default: 2 MHz, 4 stations)
-  #   sample_rate: 10M
-  #   # Optional, an Airspy only: its stages by hand. All three: no gain
-  #   # calibration; one or two: those fixed, the others calibrated.
-  #   lna: 4                        # 0-14
-  #   mixer: 3                      # 0-15
-  #   vga: 9                        # 0-15
+  # --- An Airspy Mini or R2 ---
+  #- serial: "0x644064DC2B1C2E4F"
+  #  frequencies: [103.5M, 102.9M]
+
+# --- More, all optional. Copy a line under a receiver, below its
+# frequencies:, and remove the # at the start ---
+#    name: tak           # shown on the aggregator
+#    gain: 28.0          # fixed gain in dB (default: calibrated by itself)
+#    ppm: 12             # fixed frequency correction (an RTL-SDR only)
+#  An Airspy only:
+#    sample_rate: 10M    # a wider capture, 10M (R2) or 6M (Mini): up to 8
+#                        # stations within 7.8 / 4.6 MHz
+#    lna: 4              # its stages by hand: lna 0-14, mixer 0-15,
+#    mixer: 3            # vga 0-15 (all three: no gain calibration)
+#    vga: 9
+#
+# Two dongles with the same serial number (00000001 is common) cannot be
+# told apart: give one a new number with rtl_eeprom (the log says how).

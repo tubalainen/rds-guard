@@ -105,16 +105,15 @@ This runs the satellite and the aggregator on one host.
    Docker pulls for you.
 
 ```bash
-mkdir rds-guard && cd rds-guard
+mkdir rds-guard && cd rds-guard && mkdir rds-data
 curl -fsSLo docker-compose.yml https://raw.githubusercontent.com/tubalainen/rds-guard/master/docker-compose.yml
 curl -fsSLo .env https://raw.githubusercontent.com/tubalainen/rds-guard/master/.env.example
 ```
 
-2. Edit `.env` and at minimum set your local P4 frequency, where the receiver
-   is, a name for it and a password for the Admin pages:
+2. Edit `.env` and at minimum set where the receiver is, a name for it and
+   a password for the Admin pages:
 
 ```bash
-FM_FREQUENCY=103.3M                   # Your local P4 frequency
 NODE_LOCATION=Karlstad, Värmlands län # Ort, Län: places the messages on the map
 NODE_NAME=Hemma
 ADMIN_PASSWORD=choose-one
@@ -133,7 +132,24 @@ docker compose pull
 docker compose up -d
 ```
 
-5. Open the web UI at **http://your-host:8080**. Under **Admin → Noder** the
+5. Tell the satellite what to listen to. On its first start it writes
+   `rds-data/receivers.yml` with your dongle's serial number already in it,
+   commented out, and waits. Remove the `#` in front of your receiver's two
+   lines and set your local P4 frequency (see [P4 regional
+   frequencies](#p4-regional-frequencies)):
+
+```yaml
+receivers:
+  # --- This RTL-SDR dongle (connected now) ---
+  - serial: "00000001"
+    frequencies: [103.3M]
+```
+
+   The satellite picks the file up within a minute (`docker compose logs
+   rds-guard` says so). See [Dongles: receivers.yml](#dongles-receiversyml)
+   for several dongles and the optional settings.
+
+6. Open the web UI at **http://your-host:8080**. Under **Admin → Noder** the
    satellite turns green within a minute. On its first start it calibrates
    its dongle for about two minutes (see [Gain and frequency
    correction](#gain-and-frequency-correction)); RDS comes in after that.
@@ -206,11 +222,21 @@ satellite's other topics (`rds/{pi}/programme/rt`, `station/pty`,
 
 ### Dongles: `receivers.yml`
 
-With one dongle you need nothing more than `FM_FREQUENCY` (or
-`FM_FREQUENCIES`, 2–4 stations within 2 MHz) in `.env`. For several dongles,
-or to fix a dongle's gain, put `receivers.yml` in the satellite's data
-folder (`rds-data/receivers.yml`; see
-[receivers.example.yml](receivers.example.yml)):
+The radio is set in one place only: `rds-data/receivers.yml`, one entry per
+dongle with its serial number (always required) and its stations. When the
+file is missing, the satellite writes it
+([receivers.example.yml](receivers.example.yml) is the same file) with the
+connected dongles commented out, and waits until it is filled in: remove
+the `#` in front of the lines for your receiver and set the frequencies.
+
+From v1.1, `FM_FREQUENCY`, `FM_FREQUENCIES` and `RTL_DEVICE_SERIAL` in
+`.env` are not used. A satellite that still has them and no
+`receivers.yml` moves them into a new `receivers.yml` once, at its first
+start, and keeps running; then remove them from `.env`. With several
+dongles that needs `RTL_DEVICE_SERIAL`; without it the satellite writes the
+template and waits.
+
+A full file:
 
 ```yaml
 receivers:
@@ -247,8 +273,6 @@ docker compose exec rds-guard python3 -m dongles
 - A connected dongle that is not in the file is left alone; one in the file
   that is missing is reported in the log and on the node card, and the
   others keep running.
-- Without `receivers.yml` and with several dongles, set
-  `RTL_DEVICE_SERIAL` to pick the one `FM_FREQUENCY` is for.
 
 ### Airspy Mini and R2
 
@@ -370,12 +394,12 @@ On a host that reports to an aggregator elsewhere (your own on the LAN, or a
 friend's over HTTPS), run only the satellite:
 
 ```bash
-mkdir rds-guard && cd rds-guard
+mkdir rds-guard && cd rds-guard && mkdir rds-data
 curl -fsSLo docker-compose.yml https://raw.githubusercontent.com/tubalainen/rds-guard/master/docker-compose.satellite.yml
-curl -fsSLo .env https://raw.githubusercontent.com/tubalainen/rds-guard/master/.env.example
+curl -fsSLo .env https://raw.githubusercontent.com/tubalainen/rds-guard/master/.env.satellite.example
 ```
 
-In `.env`, set the radio part and:
+In `.env` (only the satellite's settings), set:
 
 ```bash
 AGGREGATOR_URL=https://rds.example.com # From the aggregator's owner
@@ -384,7 +408,9 @@ NODE_LOCATION=Karlstad, Värmlands län  # Suggested to the aggregator for the m
 # JOIN_KEY=...                         # Only for your own aggregator
 ```
 
-Start it with `docker compose up -d`. Without `JOIN_KEY` the satellite asks
+Start it with `docker compose up -d`, then fill in `rds-data/receivers.yml`,
+which the satellite writes with your dongle in it (see [Dongles:
+receivers.yml](#dongles-receiversyml)). Without `JOIN_KEY` the satellite asks
 to join and waits; its log shows a code such as `K7Q-3PD`:
 
 ```bash
@@ -458,17 +484,16 @@ The satellite's:
 | `UPLINK_TOKEN` | | A node token from the aggregator (*Lägg till nod*, or the import). Empty = the satellite makes its own and asks to join |
 | `NODE_NAME` | | Shown on the aggregator |
 | `NODE_LOCATION` | | Where the receiver is, as `Ort, Län`; a suggestion, the aggregator's Admin has the last word |
-| `FM_FREQUENCY` | `103.5M` | The station, without `receivers.yml` |
-| `FM_FREQUENCIES` | | 2–4 stations within 2 MHz on one dongle, e.g. `103.5M,102.9M` |
-| `RTL_DEVICE_SERIAL` | | Which dongle `FM_FREQUENCY` is for, with several and no `receivers.yml` |
-| `RECEIVERS_FILE` | `/data/receivers.yml` | Where the dongle file is |
+| `RECEIVERS_FILE` | `/data/receivers.yml` | The receivers and their stations (see [Dongles](#dongles-receiversyml)) |
 | `RECORD_EVENT_TYPES` | `traffic,emergency` | Event types to record |
 | `MAX_RECORDING_SEC` | `600` | Safety cutoff for one recording (at most 1200) |
 | `SATELLITE_KEEP_DAYS` | `7` | Days to keep delivered recordings and events |
 | `UPLINK_HEARTBEAT_SEC` | `10` | Seconds between status reports |
 | `UPLINK_MAX_AGE_HOURS` | `168` | Unsent items older than this are dropped |
 
-Settings only the old satellite used (`RTL_GAIN`, `PPM_CORRECTION`,
+The radio is not set in `.env` any more: `FM_FREQUENCY`, `FM_FREQUENCIES`
+and `RTL_DEVICE_SERIAL` are moved into `receivers.yml` once (see
+[Dongles](#dongles-receiversyml)). Settings only the old satellite used (`RTL_GAIN`, `PPM_CORRECTION`,
 `RTL_DEVICE_INDEX`, `PUBLISH_MODE`, `AUDIO_FORMAT`, `LOCAL_PROCESSING`, …)
 are ignored, with a line in its log. The transcription, map and MQTT
 settings are the aggregator's now.
@@ -893,7 +918,7 @@ automation:
 
 ## P4 regional frequencies
 
-P4 is Sweden's primary traffic and emergency broadcast network with 25 regional stations. Set `FM_FREQUENCY` (or `frequencies:` in `receivers.yml`) to your local station:
+P4 is Sweden's primary traffic and emergency broadcast network with 25 regional stations. Set `frequencies:` in `rds-data/receivers.yml` to your local station:
 
 | Station | City | Frequency |
 |---------|------|-----------|
@@ -934,6 +959,7 @@ rds-guard/
 ├── docker-compose.satellite.yml  # Satellite only
 ├── receivers.example.yml         # Dongles and their stations
 ├── .env.example
+├── .env.satellite.example        # A satellite on its own
 ├── rds_guard.py          # Satellite: rules engine, stations, housekeeping
 ├── config.py             # Satellite settings
 ├── receivers.py          # receivers.yml: dongles, stations, checks

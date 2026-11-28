@@ -16,8 +16,9 @@
 # it over this compose network. To let satellites on other machines report
 # here, uncomment its port below (and see aggregator/README.md for HTTPS).
 #
-# Several dongles, or fixed gain: rds-data/receivers.yml (see
-# receivers.example.yml). Without it the one dongle listens to FM_FREQUENCY.
+# The radio: rds-data/receivers.yml. On its first start the satellite
+# writes it with the connected dongles commented out: remove the # and set
+# the frequencies (see receivers.example.yml).
 
 services:
   rds-guard:

@@ -4,10 +4,13 @@
 #
 #   docker compose -f docker-compose.satellite.yml up -d
 #
-# In .env: AGGREGATOR_URL (required), NODE_NAME, NODE_LOCATION and, for your
-# own aggregator, its JOIN_KEY. Without JOIN_KEY the aggregator's owner
-# approves the satellite (the code is in `docker compose logs rds-guard`).
-# Several dongles: rds-data/receivers.yml (see receivers.example.yml).
+# .env: start from .env.satellite.example. AGGREGATOR_URL (required),
+# NODE_NAME, NODE_LOCATION and, for your own aggregator, its JOIN_KEY.
+# Without JOIN_KEY the aggregator's owner approves the satellite (the code
+# is in `docker compose logs rds-guard`).
+# The radio: rds-data/receivers.yml. On its first start the satellite
+# writes it with the connected dongles commented out: remove the # and set
+# the frequencies (see receivers.example.yml).
 
 services:
   rds-guard:

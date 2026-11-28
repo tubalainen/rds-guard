@@ -1,7 +1,7 @@
 """The satellite's settings, from environment variables with defaults.
 
-The satellite only receives, records and reports: radio (receivers.yml or
-FM_FREQUENCY), recording and the aggregator it reports to. Everything else
+The satellite only receives, records and reports: radio (receivers.yml),
+recording and the aggregator it reports to. Everything else
 (transcription, map, push, MQTT, web UI) is the aggregator's.
 
 Nothing here exits: main() calls problems() and refuses to start on them.
@@ -64,15 +64,12 @@ RECEIVERS_FILE = os.environ.get("RECEIVERS_FILE", os.path.join(DATA_DIR, "receiv
 OLD_DB_PATH = os.path.join(DATA_DIR, "events.db")
 OLD_AUDIO_DIR = os.environ.get("AUDIO_DIR", os.path.join(DATA_DIR, "audio"))
 
-# --- Radio, without receivers.yml (one dongle) ---
-FM_FREQUENCY = os.environ.get("FM_FREQUENCY", "103.5M")
-# Comma-separated, up to 4 within 2 MHz: one dongle, several stations
+# --- Radio: only in receivers.yml ---
+# Before v1.1 one dongle could be set here. Only read to move them into
+# receivers.yml once, when that file is not there yet (receivers.load)
+FM_FREQUENCY = os.environ.get("FM_FREQUENCY", "").strip()
 FM_FREQUENCIES = [f.strip() for f in os.environ.get("FM_FREQUENCIES", "").split(",")
                   if f.strip()]
-# Older settings: no longer used (the calibration finds gain and ppm; fixed
-# values go in receivers.yml); only read to say so in the log
-RTL_GAIN = os.environ.get("RTL_GAIN", "").strip()
-PPM_CORRECTION = os.environ.get("PPM_CORRECTION", "").strip()
 RTL_DEVICE_SERIAL = os.environ.get("RTL_DEVICE_SERIAL", "").strip()
 
 # The wideband capture: 2 394 000 = 171 000 x 14 (exact decimation)

@@ -179,21 +179,149 @@ def test_same_frequency_on_two_dongles_warns():
     assert "also on receiver 1" in rs[1].warnings[0]
 
 
-def test_without_receivers_yml_one_dongle_uses_fm_frequency(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "FM_FREQUENCIES", ["103.5M", "102.9M"])
+RTL1 = dongles.Dongle(0, "Realtek", "RTL2838UHIDIR", "00000101")
+RTL2 = dongles.Dongle(1, "Realtek", "RTL2838UHIDIR", "00000102")
+AIRSPY = dongles.Dongle(0, "Airspy", "Airspy Mini", "0x644064DC2B1C2E4F", kind="airspy")
+
+
+@pytest.fixture
+def no_env_radio(monkeypatch):
+    """No FM_FREQUENCY & co in .env (a new installation)."""
+    monkeypatch.setattr(config, "FM_FREQUENCY", "")
+    monkeypatch.setattr(config, "FM_FREQUENCIES", [])
     monkeypatch.setattr(config, "RTL_DEVICE_SERIAL", "")
-    monkeypatch.setattr(config, "RTL_GAIN", "")
-    one = [dongles.Dongle(0, "Realtek", "RTL2838UHIDIR", "00000001")]
-    [r] = receivers.load(str(tmp_path / "none.yml"), dongles=one)
-    assert r.serial == "00000001" and r.frequencies == ["103.5M", "102.9M"]
-    two = one + [dongles.Dongle(1, "Realtek", "RTL2838UHIDIR", "00000002")]
-    with pytest.raises(receivers.ReceiverError, match="receivers.yml"):
-        receivers.load(str(tmp_path / "none.yml"), dongles=two)
+
+
+def _uncomment(text, serial, extra=""):
+    """Remove the # at the start of the lines of the receiver with this
+    serial number, as the file says. extra: a line from the optional part,
+    copied below its frequencies: with its # removed too."""
+    out, inside = [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith("#- serial:"):
+            inside = serial in line
+        elif not line.lstrip().startswith("#  frequencies:"):
+            inside = False
+        if inside:
+            line = line.replace("#", "", 1)
+            if extra and "frequencies:" in line:
+                line += "\n" + extra.replace("#", "", 1)
+        out.append(line)
+    return "\n".join(out) + "\n"
+
+
+def test_example_file_is_the_template_the_satellite_writes():
+    """Issue #106: receivers.example.yml is what a new satellite writes."""
+    with open(os.path.join(ROOT, "receivers.example.yml"), encoding="utf-8") as f:
+        assert f.read() == receivers.template()
+
+
+@pytest.mark.parametrize("serial", ["00000001", "0x644064DC2B1C2E4F"])
+def test_template_works_by_removing_the_hash(tmp_path, no_env_radio, serial):
+    """Issue #106: an example (RTL-SDR or Airspy) works by removing just the
+    # at the start of its lines, and so does an optional line copied below."""
+    text = receivers.template()
+    [name] = [line for line in text.splitlines() if "name: tak" in line]
+    path = tmp_path / "receivers.yml"
+    path.write_text(_uncomment(text, serial), encoding="utf-8")
+    [r] = receivers.load(str(path))
+    assert r.serial.lower() == serial.lower()
+    path.write_text(_uncomment(text, serial, extra=name), encoding="utf-8")
+    [r] = receivers.load(str(path))
+    assert r.name == "tak"
+
+
+def test_new_satellite_writes_a_template_with_its_receivers(tmp_path, no_env_radio):
+    """Issue #106: without receivers.yml (and nothing in .env) the satellite
+    writes one with the connected receivers' serial numbers commented out,
+    and asks for it to be filled in; it never guesses a frequency."""
+    path = tmp_path / "receivers.yml"
+    with pytest.raises(receivers.ReceiverError, match="Fill in .*00000101, 0x644064DC2B1C2E4F"):
+        receivers.load(str(path), dongles=[RTL1, AIRSPY])
+    text = path.read_text(encoding="utf-8")
+    assert "This RTL-SDR dongle (connected now)" in text and '"00000101"' in text
+    assert "This Airspy (connected now)" in text
+    assert '"00000001"' not in text                 # no example for a connected kind
+    # Still commented out: the same message, not a YAML error
+    with pytest.raises(receivers.ReceiverError, match="Fill in"):
+        receivers.load(str(path), dongles=[RTL1, AIRSPY])
+    path.write_text(_uncomment(text, "00000101"), encoding="utf-8")
+    [r] = receivers.load(str(path))
+    assert r.serial == "00000101" and r.frequencies == ["103.5M"]
+
+
+def test_new_satellite_without_a_receiver_still_writes_the_template(tmp_path, no_env_radio):
+    path = tmp_path / "receivers.yml"
+    with pytest.raises(receivers.ReceiverError, match="Fill in .*No RTL-SDR"):
+        receivers.load(str(path), dongles=[])
+    assert path.read_text(encoding="utf-8") == receivers.template()
+
+
+def test_fm_frequency_in_env_moves_to_receivers_yml(tmp_path, monkeypatch, no_env_radio):
+    """Issue #106: an installation from before v1.1 keeps running. Its
+    FM_FREQUENCIES (one dongle) are written to receivers.yml once."""
+    monkeypatch.setattr(config, "FM_FREQUENCIES", ["103.5M", "102.9M"])
+    path = tmp_path / "receivers.yml"
+    [r] = receivers.load(str(path), dongles=[RTL1])
+    assert r.serial == "00000101" and r.frequencies == ["103.5M", "102.9M"]
+    assert "Remove them from .env" in r.warnings[-1]
+    text = path.read_text(encoding="utf-8")
+    assert "In use (moved from FM_FREQUENCY in .env)" in text
+    assert "An Airspy Mini or R2" in text            # the other kind's example
+    # From now on the file is what counts, also without .env
+    monkeypatch.setattr(config, "FM_FREQUENCIES", [])
+    [again] = receivers.load(str(path), dongles=[])
+    assert (again.serial, again.frequencies) == ("00000101", ["103.5M", "102.9M"])
+    assert not any(".env" in w for w in again.warnings)
+
+
+def test_fm_frequency_with_rtl_device_serial_moves_without_the_dongle(
+        tmp_path, monkeypatch, no_env_radio):
+    monkeypatch.setattr(config, "FM_FREQUENCY", "99.1")
+    monkeypatch.setattr(config, "RTL_DEVICE_SERIAL", "00000102")
+    [r] = receivers.load(str(tmp_path / "receivers.yml"), dongles=[RTL1, RTL2])
+    assert r.serial == "00000102" and r.frequencies == ["99.1M"]
+
+
+def test_fm_frequency_with_several_dongles_asks_which(tmp_path, monkeypatch, no_env_radio):
+    """Several receivers and no RTL_DEVICE_SERIAL: which one is not known,
+    so the template is written and the satellite waits for it."""
+    monkeypatch.setattr(config, "FM_FREQUENCY", "103.5M")
+    path = tmp_path / "receivers.yml"
+    with pytest.raises(receivers.ReceiverError, match="Fill in"):
+        receivers.load(str(path), dongles=[RTL1, RTL2])
+    assert "In use" not in path.read_text(encoding="utf-8")
+
+
+def test_fm_frequency_without_a_dongle_writes_nothing_yet(tmp_path, monkeypatch, no_env_radio):
+    """The move waits for the dongle, so that its serial number is known."""
+    monkeypatch.setattr(config, "FM_FREQUENCY", "103.5M")
+    path = tmp_path / "receivers.yml"
     with pytest.raises(receivers.ReceiverError, match="No RTL-SDR"):
-        receivers.load(str(tmp_path / "none.yml"), dongles=[])
-    monkeypatch.setattr(config, "RTL_GAIN", "8")
-    [r] = receivers.load(str(tmp_path / "none.yml"), dongles=one)
-    assert r.gain == "auto" and "not used any more" in r.warnings[0]
+        receivers.load(str(path), dongles=[])
+    assert not path.exists()
+    [r] = receivers.load(str(path), dongles=[RTL1])
+    assert r.serial == "00000101"
+
+
+def test_an_existing_receivers_yml_is_never_overwritten(tmp_path, monkeypatch, no_env_radio):
+    monkeypatch.setattr(config, "FM_FREQUENCY", "99.1M")
+    path = tmp_path / "receivers.yml"
+    path.write_text('receivers:\n  - serial: "00000101"\n    frequencies: [103.5M]\n',
+                    encoding="utf-8")
+    [r] = receivers.load(str(path), dongles=[RTL1])
+    assert r.frequencies == ["103.5M"]
+    assert "FM_FREQUENCY, FM_FREQUENCIES and RTL_DEVICE_SERIAL in .env are not used" \
+        in r.warnings[-1]
+    assert path.read_text(encoding="utf-8").count("serial") == 1
+
+
+def test_receivers_yml_needs_a_serial_number(tmp_path, no_env_radio):
+    """Issue #106: serial: is always required, also with one receiver."""
+    path = tmp_path / "receivers.yml"
+    path.write_text("receivers:\n  - frequencies: [103.5M]\n", encoding="utf-8")
+    with pytest.raises(receivers.ReceiverError, match="'serial' is required"):
+        receivers.load(str(path), dongles=[RTL1])
 
 
 def test_receivers_file_is_read(tmp_path):

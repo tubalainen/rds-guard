@@ -23,7 +23,7 @@ def test_a_comment_only_value_is_empty(monkeypatch):
 
 def test_the_examples_have_no_comment_where_a_value_goes():
     import re
-    for path in (".env.example", "aggregator/.env.example"):
+    for path in (".env.example", ".env.satellite.example", "aggregator/.env.example"):
         with open(path, encoding="utf-8") as f:
             bad = [l for l in f if re.match(r"^[A-Z_]+=\s+#", l)]
         assert bad == [], f"{path}: {bad}"
