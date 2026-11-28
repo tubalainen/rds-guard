@@ -295,3 +295,18 @@ def test_verify_code_format():
     code = up.verify_code("8c7f3a0e-0000-4000-8000-000000000000")
     assert len(code) == 7 and code[3] == "-"
     assert code == up.verify_code("8c7f3a0e-0000-4000-8000-000000000000")
+
+
+def test_back_online_wakes_the_queue_at_once(store, link):
+    """After an outage the lanes may be in a long backoff (up to 5 min):
+    the first success (e.g. a heartbeat) wakes them, so a queued VMA or
+    traffic announcement is sent at once."""
+    link._set_state("offline", "connection refused")
+    for w in link._wakes:
+        w.clear()
+    link._set_state("connected", None, ok=True)
+    assert all(w.is_set() for w in link._wakes)
+    for w in link._wakes:
+        w.clear()
+    link._set_state("connected", None, ok=True)         # no change: nothing to wake
+    assert not any(w.is_set() for w in link._wakes)
