@@ -463,6 +463,10 @@ class Uplink:
                 log.warning("Uplink %s: %s", state, error)
             else:
                 log.info("Uplink %s", state)
+            if state == "connected":
+                # Back after an outage (e.g. the heartbeat got through): send
+                # what is queued now, not after the lanes' backoff (up to 5 min)
+                self.notify()
 
     # -- threads ------------------------------------------------------------
 

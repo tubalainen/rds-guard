@@ -161,7 +161,9 @@ class Station:
             had_ps = "ps" in self.info
             if "ps" in data:
                 self.info["ps"] = data["ps"].strip()
-            elif "partial_ps" in data and "ps" not in self.info:
+            elif "partial_ps" in data and "ps" not in self.info \
+                    and data["partial_ps"].strip():
+                # A PS not yet complete; blanks are no name ("Locked on to  ")
                 self.info["ps"] = data["partial_ps"].strip()
             for key in ("long_ps", "radiotext"):
                 if key in data:
@@ -601,6 +603,10 @@ def main():
     log.info("  Aggregator: %s", config.UPLINK_URL)
     log.info("  Node name:  %s", config.NODE_NAME or "(not set)")
     log.info("════════════════════════════════════════════")
+    if config.ENV_COMMENTS_DROPPED:
+        log.warning("In .env a comment stood where the value goes (KEY=  # …), taken as "
+                    "empty: %s. Put the comment on a line of its own.",
+                    ", ".join(config.ENV_COMMENTS_DROPPED))
     retired = config.retired_in_use()
     if retired:
         log.warning("Not used by the satellite any more (the aggregator does this): %s",

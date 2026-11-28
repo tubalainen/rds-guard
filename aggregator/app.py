@@ -68,6 +68,10 @@ async def main():
     log.info("  Trafikverket: %s", "on" if config.TRAFIKVERKET_API_KEY else "off")
     log.info("  MQTT:        %s", "enabled" if config.MQTT_ENABLED else "disabled")
     log.info("  Retention:   %d days", config.EVENT_RETENTION_DAYS)
+    if config.ENV_COMMENTS_DROPPED:
+        log.warning("In .env a comment stood where the value goes (KEY=  # …), taken as "
+                    "empty: %s. Put the comment on a line of its own.",
+                    ", ".join(config.ENV_COMMENTS_DROPPED))
     Path(config.AUDIO_DIR).mkdir(parents=True, exist_ok=True)
     store.init_db(config.DB_PATH)
     notifier.init()
