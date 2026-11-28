@@ -3,6 +3,8 @@ has its own queue, identity and approval; JOIN_KEY, UPLINK_TOKEN and the
 commands stay with the satellite's own aggregator."""
 
 import sqlite3
+import threading
+import time
 
 import uplink as up
 from test_satellite import _run
@@ -25,8 +27,9 @@ def _links(store, tmp_path, own_token="tok-own"):
     own_http, friend_http = FakeHttp(), FakeHttp()
     own = up.Uplink("https://agg.example", own_token, tmp_path, node_name="Kalle",
                     http=own_http, join_key="hemlig")
-    friend = up.Uplink(FRIEND, "", tmp_path, node_name="Kalle", http=friend_http,
-                       target=FRIEND)
+    # Given the own JOIN_KEY and token by mistake: the link must not use them
+    friend = up.Uplink(FRIEND, own_token or "leak", tmp_path, node_name="Kalle",
+                       http=friend_http, join_key="hemlig", target=FRIEND)
     store.enable_outbox(lambda: [u.notify() for u in (own, friend)],
                         targets=[store.PRIMARY, FRIEND])
     return own, friend
@@ -106,6 +109,7 @@ def test_only_the_own_aggregators_commands_are_run(store, tmp_path):
     own, friend = _links(store, tmp_path)
     ran = []
     own.on_commands = ran.extend                  # as the satellite sets it
+    friend.on_commands = ran.extend               # even if set by mistake
     command = {"commands": [{"type": "recalibrate", "id": 1, "receiver": "tak"}]}
     friend._http.answers = [Answer(200, command)]
     friend._ready.set()
@@ -159,3 +163,54 @@ def test_also_report_to_setting():
     assert out.stdout.strip() == "['https://rds.example.com'] []"
     out = _run(code, AGGREGATOR_URL="http://aggregator:8081", ALSO_REPORT_TO="rds.example.com")
     assert "ALSO_REPORT_TO: each address must start with http" in out.stdout
+
+
+def test_a_friend_that_never_approves_does_not_keep_events_for_ever(store, tmp_path):
+    """Its queue ages out (UPLINK_MAX_AGE_HOURS) while it waits for approval,
+    so the event and its recording are purged in the end."""
+    own, friend = _links(store, tmp_path)
+    event_id = _traffic_event(store, tmp_path)
+    _drain(own)
+    conn = store._conn()
+    conn.execute("UPDATE outbox SET created_at = 2000-01-01T00:00:00")
+    conn.execute("UPDATE events SET created_at = 2000-01-01T00:00:00")
+    conn.commit()
+    assert not friend._ready.is_set()
+    stop = threading.Event()
+    t = threading.Thread(target=friend._run_lane, args=(stop, up.EVENTS, threading.Event()))
+    t.start()
+    deadline = time.time() + 5
+    while store.outbox_depth(FRIEND) and time.time() < deadline:
+        time.sleep(0.05)
+    stop.set()
+    t.join(5)
+    assert store.outbox_depth(FRIEND) == 0
+    store.purge(7, str(tmp_path))
+    assert store.get_event(event_id) is None
+    assert not (tmp_path / f"{event_id}.ogg").exists()
+
+
+def test_both_aggregators_get_the_event_with_the_real_threads(store, tmp_path, monkeypatch):
+    """The links as the satellite runs them: the friend approves after a
+    while, then both have the event and its recording."""
+    monkeypatch.setattr(up, "_JOIN_EVERY", 0.1)
+    own, friend = _links(store, tmp_path)
+    friend._http.answers = [FakeResponse(202), FakeResponse(200)]
+    stop = threading.Event()
+    try:
+        for u in (own, friend):
+            u.start(stop)
+        _traffic_event(store, tmp_path)
+        deadline = time.time() + 10
+        while store.outbox_depth() and time.time() < deadline:
+            time.sleep(0.05)
+        assert store.outbox_depth() == 0
+        for u in (own, friend):
+            puts = [c["url"] for c in u._http.calls if c["method"] == "PUT"]
+            assert len(puts) == 2 and puts[1].endswith("/audio")
+        assert friend._http.calls[0]["url"] == f"{FRIEND}/api/v1/ingest/join"
+    finally:
+        stop.set()
+        for u in (own, friend):
+            for t in u._threads:
+                t.join(5)

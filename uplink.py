@@ -152,6 +152,9 @@ class Uplink:
         self._heartbeat_sec = heartbeat_sec
         self._max_age_hours = max_age_hours
         self._http = http  # requests-compatible module/session (tests inject)
+        if target:
+            # Another aggregator: never the own one's JOIN_KEY or token
+            token, join_key = "", ""
         self._join_key = join_key or ""
         self._suggested_location = suggested_location or None
 
@@ -391,7 +394,7 @@ class Uplink:
         if resp is None:
             return outcome
         outcome = self._classify(resp, "POST", "/heartbeat")
-        if outcome == OK and self.on_commands is None and self._target:
+        if outcome == OK and self._target:
             try:
                 ignored = (resp.json() or {}).get("commands") or []
             except Exception:
@@ -400,7 +403,7 @@ class Uplink:
                 # Only the satellite's own aggregator may change its receivers
                 self.log.info("Uplink: ignoring %d command(s) from this aggregator "
                               "(only AGGREGATOR_URL's are run)", len(ignored))
-        if outcome == OK and self.on_commands is not None:
+        elif outcome == OK and self.on_commands is not None:
             try:
                 commands = (resp.json() or {}).get("commands") or []
             except Exception:
@@ -513,16 +516,22 @@ class Uplink:
         backoff = _BACKOFF_MIN
         last_purge = 0.0
         while not stop_event.is_set():
+            now = time.time()
+            # Another aggregator that never approves (or removed) this node
+            # must not keep events and recordings here for ever: its queue
+            # ages out also while it waits
+            ages_out = self._ready.is_set() or self._target
+            if lane is EVENTS and ages_out and now - last_purge >= 3600:
+                try:
+                    event_store.outbox_purge(self._max_age_hours, self._target)
+                except Exception:
+                    self.log.exception("Uplink purge error")
+                last_purge = now
             if not self._ready.is_set():
                 # Not approved yet: keep everything queued
                 _wait(stop_event, wake, 5)
                 continue
             try:
-                now = time.time()
-                if lane is EVENTS and now - last_purge >= 3600:
-                    event_store.outbox_purge(self._max_age_hours, self._target)
-                    last_purge = now
-
                 outcome = self.process_one(lane)
             except Exception:
                 self.log.exception("Uplink worker error")

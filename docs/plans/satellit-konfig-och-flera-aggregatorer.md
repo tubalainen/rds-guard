@@ -1,8 +1,9 @@
 # Satellit: radion bara i receivers.yml, och flera aggregatorer
 
 Status: godkänd 2026-11-28 (issue #106). Del A byggd 2026-11-28 (PR #115).
-Del B byggd 2026-11-28 (gren claude/issue-106-also-report-to). Ingen
-release än.
+Del B byggd 2026-11-28 (gren claude/issue-106-also-report-to), testad med
+pytest (även med riktiga trådar och falska aggregatorer). Kvar: e2e-scenariot
+med två riktiga aggregatorer (tools/e2e). Ingen release än.
 
 ## Bakgrund
 
