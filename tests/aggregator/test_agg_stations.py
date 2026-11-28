@@ -254,3 +254,33 @@ def test_older_cut_short_ps_is_learned_at_start(agg_store, node):
     conn.commit()
     store.init_db(store._DB_PATH)
     assert store.get_station("103500/E824")["rds_name"] == "P4 Värmland"
+
+
+def test_named_station_takes_the_area_of_its_namesake_on_the_frequency(node):
+    # Evening: 0xE224 "P4 SR", named P4 Örebro in Admin with its area.
+    # Morning: the regional 0xE424 "P4 Örebr", named from RDS, no area.
+    put(node, ev("102.8M"))
+    store.set_station("102800/E224", "P4 Örebro", "Örebro län")
+    _, _, row = put(node, ev("102.8M", pi="0xE424", station_ps="P4 Örebr",
+                             start=T + 3600))
+    st = store.get_station("102800/E424")
+    assert st["rds_name"] == "P4 Örebro" and st["area"] is None
+    assert st["inherited_area"] == "Örebro län"
+    assert st["inherited_from"] == "102800/E224"
+    assert st["inherited_name"] is None
+    named = store.with_station_name(dict(row))
+    assert named["station_name"] == "P4 Örebro"
+    assert named["station_area"] == "Örebro län"
+    listed = {s["station_key"]: s for s in store.list_stations()}
+    assert listed["102800/E424"]["suggested_area"] is None
+    # Its own area wins
+    store.set_station("102800/E424", None, "Karlskoga, Örebro län")
+    assert store.station_area(store.get_station("102800/E424")) == \
+        "Karlskoga, Örebro län"
+
+
+def test_area_is_not_taken_from_another_name_on_the_frequency(node):
+    put(node, ev("102.8M"))
+    store.set_station("102800/E224", "P4 Väst", "Uddevalla, Västra Götalands län")
+    put(node, ev("102.8M", pi="0xE424", station_ps="P4 Örebr", start=T + 3600))
+    assert store.get_station("102800/E424")["inherited_area"] is None
