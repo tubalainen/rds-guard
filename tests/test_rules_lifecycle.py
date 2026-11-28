@@ -17,7 +17,9 @@ PI = "0xE824"
 
 
 def group(station, ts, **fields):
-    rg.process_group(station, {"pi": PI, "timestamp": ts, **fields})
+    # TA counts once a few groups in a row agree: send it that many times
+    for _ in range(rg.TA_CONFIRM_GROUPS if "ta" in fields else 1):
+        rg.process_group(station, {"pi": PI, "timestamp": ts, **fields})
 
 
 def outbox(store):
@@ -92,7 +94,8 @@ def test_the_same_radiotext_in_the_next_announcement_is_kept(store, engine):
 # regional PI (0xE824), also in the middle of an announcement.
 
 def flip(station, pi, ts, **fields):
-    rg.process_group(station, {"pi": pi, "timestamp": ts, **fields})
+    for _ in range(rg.TA_CONFIRM_GROUPS if "ta" in fields else 1):
+        rg.process_group(station, {"pi": pi, "timestamp": ts, **fields})
 
 
 def test_an_announcement_that_ends_on_the_other_pi_ends(store, engine):
@@ -137,3 +140,39 @@ def test_a_station_gone_silent_ends_its_announcement(store, engine):
     [ev] = store.query_events()[0]
     assert ev["state"] == "end"
     assert not engine.engine.busy()
+
+
+# On a weak station single corrupted groups flip TA (seen on 102.8 on
+# 2026-11-28: TA on for one group, again and again, no announcement)
+
+def one(station, ts, **fields):
+    rg.process_group(station, {"pi": PI, "timestamp": ts, **fields})
+
+
+def test_a_single_ta_group_is_no_announcement(store, engine):
+    group(engine, "2026-11-28T05:35:00", ta=False)
+    for t in ("05:35:52", "05:38:39", "05:42:20"):
+        one(engine, f"2026-11-28T{t}", ta=True)               # one corrupted group
+        group(engine, f"2026-11-28T{t}", ta=False)
+    assert store._conn().execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0
+    assert outbox(store) == []
+    assert engine.ta_blips == 3
+
+
+def test_a_single_ta_off_group_does_not_end_the_announcement(store, engine):
+    group(engine, "2026-11-28T07:00:00", ta=False)
+    group(engine, "2026-11-28T07:00:05", ta=True)
+    one(engine, "2026-11-28T07:00:20", ta=False)              # one corrupted group
+    group(engine, "2026-11-28T07:00:21", ta=True)
+    group(engine, "2026-11-28T07:01:05", ta=False)
+    [ev] = store.query_events()[0]
+    assert ev["state"] == "end" and ev["duration_sec"] == 60
+
+
+def test_the_announcement_starts_at_its_first_ta_group(store, engine):
+    group(engine, "2026-11-28T07:00:00", ta=False)
+    one(engine, "2026-11-28T07:00:05", ta=True)
+    one(engine, "2026-11-28T07:00:06", ta=True)
+    one(engine, "2026-11-28T07:00:06", ta=True)
+    [ev] = store.query_events()[0]
+    assert ev["started_at"].startswith("2026-11-28T07:00:05")
