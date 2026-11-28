@@ -160,8 +160,15 @@ const RDSMap = (() => {
     const fmtDay = (d) => d.toLocaleDateString('sv-SE', DAY);
     const fmtShort = (d) => `${d.toLocaleDateString('sv-SE', { day: 'numeric', month: 'short' })} ${RDSUI.fmtTime(d)}`;
 
+    /* When the radio first and last spoke of it. last_seen can be later:
+       Trafikverket keeps a current incident on the map. */
+    const heardFirst = (inc) => (inc.mentions && inc.mentions.length
+        ? inc.mentions[inc.mentions.length - 1] : inc.first_seen);
+    const heardLast = (inc) => (inc.mentions && inc.mentions.length ? inc.mentions[0] : inc.last_seen);
+
     function ago(inc) {
-        const h = ageHours(inc);
+        const d = RDSUI.parseTs(heardLast(inc));
+        const h = d ? Math.max(0, (Date.now() - d.getTime()) / 3.6e6) : HOURS + 1;
         if (h < 1 / 60) return 'nyss';
         if (h < 1) return `för ${Math.round(h * 60)} min sedan`;
         if (h <= HOURS) return `för ${Math.floor(h)} h ${Math.round((h % 1) * 60)} min sedan`;
@@ -170,8 +177,8 @@ const RDSMap = (() => {
 
     /** When an incident was mentioned: "24 nov. 08:10–09:40". */
     function when(inc) {
-        const a = RDSUI.parseTs(inc.first_seen);
-        const b = RDSUI.parseTs(inc.last_seen);
+        const a = RDSUI.parseTs(heardFirst(inc));
+        const b = RDSUI.parseTs(heardLast(inc));
         if (!b) return '';
         if (!a || b - a < 60000) return fmtShort(b);
         if (a.toDateString() === b.toDateString()) return `${fmtShort(a)}–${RDSUI.fmtTime(b)}`;
@@ -692,7 +699,7 @@ const RDSMap = (() => {
                 // Grouped: the last 12 hours, then one heading per day
                 let group = null;
                 incidents.forEach((inc) => {
-                    const d = RDSUI.parseTs(inc.last_seen);
+                    const d = RDSUI.parseTs(heardLast(inc));
                     const g = !isHist(inc) ? `Senaste ${HOURS} timmarna` : d ? fmtDay(d) : 'Okänt datum';
                     if (g !== group) {
                         group = g;
