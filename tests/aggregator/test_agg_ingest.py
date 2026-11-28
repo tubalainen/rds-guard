@@ -262,6 +262,23 @@ async def test_heartbeat_is_cleaned_and_stored(client, node, agg_store, hooks):
     assert hooks.calls[-1] == ("heartbeat", "Kalle")
 
 
+async def test_heartbeat_keeps_what_is_on_air(client, node, agg_store):
+    """Issue #112: the RadioText and programme type reach the node card."""
+    station = {"frequency": "103.5M", "pi": "0xE824", "ps": "P4 Värml",
+               "prog_type": "Sport",
+               "radiotext": "Sportextra med världscupen i skidor" + "x" * 100}
+    body = {"node_name": "Kalle", "stations": [station],
+            "receivers": [{"id": "tak", "serial": "1", "stations": [station]}]}
+    r = await client.post("/api/v1/ingest/heartbeat", json=body,
+                          headers=node["headers"])
+    assert r.status == 200
+    st = agg_store.get_node(node["node"]["id"])["status"]
+    for s in (st["stations"][0], st["receivers"][0]["stations"][0]):
+        assert s["radiotext"].startswith("Sportextra med världscupen i skidor")
+        assert len(s["radiotext"]) == 64
+        assert s["prog_type"] == "Sport"
+
+
 async def test_rate_limit(aiohttp_client, agg_store, node):
     client = await aiohttp_client(ingest.create_ingest_app(
         limiter=ingest.RateLimiter(per_minute=1, burst=2)))

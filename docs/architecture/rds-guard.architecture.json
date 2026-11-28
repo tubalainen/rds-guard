@@ -398,7 +398,7 @@
       "title": "Satellite (standalone without UPLINK_URL)",
       "items": [
         "Keeps its own events, audio, transcriptions and optional MQTT; transcribes with ElevenLabs or the bundled KB-Whisper",
-        "Uplink sends event metadata, OGG audio and a 30 s heartbeat over HTTPS with a node token; never transcriptions",
+        "Uplink sends event metadata, OGG audio and a 10 s heartbeat over HTTPS with a node token; never transcriptions",
         "Only outbound HTTPS; queued locally for up to 72 h when offline"
       ]
     },

@@ -10,7 +10,7 @@ The satellite sends raw data only:
 - **events**: traffic announcements and emergency broadcasts, with their RDS
   context and timestamps
 - **audio**: the recording of each event, as OGG/Opus
-- **heartbeat**: station and pipeline status every 30 seconds
+- **heartbeat**: station and pipeline status every 10 seconds
 
 Version 2 (v1.0.0) adds **joining**: a satellite without a configured token
 makes its own and asks to join, and the aggregator's owner approves it. It
@@ -178,7 +178,7 @@ Responses:
 
 ## `POST /heartbeat`
 
-Sent every `UPLINK_HEARTBEAT_SEC` seconds (default 30), and three seconds
+Sent every `UPLINK_HEARTBEAT_SEC` seconds (default 10), and three seconds
 after start-up.
 
 Body (JSON, at most 64 KiB):
@@ -191,7 +191,7 @@ Body (JSON, at most 64 KiB):
 | `uptime_sec` | integer or null | |
 | `receivers` | array | ≤ 8 items, one per dongle (see below) |
 | `pipeline` | object | `{"state": string, "error": string or null}`, each ≤ 256 chars: the worst of the receivers |
-| `stations` | array | ≤ 32 items: `frequency`, `pi`, `ps`, `long_ps`, `prog_type`, `tp`, `ta`, `groups_per_sec`, `groups_total`, all receivers together |
+| `stations` | array | ≤ 32 items: `frequency`, `pi`, `ps`, `long_ps`, `prog_type`, `radiotext` (≤ 64 chars, what is on air now; null when the station has been silent for `RADIOTEXT_STALE_SEC`, 60 s), `tp`, `ta`, `groups_per_sec`, `groups_total`, all receivers together |
 | `queue_depth` | integer or null | Items waiting in the satellite's outbox |
 | `suggested_location` | string or null | ≤ 80 chars, the satellite's `NODE_LOCATION` as "Ort, Län" (e.g. `Karlstad, Värmlands län`). The aggregator places the node's messages there unless its owner set another place in Admin. Optional (`location` is read too) |
 

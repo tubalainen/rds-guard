@@ -399,7 +399,7 @@ be opened on your router: the satellite only makes outbound requests.
 
 What is sent: each traffic announcement and emergency broadcast (station,
 frequency, programme type, RadioText, start and end), its recording (about
-0.7 MB per 2 minutes), and a status report every 30 seconds (stations,
+0.7 MB per 2 minutes), and a status report every 10 seconds (stations,
 decode rate, gain, ppm, version, queue length). Nothing else leaves your
 network.
 
@@ -465,7 +465,7 @@ The satellite's:
 | `RECORD_EVENT_TYPES` | `traffic,emergency` | Event types to record |
 | `MAX_RECORDING_SEC` | `600` | Safety cutoff for one recording (at most 1200) |
 | `SATELLITE_KEEP_DAYS` | `7` | Days to keep delivered recordings and events |
-| `UPLINK_HEARTBEAT_SEC` | `30` | Seconds between status reports |
+| `UPLINK_HEARTBEAT_SEC` | `10` | Seconds between status reports |
 | `UPLINK_MAX_AGE_HOURS` | `168` | Unsent items older than this are dropped |
 
 Settings only the old satellite used (`RTL_GAIN`, `PPM_CORRECTION`,

@@ -70,12 +70,23 @@ const Aggregator = (() => {
 
     function nodeCard(n) {
         const state = !n.enabled ? ['', 'Inaktiverad'] : (n.online ? ['ok', 'Online'] : ['warn', 'Offline']);
-        const stationLine = (s) => [s.station_name || s.ps || s.pi || 'ingen station än',
-            RDSUI.fmtFreq(s.frequency), s.pi && s.ps ? `PI ${s.pi}` : '',
-            s.groups_per_sec != null ? `${s.groups_per_sec} grp/s` : '',
-            s.ta ? 'TA pågår' : (s.tp ? 'TP' : '')]
-            .filter(Boolean).join(' · ');
-        const stations = (n.stations || []).map(stationLine);
+        // One station: name and frequency, what is on air (RadioText and
+        // programme type, never cut), then PI, decode rate and TP/TA
+        const stationBlock = (s) => {
+            const tech = [s.pi && s.ps ? `PI ${s.pi}` : '',
+                s.groups_per_sec != null ? `${s.groups_per_sec} grp/s` : '',
+                s.ta ? '' : (s.tp ? 'TP' : '')].filter(Boolean).join(' · ');
+            const onAir = [s.radiotext, s.prog_type].filter(Boolean).join(' · ');
+            return `<div style="display:flex;flex-direction:column;gap:1px;padding:4px 0">
+                <div style="display:flex;align-items:baseline;gap:6px;flex-wrap:wrap">
+                    <b>${esc(s.station_name || s.ps || s.pi || 'ingen station än')}</b>
+                    <span class="muted">${esc(RDSUI.fmtFreq(s.frequency))}</span>
+                    ${s.ta ? '<span class="pill traffic">TA pågår</span>' : ''}</div>
+                ${onAir ? `<div style="overflow-wrap:anywhere">${esc(onAir)}</div>` : ''}
+                ${tech ? `<div class="muted">${esc(tech)}</div>` : ''}
+            </div>`;
+        };
+        const stations = (n.stations || []).map(stationBlock);
         const recState = { running: ['ok', 'kör'], starting: ['warn', 'startar'], paused: ['warn', 'kalibreras'],
             error: ['bad', 'fel'], stopped: ['warn', 'stoppad'] };
         const receivers = (n.receivers || []).map((r) => {
@@ -91,7 +102,7 @@ const Aggregator = (() => {
                 <div><span class="dot ${cls}"></span> <b>${esc(r.name || r.id || r.serial || 'mottagare')}</b>
                     <span class="muted">${esc(r.serial ? `SN ${r.serial}` : '')} · ${esc(label)}</span></div>
                 ${tune ? `<div class="muted">${esc(tune)}</div>` : ''}
-                ${(r.stations || []).map((s) => `<div>${esc(stationLine(s))}</div>`).join('')}
+                ${(r.stations || []).map(stationBlock).join('')}
                 ${r.error ? `<div style="color:var(--warn)">${esc(r.error)}</div>` : ''}
                 ${r.gain_mode !== 'manual' && r.serial ? `<div><button class="btn small" type="button" data-action="recalibrate" data-receiver="${esc(r.id || r.serial)}">Kalibrera om</button></div>` : ''}
             </div>`;
@@ -120,7 +131,7 @@ const Aggregator = (() => {
                 <span class="pill ${state[0]}">${state[1]}</span>
             </div>
             ${receivers.length ? `<div style="display:flex;flex-direction:column;gap:8px">${receivers.join('')}</div>`
-        : `<div class="small">${stations.length ? stations.map((s) => `<div>${esc(s)}</div>`).join('') : '<span class="muted">Inga stationer rapporterade än</span>'}</div>`}
+        : `<div class="small">${stations.length ? stations.join('') : '<span class="muted">Inga stationer rapporterade än</span>'}</div>`}
             <div class="small">${esc(place)}${placeFrom ? ` <span class="muted">(${placeFrom})</span>` : ''}</div>
             <div class="small muted">${esc(meta.join(' · '))}</div>
             ${warn.length ? `<div class="small" style="color:var(--warn)">${esc(warn.join(' · '))}</div>` : ''}

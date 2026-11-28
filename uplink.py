@@ -120,7 +120,7 @@ class Uplink:
     """Join, two outbox workers and the heartbeat."""
 
     def __init__(self, base_url, token, audio_dir, node_name="",
-                 version="dev", status_fn=None, heartbeat_sec=30,
+                 version="dev", status_fn=None, heartbeat_sec=10,
                  max_age_hours=72, http=None, join_key="",
                  suggested_location=None):
         self._base = base_url.rstrip("/") + "/api/v1/ingest"
