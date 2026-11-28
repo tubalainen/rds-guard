@@ -31,6 +31,7 @@ log = logging.getLogger("rds-guard")
 ALERT_PTY = {"Alarm", "Alarm - Loss of radio"}
 MIN_EVENT_SEC = 10          # shorter "events" are RDS noise
 SILENT_END_SEC = 180        # no RDS this long: an open broadcast ends
+RADIOTEXT_STALE_SEC = 60    # no RDS this long: the status report drops the RadioText
 STATION_KEY = "station"     # TA/RT/PTY state is per station, not per PI
 TA_CONFIRM_GROUPS = 3       # TA changes when this many groups in a row agree
 PTY_CONFIRM_GROUPS = 3      # so does the programme type (Alarm: a VMA push)
@@ -521,6 +522,16 @@ def process_group(station, data):
 # The satellite
 # ---------------------------------------------------------------------------
 
+def on_air(snap):
+    """A station snapshot for the status report: its RadioText says what is
+    on air now, so it is left out once the station has been silent for
+    RADIOTEXT_STALE_SEC (it is only cleared on a PI switch otherwise)."""
+    age = snap.get("last_group_age_sec")
+    if age is None or age >= RADIOTEXT_STALE_SEC:
+        snap = dict(snap, radiotext=None)
+    return snap
+
+
 class Satellite:
     """The receivers, their pipelines and stations, and the uplink."""
 
@@ -546,7 +557,7 @@ class Satellite:
                 "state": pipe["state"], "error": pipe["error"],
                 "check": (p.check[1][:64] if getattr(p, "check", None) else None),
                 **cal,
-                "stations": [s["station"].snapshot() for s in p.stations],
+                "stations": [on_air(s["station"].snapshot()) for s in p.stations],
             })
         return out
 
@@ -567,8 +578,9 @@ class Satellite:
             # For aggregators and node cards that read the flat shape
             "pipeline": {"state": worst, "error": "; ".join(errors)[:256] or None},
             "stations": [{k: st.get(k) for k in
-                          ("frequency", "pi", "ps", "long_ps", "prog_type", "tp", "ta",
-                           "groups_per_sec", "groups_total")} for st in stations],
+                          ("frequency", "pi", "ps", "long_ps", "prog_type", "radiotext",
+                           "tp", "ta", "groups_per_sec", "groups_total")}
+                         for st in stations],
         }
 
 

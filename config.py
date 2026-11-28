@@ -96,7 +96,7 @@ JOIN_KEY = os.environ.get("JOIN_KEY", "").strip()
 NODE_NAME = os.environ.get("NODE_NAME", "").strip()
 # "Ort, Län", suggested to the aggregator for the map
 NODE_LOCATION = os.environ.get("NODE_LOCATION", "").strip()
-UPLINK_HEARTBEAT_SEC = max(10, _int(os.environ.get("UPLINK_HEARTBEAT_SEC"), 30))
+UPLINK_HEARTBEAT_SEC = max(10, _int(os.environ.get("UPLINK_HEARTBEAT_SEC"), 10))
 UPLINK_MAX_AGE_HOURS = max(1, _int(os.environ.get("UPLINK_MAX_AGE_HOURS"), 168))
 
 UPLINK_ENABLED: bool = bool(UPLINK_URL)

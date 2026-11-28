@@ -335,3 +335,41 @@ def test_af_values_are_read_in_khz_or_mhz_and_nonsense_is_dropped():
     same, regional = rds_guard.alternative_frequencies(
         {"alt_frequencies_a": [103.5, 87600, "x", 2000, None], "pi": "0xE224"})
     assert same == ["103.5M", "87.6M"] and regional == []
+
+
+def test_heartbeat_reports_what_is_on_air():
+    """Issue #112: the status report carries the RadioText and programme
+    type, and drops a RadioText the station no longer sends."""
+    import time
+    import rds_guard as rg
+    from pipeline import ReceiverPipeline
+    r = receivers.parse({"receivers": [{"serial": "1", "name": "tak",
+                                        "frequencies": ["103.5M"]}]})[0]
+    st = rg.Station("tak", "103.5M")
+    st.on_line(json.dumps({"pi": "0xE824", "group": "2A", "prog_type": "Sport",
+                           "radiotext": "Sportextra med världscupen i skidor ",
+                           "timestamp": "2026-11-28T10:00:00"}).encode())
+    sat = rg.Satellite()
+    sat.pipelines = [ReceiverPipeline(r, [{"frequency": "103.5M", "station": st,
+                                          "callback": st.on_line}], lambda: (20.0, 0))]
+    snap = sat.status()
+    for s in (snap["stations"][0], snap["receivers"][0]["stations"][0]):
+        assert s["radiotext"] == "Sportextra med världscupen i skidor"
+        assert s["prog_type"] == "Sport"
+    # Silent for a minute: the old text is not on air any more
+    st.stats.last_at = time.time() - rg.RADIOTEXT_STALE_SEC
+    snap = sat.status()
+    assert snap["stations"][0]["radiotext"] is None
+    assert snap["receivers"][0]["stations"][0]["radiotext"] is None
+    assert snap["stations"][0]["prog_type"] == "Sport"
+
+
+def test_heartbeat_every_ten_seconds_by_default():
+    """Issue #112: a status report every 10 s unless UPLINK_HEARTBEAT_SEC
+    says otherwise, and never more often."""
+    def sec(**env):
+        return int(_run("import config; print(config.UPLINK_HEARTBEAT_SEC)", **env).stdout)
+
+    assert sec() == 10
+    assert sec(UPLINK_HEARTBEAT_SEC="3") == 10
+    assert sec(UPLINK_HEARTBEAT_SEC="30") == 30

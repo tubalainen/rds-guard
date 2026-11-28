@@ -193,6 +193,8 @@ def _clean_stations(stations, limit=STATIONS_PER_NODE):
             "ps": _cap(st.get("ps"), 64),
             "long_ps": _cap(st.get("long_ps"), 64),
             "prog_type": _cap(st.get("prog_type"), 64),
+            # What is on air now (RadioText is at most 64 characters)
+            "radiotext": _cap(st.get("radiotext"), 64),
             "tp": st.get("tp") if isinstance(st.get("tp"), bool) else None,
             "ta": st.get("ta") if isinstance(st.get("ta"), bool) else None,
             "groups_per_sec": _num(st.get("groups_per_sec")),
