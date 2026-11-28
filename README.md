@@ -420,8 +420,8 @@ docker compose logs rds-guard | grep -i -E "join|code|approved"
 The aggregator's owner sees the same code under **Admin → Noder → Väntar på
 godkännande** and approves it there (or with
 `python3 -m aggregator.nodes approve K7Q-3PD`). Until then the satellite
-records as usual and queues everything; nothing is lost. No ports need to
-be opened on your router: the satellite only makes outbound requests.
+records as usual and queues everything for up to `UPLINK_MAX_AGE_HOURS`
+(7 days). No ports need to be opened on your router: the satellite only makes outbound requests.
 
 What is sent: each traffic announcement and emergency broadcast (station,
 frequency, programme type, RadioText, start and end), its recording (about

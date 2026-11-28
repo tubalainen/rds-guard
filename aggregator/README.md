@@ -244,7 +244,8 @@ NODE_LOCATION=Karlstad, Värmlands län
    its history (for example after they reinstalled).
 
 3. Within a minute the node turns green. Until you approve it, the satellite
-   records as usual and queues everything; nothing is lost.
+   records as usual and queues everything for up to `UPLINK_MAX_AGE_HOURS`
+   (7 days).
 
 **From the command line** (also when Admin is off, `ADMIN_PASSWORD` empty):
 
