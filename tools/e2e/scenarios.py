@@ -254,9 +254,41 @@ def s_long():
           json.dumps([brief(e) for e in evs], ensure_ascii=False))
 
 
+def s_speech():
+    """A spoken announcement is transcribed and placed on the map."""
+    if not args.speech:
+        check("speech scenario has a WAV (--speech)", False)
+        return
+    BASE["102.8"]["audio"] = args.speech
+    _stations["102.8"]["audio"] = args.speech
+    set_station("102.8", audio=args.speech)
+    # The stand-in Airspy picks a station's audio when it starts
+    subprocess.run(["docker", "restart", args.satellite], check=True, capture_output=True)
+    say("  satellite restarted (to take the speech)")
+    wait(25, "(satellite back)")
+    t0 = utc_now()
+    set_station("102.8", ta=True)
+    wait(35, "(announcement on air)")
+    set_station("102.8", ta=False)
+    e = None
+    for _ in range(40):
+        wait(10, "(transcription)")
+        evs = events_since(t0)
+        e = evs[0] if evs else None
+        if e and e.get("transcription_status") not in (None, "queued", "running", "pending"):
+            break
+    check("transcribed", e is not None and e.get("transcription_status") == "done"
+          and e.get("transcription"),
+          json.dumps({k: (e or {}).get(k) for k in ("transcription_status", "transcription",
+                                                     "geo_status", "incidents")},
+                     ensure_ascii=False)[:600])
+    text = ((e or {}).get("transcription") or "").lower()
+    check("the transcript names the road", "e18" in text or "e 18" in text, text[:200])
+
+
 SCENARIOS = {"full": s_full, "blip": s_blip, "pi": s_pi_switch, "both": s_both,
              "alarm": s_alarm, "silent": s_silent, "aggregator": s_aggregator_down,
-             "restart": s_satellite_restart, "long": s_long}
+             "restart": s_satellite_restart, "long": s_long, "speech": s_speech}
 
 
 def main():
@@ -267,7 +299,9 @@ def main():
     p.add_argument("--satellite", default="e2e-rds-guard")
     p.add_argument("--aggregator", default="e2e-aggregator")
     p.add_argument("--long-sec", type=int, default=90)
-    p.add_argument("scenarios", nargs="*", default=list(SCENARIOS))
+    p.add_argument("--speech", help="a WAV as the satellite's container sees it")
+    p.add_argument("scenarios", nargs="*",
+                   default=[s for s in SCENARIOS if s != "speech"])
     args = p.parse_args()
     reset()
     wait(10, "(stations settle)")
