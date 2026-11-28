@@ -637,7 +637,8 @@ def test_lost_samples_are_logged_as_a_warning(caplog, monkeypatch):
     import pipeline
     # As on a host booted seconds ago (CI): monotonic time is still small
     monkeypatch.setattr(pipeline.time, "monotonic", lambda: 5.0)
-    err = io.BytesIO(b"Streaming at 10.001 MSPS\nStreaming at  8.200 MSPS\n"
+    start = b"Streaming at 10.001 MSPS\n" * pipeline.SHORT_SKIP_FIRST
+    err = io.BytesIO(start + b"Streaming at 10.001 MSPS\nStreaming at  8.200 MSPS\n"
                      b"Streaming at  8.100 MSPS\nairspy_open() failed\n")
     with caplog.at_level(logging.DEBUG, logger="rds-guard"):
         pipeline._stderr_reader(err, "airspy_rx air", 10_000_000)
@@ -645,6 +646,28 @@ def test_lost_samples_are_logged_as_a_warning(caplog, monkeypatch):
     assert len(warnings) == 1 and "8.200" in warnings[0] and "samples are lost" in warnings[0]
     assert any("airspy_open() failed" in r.getMessage() for r in caplog.records
                if r.levelno == logging.INFO)
+
+
+def test_the_first_readings_after_start_never_warn(caplog, monkeypatch):
+    """As on docker01: an Airspy R2 at 2.5 MS/s reports about 2.35 MSPS in
+    the first second, while the stream starts, and full rate after. That is
+    no loss of samples; a low reading later still is."""
+    import io
+    import logging
+    import pipeline
+    monkeypatch.setattr(pipeline.time, "monotonic", lambda: 5.0)
+    ok = b"Streaming at 2.500 MSPS\n"
+    first = b"Streaming at 2.345 MSPS\n"
+    err = io.BytesIO(first + ok * 20)
+    with caplog.at_level(logging.DEBUG, logger="rds-guard"):
+        pipeline._stderr_reader(err, "airspy_rx r2", 2_500_000)
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+    caplog.clear()
+    err = io.BytesIO(first + ok * 20 + b"Streaming at 2.100 MSPS\n")
+    with caplog.at_level(logging.DEBUG, logger="rds-guard"):
+        pipeline._stderr_reader(err, "airspy_rx r2", 2_500_000)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "2.100" in warnings[0]
 
 
 def test_a_wide_capture_is_tried_once_more(monkeypatch):
