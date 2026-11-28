@@ -386,29 +386,45 @@ def _station_rows():
     return rows
 
 
+def _own_name(r):
+    return r.get("name") or r.get("rds_name")
+
+
 def _inherit_from_frequency(rows):
-    """A station with no name of its own takes the name (and area) of the
-    other PI on its frequency. P4 swaps PI and PS when it sends the shared
-    programme: 103.5 is 0xE824 "P4 Värml" in the regional hours and 0xE224
-    "P4 SR" in the evening, so 103500/E224 is called P4 Värmland too. Only
-    when the frequency's named stations agree on one name."""
+    """Fill in what a station lacks from the other PIs on its frequency.
+    P4 swaps PI and PS when it sends the shared programme: 103.5 is 0xE824
+    "P4 Värml" in the regional hours and 0xE224 "P4 SR" in the evening.
+
+    - No name of its own: the name (and area) of the named stations on the
+      frequency, when they agree on one name (103500/E224 is P4 Värmland).
+    - A name but no area: the area of a station on the frequency with the
+      same name, when they agree on one area (102800/E424 "P4 Örebro" takes
+      "Örebro län" from 102800/E224, named P4 Örebro in Admin)."""
     by_freq = {}
     for r in rows.values():
-        own = r.get("name") or r.get("rds_name")
-        if own and r.get("frequency_khz"):
+        if _own_name(r) and r.get("frequency_khz"):
             by_freq.setdefault(r["frequency_khz"], []).append(r)
     for r in rows.values():
         r["inherited_name"] = r["inherited_area"] = r["inherited_from"] = None
-        if r.get("name") or r.get("rds_name") or not r.get("frequency_khz"):
+        if not r.get("frequency_khz"):
             continue
-        named = [o for o in by_freq.get(r["frequency_khz"], ())
-                 if o["station_key"] != r["station_key"]]
-        names = {(o.get("name") or o.get("rds_name")) for o in named}
-        if len(names) != 1:
-            continue
-        r["inherited_name"] = names.pop()
-        r["inherited_from"] = named[0]["station_key"]
-        r["inherited_area"] = next((o["area"] for o in named if o.get("area")), None)
+        others = [o for o in by_freq.get(r["frequency_khz"], ())
+                  if o["station_key"] != r["station_key"]]
+        own = _own_name(r)
+        if not own:
+            names = {_own_name(o) for o in others}
+            if len(names) != 1:
+                continue
+            r["inherited_name"] = names.pop()
+            r["inherited_from"] = others[0]["station_key"]
+            r["inherited_area"] = next((o["area"] for o in others if o.get("area")),
+                                       None)
+        elif not r.get("area"):
+            same = [o for o in others if o.get("area")
+                    and _own_name(o).strip().casefold() == own.strip().casefold()]
+            if len({o["area"] for o in same}) == 1:
+                r["inherited_area"] = same[0]["area"]
+                r["inherited_from"] = same[0]["station_key"]
 
 
 def station_area(station):

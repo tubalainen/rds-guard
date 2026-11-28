@@ -532,8 +532,10 @@ Each station has:
   and at weekends. *Ändra namn* sets it by hand.
 - an **area**, where its traffic messages are placed on the map: a county
   ("Örebro län", read from its seat) or "Ort, Län". It is suggested from the
-  name. Without an area, the messages are placed around the node's location
-  as before.
+  name. A station without an area of its own uses that of a station on the
+  same frequency with the same name (0xE424 "P4 Örebr" in the morning takes
+  "Örebro län" from 0xE224 named P4 Örebro). Without any area, the messages
+  are placed around the node's location as before.
 
 ## Push notifications
 
@@ -969,8 +971,8 @@ docker-compose.yml), run `git pull` first, then
 `docker compose up -d --build`.
 
 **Pinning a version:** `:latest` follows `master`. To stay on a release, set
-both images to the same version, e.g. `ghcr.io/tubalainen/rds-guard:1.0.0`
-and `ghcr.io/tubalainen/rds-guard-aggregator:1.0.0` (or `:1.0` for patch
+both images to the same version, e.g. `ghcr.io/tubalainen/rds-guard:1.0.19`
+and `ghcr.io/tubalainen/rds-guard-aggregator:1.0.19` (or `:1.0` for patch
 releases). The satellite and the aggregator must speak the same protocol;
 an older or newer satellite logs `Uplink incompatible` and keeps its queue.
 
