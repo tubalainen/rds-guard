@@ -17,9 +17,9 @@ import time
 import urllib.request
 
 BASE = {"102.8": {"pi": "0xE224", "ps": "P4 SR", "ta": False, "rt": "",
-                  "pty": "Phone-in", "silent": False, "corrupt_ta": 0},
+                  "pty": "Phone-in", "silent": False, "corrupt_ta": 0, "corrupt_pty": 0},
         "103.5": {"pi": "0xE224", "ps": "P4 SR", "ta": False, "rt": "",
-                  "pty": "Phone-in", "silent": False, "corrupt_ta": 0}}
+                  "pty": "Phone-in", "silent": False, "corrupt_ta": 0, "corrupt_pty": 0}}
 
 args = None
 results = []
@@ -52,9 +52,30 @@ def wait(sec, why=""):
     time.sleep(sec)
 
 
-def api(path):
-    with urllib.request.urlopen(args.api + path, timeout=10) as r:
+_cookie = None
+
+
+def api(path, admin=False):
+    global _cookie
+    if admin and _cookie is None:
+        req = urllib.request.Request(
+            args.api + "/api/v1/admin/login", method="POST",
+            data=json.dumps({"password": args.admin_password}).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            _cookie = r.headers.get("Set-Cookie", "").split(";")[0]
+    req = urllib.request.Request(args.api + path,
+                                 headers={"Cookie": _cookie} if admin else {})
+    with urllib.request.urlopen(req, timeout=10) as r:
         return json.loads(r.read())
+
+
+def pushes_since(t0):
+    """Push decisions (sent or not, e.g. mqtt_off) logged since t0."""
+    log = api("/api/v1/notify/log?limit=200", admin=True)
+    rows = log.get("log") or log.get("entries") or log.get("items") or []
+    return [r for r in rows if str(r.get("created_at") or r.get("at") or r.get("ts") or "")
+            .replace(" ", "T") >= t0]
 
 
 def events_since(t0):
@@ -177,6 +198,20 @@ def s_both():
           json.dumps([brief(e) for e in evs], ensure_ascii=False))
 
 
+def s_alarm_blip():
+    """Single corrupted groups saying PTY Alarm on 102.8: no VMA."""
+    t0 = utc_now()
+    for _ in range(3):
+        _stations["102.8"]["corrupt_pty"] += 1
+        set_station("102.8", corrupt_pty=_stations["102.8"]["corrupt_pty"])
+        wait(4)
+    settle(5)
+    check("alarm blips make no VMA event", events_since(t0) == [],
+          json.dumps([brief(e) for e in events_since(t0)], ensure_ascii=False))
+    pushes = pushes_since(t0)
+    check("alarm blips send no VMA push", pushes == [], json.dumps(pushes, ensure_ascii=False)[:400])
+
+
 def s_silent():
     """102.8 goes silent in the middle of an announcement."""
     t0 = utc_now()
@@ -287,7 +322,7 @@ def s_speech():
 
 
 SCENARIOS = {"full": s_full, "blip": s_blip, "pi": s_pi_switch, "both": s_both,
-             "alarm": s_alarm, "silent": s_silent, "aggregator": s_aggregator_down,
+             "alarm": s_alarm, "alarm_blip": s_alarm_blip, "silent": s_silent, "aggregator": s_aggregator_down,
              "restart": s_satellite_restart, "long": s_long, "speech": s_speech}
 
 
@@ -299,6 +334,7 @@ def main():
     p.add_argument("--satellite", default="e2e-rds-guard")
     p.add_argument("--aggregator", default="e2e-aggregator")
     p.add_argument("--long-sec", type=int, default=90)
+    p.add_argument("--admin-password", default="e2e-test-pw")
     p.add_argument("--speech", help="a WAV as the satellite's container sees it")
     p.add_argument("scenarios", nargs="*",
                    default=[s for s in SCENARIOS if s != "speech"])

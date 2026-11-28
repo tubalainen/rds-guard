@@ -33,6 +33,7 @@ MIN_EVENT_SEC = 10          # shorter "events" are RDS noise
 SILENT_END_SEC = 180        # no RDS this long: an open broadcast ends
 STATION_KEY = "station"     # TA/RT/PTY state is per station, not per PI
 TA_CONFIRM_GROUPS = 3       # TA changes when this many groups in a row agree
+PTY_CONFIRM_GROUPS = 3      # so does the programme type (Alarm: a VMA push)
 
 
 def now_iso():
@@ -147,6 +148,8 @@ class Station:
         self._first = True
         self.ta = None               # the confirmed TA flag (None: not yet)
         self._ta_run = None          # [value, first group, count] not yet confirmed
+        self.pty = None              # the confirmed programme type
+        self._pty_run = None
         self.ta_blips = 0            # single groups that disagreed, since the last log
         self._blip_logged = 0.0
         self._last_log = time.time()
@@ -209,10 +212,34 @@ class Station:
         prev, self.ta = self.ta, ta
         return prev, run[1]
 
+    def confirm_pty(self, pty, data):
+        """The programme type from one group, confirmed like TA: a single
+        corrupted group must not start a VMA (its push goes out at once).
+        Returns (previous, first group of the run) when it changes."""
+        if pty == self.pty:
+            run, self._pty_run = self._pty_run, None
+            if run and run[0] in ALERT_PTY:
+                log.info("[%s %s] PTY %s in %d group(s) only, ignored (group %s, BLER %s)",
+                         self.receiver_id, self.frequency, run[0], run[2],
+                         run[1].get("group", "?"), run[1].get("bler", "?"))
+            return None
+        run = self._pty_run
+        if run and run[0] == pty:
+            run[2] += 1
+        else:
+            run = self._pty_run = [pty, data, 1]
+        if run[2] < PTY_CONFIRM_GROUPS:
+            return None
+        self._pty_run = None
+        prev, self.pty = self.pty, pty
+        return prev, run[1]
+
     def reset_ta(self):
         """Heard again after silence: the first TA only says where we are."""
         self.ta = None
         self._ta_run = None
+        self.pty = None
+        self._pty_run = None
 
     def _blip(self, run):
         self.ta_blips += 1
@@ -478,12 +505,16 @@ def process_group(station, data):
             engine.on_radiotext(pi, rt.strip(), data)
 
     # 4: emergency broadcasts
+    # The programme type changes when a few groups in a row agree, like TA
     pty = data.get("prog_type")
-    if pty and state.changed(here, "pty", pty):
+    change = station.confirm_pty(pty, data) if pty else None
+    if change:
+        prev, first = change
+        first_pi = str(first.get("pi") or pi)
         if pty in ALERT_PTY:
-            engine.on_pty_alert(pi, pty, data)
+            engine.on_pty_alert(first_pi, pty, first)
         elif engine.is_emergency_active():
-            engine.on_pty_normal(pi, pty, data)
+            engine.on_pty_normal(first_pi, pty, first)
 
 
 # ---------------------------------------------------------------------------
@@ -559,7 +590,6 @@ def _housekeeping(sat, stop_event):
                     if st.engine.end_silent(age):
                         # When it is heard again, its first TA says where we are
                         st.reset_ta()
-                        st.state.forget(STATION_KEY, "pty")
             except Exception:
                 log.exception("Could not check %s for silence", st.frequency)
         if now - last_purge >= 3600:
