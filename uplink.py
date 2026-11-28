@@ -17,6 +17,12 @@ What is sent (see docs/uplink-protocol.md):
 
 What is never sent: transcriptions.  The aggregator gets raw data only.
 
+Several aggregators (ALSO_REPORT_TO): one Uplink each, with its own
+identity (token and join id), its own queue (the outbox's target column),
+workers and backoff, so one that is down never holds up the other. Only the
+satellite's own aggregator (AGGREGATOR_URL, target "") gets JOIN_KEY and
+UPLINK_TOKEN, and only its commands are run.
+
 Delivery is store-and-forward.  event_store writes an outbox row in the same
 transaction as every relevant event change.  Two worker threads drain it:
 one for event snapshots and deletes, one for audio, so a new broadcast is
@@ -107,6 +113,17 @@ def build_event_payload(row, rev):
     }
 
 
+def target_label(url):
+    """How an extra aggregator is named in the log: its host."""
+    from urllib.parse import urlsplit
+    return urlsplit(url).netloc or url
+
+
+class _Prefixed(logging.LoggerAdapter):
+    def process(self, msg, kwargs):
+        return f"[{self.extra['label']}] {msg}", kwargs
+
+
 def verify_code(join_id):
     """The short code shown in the satellite's log and in the aggregator's
     Admin, so the owner approves the right node (same formula there)."""
@@ -122,8 +139,12 @@ class Uplink:
     def __init__(self, base_url, token, audio_dir, node_name="",
                  version="dev", status_fn=None, heartbeat_sec=10,
                  max_age_hours=72, http=None, join_key="",
-                 suggested_location=None):
+                 suggested_location=None, target=event_store.PRIMARY):
         self._base = base_url.rstrip("/") + "/api/v1/ingest"
+        # "" = the satellite's own aggregator; otherwise its URL (ALSO_REPORT_TO)
+        self._target = target
+        self.log = (_Prefixed(log, {"label": target_label(target)}) if target
+                    else log)
         self._audio_dir = Path(audio_dir)
         self._node_name = node_name
         self._version = version
@@ -131,6 +152,9 @@ class Uplink:
         self._heartbeat_sec = heartbeat_sec
         self._max_age_hours = max_age_hours
         self._http = http  # requests-compatible module/session (tests inject)
+        if target:
+            # Another aggregator: never the own one's JOIN_KEY or token
+            token, join_key = "", ""
         self._join_key = join_key or ""
         self._suggested_location = suggested_location or None
 
@@ -142,7 +166,7 @@ class Uplink:
         else:
             self._token, self._join_id = self._own_identity()
         self._ready = threading.Event()        # token accepted: may send
-        if self._configured or event_store.get_setting("uplink_joined") == "1":
+        if self._configured or event_store.get_setting(self._key("uplink_joined")) == "1":
             self._ready.set()
 
         self._wakes = [threading.Event(), threading.Event()]
@@ -156,17 +180,22 @@ class Uplink:
         # (e.g. recalibrate a receiver); set by the satellite
         self.on_commands = None
 
-    @staticmethod
-    def _own_identity():
+    def _key(self, name):
+        """A setting of this aggregator's identity. The own aggregator's
+        keep their names from before ALSO_REPORT_TO; another's token is its
+        own, so that it can never act as this node towards the first."""
+        return f"{name}@{self._target}" if self._target else name
+
+    def _own_identity(self):
         """This satellite's own token and join id, made once and kept."""
-        token = event_store.get_setting("uplink_token")
-        join_id = event_store.get_setting("uplink_join_id")
+        token = event_store.get_setting(self._key("uplink_token"))
+        join_id = event_store.get_setting(self._key("uplink_join_id"))
         if not token or not join_id:
             token = secrets.token_urlsafe(32)
             join_id = str(uuid.uuid4())
-            event_store.set_setting("uplink_token", token)
-            event_store.set_setting("uplink_join_id", join_id)
-            event_store.set_setting("uplink_joined", None)
+            event_store.set_setting(self._key("uplink_token"), token)
+            event_store.set_setting(self._key("uplink_join_id"), join_id)
+            event_store.set_setting(self._key("uplink_joined"), None)
         return token, join_id
 
     # -- public API ---------------------------------------------------------
@@ -178,33 +207,37 @@ class Uplink:
 
     def start(self, stop_event):
         """Start the join, worker and heartbeat threads."""
+        suffix = f"@{target_label(self._target)}" if self._target else ""
         targets = [(self._run_lane, (stop_event, EVENTS, self._wakes[0]), "uplink-events"),
                    (self._run_lane, (stop_event, AUDIO, self._wakes[1]), "uplink-audio"),
                    (self._run_heartbeat, (stop_event,), "uplink-heartbeat")]
         if not self._configured:
             targets.insert(0, (self._run_join, (stop_event,), "uplink-join"))
         for target, args, name in targets:
-            t = threading.Thread(target=target, args=args, daemon=True, name=name)
+            t = threading.Thread(target=target, args=args, daemon=True, name=name + suffix)
             t.start()
             self._threads.append(t)
-        log.info("Uplink started → %s", self._base)
+        self.log.info("Uplink started → %s", self._base)
         if not self._configured and not self._ready.is_set():
-            log.info("Uplink: asking to join the aggregator as '%s' (code %s). "
-                     "Approve it under Admin → Noder, or set the same JOIN_KEY "
-                     "on both.", self._node_name or "(no NODE_NAME)", self._verify)
+            how = ("Its owner approves it under Admin → Noder (give them the code)"
+                   if self._target else
+                   "Approve it under Admin → Noder, or set the same JOIN_KEY on both")
+            self.log.info("Uplink: asking to join the aggregator as '%s' (code %s). %s.",
+                          self._node_name or "(no NODE_NAME)", self._verify, how)
 
     def snapshot(self):
         """Uplink health for /api/status."""
         with self._lock:
             snap = {
                 "enabled": True,
+                "aggregator": target_label(self._target) if self._target else None,
                 "state": self._state,
                 "last_ok_at": self._last_ok_at,
                 "last_error": self._last_error,
                 "verify": self._verify if not self._ready.is_set() else None,
             }
         try:
-            snap["queue_depth"] = event_store.outbox_depth()
+            snap["queue_depth"] = event_store.outbox_depth(self._target)
         except Exception:
             snap["queue_depth"] = None
         return snap
@@ -232,11 +265,11 @@ class Uplink:
         if resp is None:
             return outcome
         if resp.status_code == 200:
-            event_store.set_setting("uplink_joined", "1")
+            event_store.set_setting(self._key("uplink_joined"), "1")
             self._ready.set()
             self.notify()
             self._set_state("connected", None, ok=True)
-            log.info("Uplink: approved by the aggregator — sending events")
+            self.log.info("Uplink: approved by the aggregator — sending events")
             return "approved"
         if resp.status_code == 202:
             self._set_state("pending", f"waiting for approval (code {self._verify})")
@@ -256,7 +289,7 @@ class Uplink:
             try:
                 result = self.join_once()
             except Exception:
-                log.exception("Uplink join error")
+                self.log.exception("Uplink join error")
                 result = RETRY
             delay = {"approved": 0, "pending": _JOIN_EVERY,
                      "rejected": _HOLD_SEC, INCOMPATIBLE: _HOLD_SEC}.get(result, _JOIN_EVERY)
@@ -276,7 +309,7 @@ class Uplink:
         if lane is None:
             outcome = self.process_one(EVENTS)
             return outcome if outcome is not None else self.process_one(AUDIO)
-        item = event_store.outbox_head(lane)
+        item = event_store.outbox_head(lane, self._target)
         if item is None:
             return None
 
@@ -284,13 +317,13 @@ class Uplink:
         if kind == event_store.OUTBOX_EVENT:
             outcome = self._send_event(item)
         elif kind == event_store.OUTBOX_AUDIO:
-            if event_store.outbox_event_pending(item["event_id"], item["id"]):
+            if event_store.outbox_event_pending(item["event_id"], item["id"], self._target):
                 return WAIT
             outcome = self._send_audio(item)
         elif kind == event_store.OUTBOX_DELETE:
             outcome = self._send_delete(item)
         else:
-            log.warning("Uplink: unknown outbox kind '%s', dropping", kind)
+            self.log.warning("Uplink: unknown outbox kind '%s', dropping", kind)
             outcome = DROP
 
         if outcome in (OK, DROP) and kind != event_store.OUTBOX_EVENT:
@@ -304,18 +337,18 @@ class Uplink:
         event_id = item["event_id"]
         # Read the watermark first, then the row: the snapshot then covers
         # every queued change of this event up to `rev`.
-        rev = event_store.outbox_latest_event_rev(event_id)
+        rev = event_store.outbox_latest_event_rev(event_id, self._target)
         row = event_store.get_event(event_id)
         if row is None or not row.get("event_uid"):
             # Deleted since it was queued (a 'delete' item follows if the
             # aggregator needs to know).
-            event_store.outbox_ack_event(event_id, rev)
+            event_store.outbox_ack_event(event_id, rev, self._target)
             return OK
         payload = build_event_payload(row, rev)
         outcome = self._request(
             "PUT", f"/events/{row['event_uid']}", json_body=payload)
         if outcome in (OK, DROP):
-            event_store.outbox_ack_event(event_id, rev)
+            event_store.outbox_ack_event(event_id, rev, self._target)
         return outcome
 
     def _send_audio(self, item):
@@ -327,7 +360,7 @@ class Uplink:
         try:
             body = path.read_bytes()
         except OSError:
-            log.warning("Uplink: audio file %s missing, skipping upload", name)
+            self.log.warning("Uplink: audio file %s missing, skipping upload", name)
             return OK
         return self._request(
             "PUT", f"/events/{item['event_uid']}/audio",
@@ -351,9 +384,9 @@ class Uplink:
             try:
                 body.update(self._status_fn())
             except Exception:
-                log.debug("Uplink: status snapshot failed", exc_info=True)
+                self.log.debug("Uplink: status snapshot failed", exc_info=True)
         try:
-            body["queue_depth"] = event_store.outbox_depth()
+            body["queue_depth"] = event_store.outbox_depth(self._target)
         except Exception:
             pass
         resp, outcome = self._send("POST", "/heartbeat", json_body=body,
@@ -361,7 +394,16 @@ class Uplink:
         if resp is None:
             return outcome
         outcome = self._classify(resp, "POST", "/heartbeat")
-        if outcome == OK and self.on_commands is not None:
+        if outcome == OK and self._target:
+            try:
+                ignored = (resp.json() or {}).get("commands") or []
+            except Exception:
+                ignored = []
+            if ignored:
+                # Only the satellite's own aggregator may change its receivers
+                self.log.info("Uplink: ignoring %d command(s) from this aggregator "
+                              "(only AGGREGATOR_URL's are run)", len(ignored))
+        elif outcome == OK and self.on_commands is not None:
             try:
                 commands = (resp.json() or {}).get("commands") or []
             except Exception:
@@ -370,7 +412,7 @@ class Uplink:
                 try:
                     self.on_commands(commands)
                 except Exception:
-                    log.exception("Uplink: could not run the aggregator's commands")
+                    self.log.exception("Uplink: could not run the aggregator's commands")
         return outcome
 
     def _send(self, method, path, json_body=None, data=None,
@@ -425,9 +467,9 @@ class Uplink:
             if not self._configured and status == 401 and self._ready.is_set():
                 # Our own token is no longer known (the node was removed):
                 # ask to join again
-                log.warning("Uplink: the aggregator no longer knows this node — "
+                self.log.warning("Uplink: the aggregator no longer knows this node — "
                             "asking to join again (code %s)", self._verify)
-                event_store.set_setting("uplink_joined", None)
+                event_store.set_setting(self._key("uplink_joined"), None)
                 self._ready.clear()
                 self._set_state("joining", detail)
                 return UNAUTHORIZED
@@ -446,7 +488,7 @@ class Uplink:
             self._set_state("offline", detail)
             return RETRY
         # Remaining 4xx: the aggregator understood and refused this item
-        log.warning("Uplink: aggregator rejected item (%s): %s",
+        self.log.warning("Uplink: aggregator rejected item (%s): %s",
                     detail, resp.text[:200])
         self._set_state("connected", None, ok=True)
         return DROP
@@ -460,9 +502,9 @@ class Uplink:
                 self._last_ok_at = _now_z()
         if changed:
             if error:
-                log.warning("Uplink %s: %s", state, error)
+                self.log.warning("Uplink %s: %s", state, error)
             else:
-                log.info("Uplink %s", state)
+                self.log.info("Uplink %s", state)
             if state == "connected":
                 # Back after an outage (e.g. the heartbeat got through): send
                 # what is queued now, not after the lanes' backoff (up to 5 min)
@@ -474,19 +516,25 @@ class Uplink:
         backoff = _BACKOFF_MIN
         last_purge = 0.0
         while not stop_event.is_set():
+            now = time.time()
+            # Another aggregator that never approves (or removed) this node
+            # must not keep events and recordings here for ever: its queue
+            # ages out also while it waits
+            ages_out = self._ready.is_set() or self._target
+            if lane is EVENTS and ages_out and now - last_purge >= 3600:
+                try:
+                    event_store.outbox_purge(self._max_age_hours, self._target)
+                except Exception:
+                    self.log.exception("Uplink purge error")
+                last_purge = now
             if not self._ready.is_set():
                 # Not approved yet: keep everything queued
                 _wait(stop_event, wake, 5)
                 continue
             try:
-                now = time.time()
-                if lane is EVENTS and now - last_purge >= 3600:
-                    event_store.outbox_purge(self._max_age_hours)
-                    last_purge = now
-
                 outcome = self.process_one(lane)
             except Exception:
-                log.exception("Uplink worker error")
+                self.log.exception("Uplink worker error")
                 outcome = RETRY
 
             if outcome is None:
@@ -515,7 +563,7 @@ class Uplink:
             try:
                 self.send_heartbeat()
             except Exception:
-                log.exception("Uplink heartbeat error")
+                self.log.exception("Uplink heartbeat error")
             stop_event.wait(self._heartbeat_sec)
 
 

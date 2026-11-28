@@ -31,6 +31,10 @@ _local = threading.local()
 # dies between "event stored" and "event sent". On unless disabled (tests).
 _outbox_enabled = False
 _outbox_wake = None  # callable, invoked after a row is queued
+# One queue per aggregator: a row per target. "" is the satellite's own
+# (AGGREGATOR_URL), the others are ALSO_REPORT_TO's addresses
+PRIMARY = ""
+_targets = (PRIMARY,)
 
 OUTBOX_EVENT = "event"
 OUTBOX_AUDIO = "audio"
@@ -80,6 +84,7 @@ CREATE TABLE IF NOT EXISTS outbox (
     kind        TEXT NOT NULL,
     event_id    INTEGER,
     event_uid   TEXT NOT NULL,
+    target      TEXT NOT NULL DEFAULT '',
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now'))
 );
 
@@ -108,6 +113,11 @@ def init_db(db_path=None):
     Path(_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     conn = _conn()
     conn.executescript(SCHEMA)
+    # Before ALSO_REPORT_TO: one queue, the satellite's own aggregator's
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(outbox)")}
+    if "target" not in cols:
+        conn.execute("ALTER TABLE outbox ADD COLUMN target TEXT NOT NULL DEFAULT ''")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_outbox_target ON outbox(target, kind, id)")
     conn.commit()
     log.info("Satellite database at %s", _DB_PATH)
 
@@ -396,19 +406,31 @@ def migrate_from(old_db, old_audio_dir, spool_dir):
 # Uplink outbox
 # ---------------------------------------------------------------------------
 
-def enable_outbox(on_queued=None):
-    """Record event changes in the outbox. on_queued is called (outside the
-    lock) whenever something may have been queued."""
-    global _outbox_enabled, _outbox_wake
+def enable_outbox(on_queued=None, targets=(PRIMARY,)):
+    """Record event changes in the outbox, once per target (aggregator).
+    on_queued is called (outside the lock) whenever something may have been
+    queued. Rows queued for a target no longer listed are dropped."""
+    global _outbox_enabled, _outbox_wake, _targets
+    _targets = tuple(dict.fromkeys(targets)) or (PRIMARY,)
     _outbox_enabled = True
     _outbox_wake = on_queued
+    with _lock:
+        conn = _conn()
+        cur = conn.execute(
+            f"DELETE FROM outbox WHERE target NOT IN ({','.join('?' * len(_targets))})",
+            _targets)
+        conn.commit()
+    if cur.rowcount > 0:
+        log.warning("Uplink: dropped %d queued items for aggregators no longer "
+                    "in ALSO_REPORT_TO", cur.rowcount)
 
 
 def disable_outbox():
     """Stop recording changes (tests)."""
-    global _outbox_enabled, _outbox_wake
+    global _outbox_enabled, _outbox_wake, _targets
     _outbox_enabled = False
     _outbox_wake = None
+    _targets = (PRIMARY,)
 
 
 def _event_uid(conn, event_id):
@@ -424,8 +446,9 @@ def _queue(conn, kind, event_id, event_uid=None):
         event_uid = _event_uid(conn, event_id)
     if not event_uid:
         return
-    conn.execute("INSERT INTO outbox (kind, event_id, event_uid) VALUES (?, ?, ?)",
-                 (kind, event_id, event_uid))
+    for target in _targets:
+        conn.execute("INSERT INTO outbox (kind, event_id, event_uid, target) "
+                     "VALUES (?, ?, ?, ?)", (kind, event_id, event_uid, target))
 
 
 def _wake():
@@ -437,33 +460,38 @@ def _wake():
             log.debug("Outbox wake callback failed", exc_info=True)
 
 
-def outbox_head(kinds=None):
-    """The oldest outbox row (of the given kinds), or None."""
+def outbox_head(kinds=None, target=PRIMARY):
+    """The oldest outbox row (of the given kinds) for a target, or None."""
     conn = _conn()
     if kinds:
         kinds = list(kinds)
         row = conn.execute(
-            f"SELECT * FROM outbox WHERE kind IN ({','.join('?' * len(kinds))}) "
-            "ORDER BY id ASC LIMIT 1", kinds).fetchone()
+            f"SELECT * FROM outbox WHERE target = ? AND kind IN "
+            f"({','.join('?' * len(kinds))}) ORDER BY id ASC LIMIT 1",
+            [target, *kinds]).fetchone()
     else:
-        row = conn.execute("SELECT * FROM outbox ORDER BY id ASC LIMIT 1").fetchone()
+        row = conn.execute("SELECT * FROM outbox WHERE target = ? ORDER BY id ASC LIMIT 1",
+                           (target,)).fetchone()
     return dict(row) if row else None
 
 
-def outbox_event_pending(event_id, before_id):
-    """Is a snapshot or delete of this event queued before before_id? The
-    audio of an event waits for that."""
+def outbox_event_pending(event_id, before_id, target=PRIMARY):
+    """Is a snapshot or delete of this event queued for the target before
+    before_id? The audio of an event waits for that."""
     row = _conn().execute(
-        "SELECT 1 FROM outbox WHERE event_id = ? AND kind IN (?, ?) AND id < ? LIMIT 1",
-        (event_id, OUTBOX_EVENT, OUTBOX_DELETE, before_id)).fetchone()
+        "SELECT 1 FROM outbox WHERE event_id = ? AND target = ? AND kind IN (?, ?) "
+        "AND id < ? LIMIT 1",
+        (event_id, target, OUTBOX_EVENT, OUTBOX_DELETE, before_id)).fetchone()
     return row is not None
 
 
-def outbox_latest_event_rev(event_id):
-    """Highest queued 'event' row id for this event (0 if none): read before
-    the event, it is the snapshot's revision and acknowledgement mark."""
-    row = _conn().execute("SELECT MAX(id) FROM outbox WHERE kind = ? AND event_id = ?",
-                          (OUTBOX_EVENT, event_id)).fetchone()
+def outbox_latest_event_rev(event_id, target=PRIMARY):
+    """Highest queued 'event' row id for this event and target (0 if none):
+    read before the event, it is the snapshot's revision and
+    acknowledgement mark."""
+    row = _conn().execute(
+        "SELECT MAX(id) FROM outbox WHERE kind = ? AND event_id = ? AND target = ?",
+        (OUTBOX_EVENT, event_id, target)).fetchone()
     return row[0] or 0
 
 
@@ -474,27 +502,33 @@ def outbox_ack(outbox_id):
         conn.commit()
 
 
-def outbox_ack_event(event_id, up_to_rev):
-    """Remove the queued snapshots of an event up to a revision (several
-    changes are delivered as one snapshot)."""
+def outbox_ack_event(event_id, up_to_rev, target=PRIMARY):
+    """Remove the target's queued snapshots of an event up to a revision
+    (several changes are delivered as one snapshot)."""
     with _lock:
         conn = _conn()
-        conn.execute("DELETE FROM outbox WHERE kind = ? AND event_id = ? AND id <= ?",
-                     (OUTBOX_EVENT, event_id, up_to_rev))
+        conn.execute("DELETE FROM outbox WHERE kind = ? AND event_id = ? AND target = ? "
+                     "AND id <= ?", (OUTBOX_EVENT, event_id, target, up_to_rev))
         conn.commit()
 
 
-def outbox_depth():
-    row = _conn().execute("SELECT COUNT(*) FROM outbox").fetchone()
+def outbox_depth(target=None):
+    """Queued rows for a target (None: all of them)."""
+    if target is None:
+        row = _conn().execute("SELECT COUNT(*) FROM outbox").fetchone()
+    else:
+        row = _conn().execute("SELECT COUNT(*) FROM outbox WHERE target = ?",
+                              (target,)).fetchone()
     return row[0] if row else 0
 
 
-def outbox_purge(max_age_hours):
-    """Drop queued rows older than max_age_hours."""
+def outbox_purge(max_age_hours, target=PRIMARY):
+    """Drop the target's queued rows older than max_age_hours."""
     cutoff = _ts(time.time() - max_age_hours * 3600)
     with _lock:
         conn = _conn()
-        cur = conn.execute("DELETE FROM outbox WHERE created_at < ?", (cutoff,))
+        cur = conn.execute("DELETE FROM outbox WHERE created_at < ? AND target = ?",
+                           (cutoff, target))
         conn.commit()
     if cur.rowcount > 0:
         log.warning("Uplink: dropped %d queued items older than %dh",
