@@ -70,6 +70,7 @@ def main():
                 stations[name] = rs.Station(float(name) * 1e6 - center, fs, st, fn,
                                             level=float(s.get("level", 0.1)))
                 seen_corrupt[name] = s.get("corrupt_ta", 0)
+                seen_corrupt[name + "/pty"] = s.get("corrupt_pty", 0)
             st = stations[name].state
             st.pi = int(str(s.get("pi", "0xE224")), 16)
             st.ps = s.get("ps", "P4 SR")
@@ -78,6 +79,10 @@ def main():
             st.rt = s.get("rt", "")
             st.pty = s.get("pty", "Phone-in")
             st.silent = bool(s.get("silent", False))
+            c = s.get("corrupt_pty", 0)
+            if c > seen_corrupt[name + "/pty"]:
+                st.corrupt_next_pty += c - seen_corrupt[name + "/pty"]
+                seen_corrupt[name + "/pty"] = c
             c = s.get("corrupt_ta", 0)
             if c > seen_corrupt[name]:
                 st.corrupt_next_ta += c - seen_corrupt[name]

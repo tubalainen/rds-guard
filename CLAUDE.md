@@ -123,7 +123,9 @@ used.
   - an overlong announcement;
   - Swedish transcription.
 
-  This harness is not committed yet.
+  The harness is `tools/e2e` (see its README.md). Its scenarios check
+  the aggregator's API and, for VMA, the push log as admin, since a
+  discarded event leaves no row but its push has gone out.
 - **Geolocation:** `tools/geo_corpus.json` holds 61 real messages with
   answers. Measure changes with `tools/eval_geolocation.py` (`--stored`,
   `--save-claude`, `--replay`) and `tools/measure_geolocation.py`. Both are

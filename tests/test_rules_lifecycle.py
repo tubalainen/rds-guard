@@ -18,7 +18,7 @@ PI = "0xE824"
 
 def group(station, ts, **fields):
     # TA counts once a few groups in a row agree: send it that many times
-    for _ in range(rg.TA_CONFIRM_GROUPS if "ta" in fields else 1):
+    for _ in range(rg.TA_CONFIRM_GROUPS if ("ta" in fields or "prog_type" in fields) else 1):
         rg.process_group(station, {"pi": PI, "timestamp": ts, **fields})
 
 
@@ -94,7 +94,7 @@ def test_the_same_radiotext_in_the_next_announcement_is_kept(store, engine):
 # regional PI (0xE824), also in the middle of an announcement.
 
 def flip(station, pi, ts, **fields):
-    for _ in range(rg.TA_CONFIRM_GROUPS if "ta" in fields else 1):
+    for _ in range(rg.TA_CONFIRM_GROUPS if ("ta" in fields or "prog_type" in fields) else 1):
         rg.process_group(station, {"pi": pi, "timestamp": ts, **fields})
 
 
@@ -176,3 +176,27 @@ def test_the_announcement_starts_at_its_first_ta_group(store, engine):
     one(engine, "2026-11-28T07:00:06", ta=True)
     [ev] = store.query_events()[0]
     assert ev["started_at"].startswith("2026-11-28T07:00:05")
+
+
+def test_a_single_alarm_group_is_no_vma(store, engine):
+    """A weak station: one corrupted group says PTY Alarm. A VMA push goes
+    out when an emergency starts, so it must not start at all."""
+    group(engine, "2026-11-28T08:00:00", prog_type="Phone-in")
+    one(engine, "2026-11-28T08:00:05", prog_type="Alarm")
+    group(engine, "2026-11-28T08:00:05", prog_type="Phone-in")
+    assert store._conn().execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0
+    assert outbox(store) == []
+
+
+def test_a_real_alarm_starts_at_its_first_group(store, engine):
+    group(engine, "2026-11-28T08:00:00", prog_type="Phone-in")
+    one(engine, "2026-11-28T08:00:05", prog_type="Alarm")
+    one(engine, "2026-11-28T08:00:06", prog_type="Alarm")
+    one(engine, "2026-11-28T08:00:06", prog_type="Alarm")
+    [ev] = store.query_events()[0]
+    assert ev["type"] == "emergency" and ev["started_at"].startswith("2026-11-28T08:00:05")
+    one(engine, "2026-11-28T08:00:40", prog_type="Phone-in")   # one stray group
+    group(engine, "2026-11-28T08:00:41", prog_type="Alarm")
+    group(engine, "2026-11-28T08:01:05", prog_type="Phone-in")
+    [ev] = store.query_events()[0]
+    assert ev["state"] == "end" and ev["duration_sec"] == 60

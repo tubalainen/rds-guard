@@ -49,6 +49,7 @@ class RdsState:
                  rt="", corrupt_next_ta=0):
         self.pi, self.ps, self.pty, self.tp, self.ta, self.rt = pi, ps, pty, tp, ta, rt
         self.corrupt_next_ta = corrupt_next_ta   # this many 0A groups with TA flipped
+        self.corrupt_next_pty = 0                # this many groups saying PTY Alarm
         self.silent = False                      # no RDS (and no carrier) at all
 
 
@@ -74,7 +75,7 @@ class RdsEncoder:
         seg = self._ps_seg
         self._ps_seg = (seg + 1) % 4
         ps = (s.ps + " " * 8)[:8]
-        b = (0 << 12) | (0 << 11) | (int(s.tp) << 10) | (PTY_CODES.get(s.pty, 0) << 5) \
+        b = (0 << 12) | (0 << 11) | (int(s.tp) << 10) | (self._pty() << 5) \
             | (int(ta) << 4) | (1 << 3) | ((1 if seg == 3 else 0) << 2) | seg  # M/S=1, DI
         c = (224 << 8) | 205      # AF: none follow, filler
         d = (rds_char(ps[seg * 2]) << 8) | rds_char(ps[seg * 2 + 1])
@@ -90,12 +91,18 @@ class RdsEncoder:
         nseg = min(16, (len(s.rt) + 1 + 3) // 4) or 1
         seg = self._rt_seg
         self._rt_seg = (seg + 1) % nseg
-        b = (2 << 12) | (0 << 11) | (int(s.tp) << 10) | (PTY_CODES.get(s.pty, 0) << 5) \
+        b = (2 << 12) | (0 << 11) | (int(s.tp) << 10) | (self._pty() << 5) \
             | (self._rt_ab << 4) | seg
         ch = text[seg * 4: seg * 4 + 4].ljust(4)
         c = (rds_char(ch[0]) << 8) | rds_char(ch[1])
         d = (rds_char(ch[2]) << 8) | rds_char(ch[3])
         return [(s.pi, "A"), (b, "B"), (c, "C"), (d, "D")]
+
+    def _pty(self):
+        if self.state.corrupt_next_pty > 0:
+            self.state.corrupt_next_pty -= 1
+            return PTY_CODES["Alarm"]
+        return PTY_CODES.get(self.state.pty, 0)
 
     def next_group_bits(self):
         self._n += 1
