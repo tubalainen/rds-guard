@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Stands in for airspy_rx in end-to-end tests: streams signed 16-bit I/Q
+(-t 2) of synthetic FM stations with RDS, paced to the wall clock.
+
+What each station sends is read from $E2E_CONTROL (JSON, re-read every
+block), e.g. {"stations": {"102.8": {"pi": "0xE224", "ps": "P4 SR",
+"ta": false, "rt": "", "pty": "Phone-in", "silent": false,
+"corrupt_ta": 0}}}. "corrupt_ta" is a counter: each increase flips TA in
+that many 0A groups. With -n it sends that many samples at once and exits.
+"""
+import json
+import os
+import sys
+import time
+
+import numpy as np
+
+sys.path.insert(0, os.environ.get("E2E_DIR", "/e2e"))
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import rds_signal as rs  # noqa: E402
+
+CONTROL = os.environ.get("E2E_CONTROL", "/e2e/control.json")
+
+
+def arg(flag, default=None):
+    a = sys.argv[1:]
+    return a[a.index(flag) + 1] if flag in a else default
+
+
+def read_control():
+    try:
+        with open(CONTROL) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def speech_audio(path):
+    """A WAV (16-bit mono) played on a loop, resampled by nearest sample."""
+    import wave
+    with wave.open(path) as w:
+        rate = w.getframerate()
+        data = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2") / 32768.0
+
+    def fn(n, fs, t0):
+        idx = ((t0 + np.arange(n)) * rate / fs).astype(np.int64) % len(data)
+        return 0.9 * data[idx]
+    return fn
+
+
+def main():
+    fs = int(float(arg("-a", "2500000")))
+    center = float(arg("-f", "103.025")) * 1e6
+    total = arg("-n")
+    total = int(total) if total else None
+    out = sys.stdout.buffer
+    stations = {}
+    seen_corrupt = {}
+    block = fs // 20
+    sent = 0
+    start = time.time()
+    while total is None or sent < total:
+        ctl = read_control()
+        for name, s in (ctl.get("stations") or {}).items():
+            if name not in stations:
+                st = rs.RdsState()
+                audio = s.get("audio")
+                fn = speech_audio(audio) if audio and os.path.exists(audio) \
+                    else rs.tone_audio(300 + 100 * len(stations))
+                stations[name] = rs.Station(float(name) * 1e6 - center, fs, st, fn,
+                                            level=float(s.get("level", 0.1)))
+                seen_corrupt[name] = s.get("corrupt_ta", 0)
+            st = stations[name].state
+            st.pi = int(str(s.get("pi", "0xE224")), 16)
+            st.ps = s.get("ps", "P4 SR")
+            st.ta = bool(s.get("ta", False))
+            st.tp = bool(s.get("tp", True))
+            st.rt = s.get("rt", "")
+            st.pty = s.get("pty", "Phone-in")
+            st.silent = bool(s.get("silent", False))
+            c = s.get("corrupt_ta", 0)
+            if c > seen_corrupt[name]:
+                st.corrupt_next_ta += c - seen_corrupt[name]
+                seen_corrupt[name] = c
+        n = block if total is None else min(block, total - sent)
+        iq = np.zeros(n, dtype=np.complex64)
+        for s in stations.values():
+            iq += s.block(n)
+        iq += (np.random.standard_normal(n) + 1j * np.random.standard_normal(n)
+               ).astype(np.complex64) * 0.002
+        raw = np.empty(2 * n, dtype="<i2")
+        raw[0::2] = np.clip(iq.real * 32767, -32767, 32767)
+        raw[1::2] = np.clip(iq.imag * 32767, -32767, 32767)
+        try:
+            out.write(raw.tobytes())
+            out.flush()
+        except BrokenPipeError:
+            return
+        sent += n
+        if total is None:
+            ahead = start + sent / fs - time.time()
+            if ahead > 0:
+                time.sleep(ahead)
+
+
+if __name__ == "__main__":
+    print(f"Device Serial Number: {arg('-s', '?')}", file=sys.stderr, flush=True)
+    main()

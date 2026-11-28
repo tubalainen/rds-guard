@@ -3,6 +3,25 @@
 import os
 
 
+def _drop_env_comments():
+    """Docker Compose reads `KEY=        # a comment` in .env as the value
+    "# a comment" (only a comment after a value, `KEY=x  # …`, is cut off).
+    Older .env.example files had such lines, so NODE_NAME, TRANSCRIPTION_MODEL
+    and others got the comment as their value. A value that is only a
+    comment ("#" then a space) is taken as empty. Returns the keys."""
+    import re
+    found = []
+    for key, value in list(os.environ.items()):
+        if re.match(r"\s*#(\s|$)", value):
+            os.environ[key] = ""
+            found.append(key)
+    return sorted(found)
+
+
+# Before anything reads the environment
+ENV_COMMENTS_DROPPED = _drop_env_comments()
+
+
 def _bool(val):
     return str(val).lower() in ("1", "true", "yes", "on")
 
