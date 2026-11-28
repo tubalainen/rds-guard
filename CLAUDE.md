@@ -73,7 +73,6 @@ merge it" means merge on green CI. It is not a release.
      (`docker compose pull && docker compose up -d`) and which image
      changed. Add upgrade steps if `.env`, `receivers.yml` or the compose
      file change;
-   - the README version-pin example updated;
    - the status line in the relevant `docs/plans/` file updated.
 3. **Merge** only when the `pytest` check is green.
 4. **Confirm the publish.** `release.yml` tags `master` and creates the
