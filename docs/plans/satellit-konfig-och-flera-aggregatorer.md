@@ -1,6 +1,6 @@
 # Satellit: radion bara i receivers.yml, och flera aggregatorer
 
-Status: förslag 2026-11-28 (issue #106), väntar på godkännande. Inget är byggt.
+Status: förslag 2026-11-28 (issue #106), uppdaterat efter underhållarens svar samma dag. Väntar på godkännande. Inget är byggt.
 
 ## Bakgrund
 
@@ -18,59 +18,87 @@ Issue #106 tar upp tre saker:
    köra en egen aggregator och samtidigt skicka till din.
 
 Underhållarens beslut (2026-11-28): radion ställs bara in i
-`receivers.yml`, och alla SDR-inställningar tas bort ur `.env`. Satelliten
-ska själv kunna skicka till flera aggregatorer.
+`receivers.yml`, och alla SDR-inställningar tas bort ur `.env`. Det ska
+vara lika lätt som `.env` var. Satelliten ska själv kunna skicka till
+flera aggregatorer (`ALSO_REPORT_TO`). En extra aggregator får allt, och
+noden ser ut som vilken nod som helst där.
 
 ## Del A: radion bara i receivers.yml
 
-### Förslag
+### Beslut (2026-11-28)
 
-- `receivers.yml` blir det enda stället för radion. `FM_FREQUENCY`,
+- `receivers.yml` är det enda stället för radion. `FM_FREQUENCY`,
   `FM_FREQUENCIES` och `RTL_DEVICE_SERIAL` försvinner ur `.env.example`,
   README och `config.py`. Standardvärdet 103.5M försvinner också.
-- **`serial:` är valfritt när exakt en mottagare är ansluten.** Den minsta
-  filen blir då:
+- **`serial:` krävs alltid**, även med en enda mottagare. Då syns det
+  tydligt när en dongel byts.
+- **Filen ska vara lika lätt som `.env` var:** fyll i serienumret och
+  frekvensen, inget mer. `receivers.example.yml` görs om till en kort fil
+  med kommenterade exempel för RTL-SDR och Airspy. Man tar bort `#` och
+  ändrar värdena. Det som är valfritt (gain, ppm, sample_rate, lna/mixer/vga)
+  flyttas längre ner, under en egen rubrik:
 
   ```yaml
+  # rds-data/receivers.yml: which receiver listens to what.
+  # Remove the # on the lines for your receiver and change the values.
+  # Your receivers' serial numbers are in the log, or:
+  #   docker compose exec rds-guard python3 -m dongles
   receivers:
-    - frequencies: [103.5M]
+
+    # --- An RTL-SDR dongle ---
+    # - serial: "00000001"
+    #   frequencies: [103.5M]
+
+    # --- An Airspy Mini or R2 ---
+    # - serial: "0x644064DC2B1C2E4F"
+    #   frequencies: [103.5M, 102.9M]
+
+  # More settings (all optional): see further down.
   ```
 
-  Med två eller fler anslutna mottagare krävs `serial:` som i dag.
-- **Utan receivers.yml** skriver satelliten `rds-data/receivers.example.yml`
-  med de mottagare som är anslutna (serienummer, typ) och en kommenterad
-  mall. Sedan stoppar den med ett tydligt fel: "Skapa rds-data/receivers.yml
-  (se receivers.example.yml bredvid)". Den gissar inte en frekvens.
-- **Migrering av befintliga installationer:** saknas `receivers.yml` men
-  `FM_FREQUENCY`/`FM_FREQUENCIES` är satta i `.env`, skriver satelliten en
-  gång en `receivers.yml` från dem (med serienumret på den enda anslutna
-  mottagaren, eller `RTL_DEVICE_SERIAL`). Den loggar att `.env`-raderna inte
-  används längre och kan tas bort. Ingen behöver göra något vid
-  uppdateringen.
+- **Ny installation utan receivers.yml:** satelliten skriver
+  `rds-data/receivers.yml` enligt mallen ovan. De anslutna mottagarnas
+  riktiga serienummer står redan i de kommenterade exemplen, så man bara
+  tar bort `#` och skriver frekvensen. Sedan stoppar satelliten med ett
+  tydligt fel: "Fyll i rds-data/receivers.yml och starta om". Den gissar
+  ingen frekvens.
+- **Befintlig installation (migrering):** saknas `receivers.yml` men
+  `FM_FREQUENCY`/`FM_FREQUENCIES` är satta i `.env`, skriver satelliten
+  en gång en `receivers.yml` från dem. Serienumret tas från
+  `RTL_DEVICE_SERIAL`, eller från den enda anslutna mottagaren. Mallens
+  kommenterade exempel följer med. Satelliten loggar att `.env`-raderna
+  inte används längre och kan tas bort, och sedan kör den som vanligt.
+  Ingen behöver göra något vid uppdateringen. Är flera mottagare anslutna
+  och `RTL_DEVICE_SERIAL` saknas skrivs bara mallen, och satelliten
+  stoppar som i dag.
+- **Filen ska gå att ändra utan sudo.** Containern kör som root, så den
+  fil satelliten skriver får samma ägare som mappen `rds-data/`.
 - Finns både `receivers.yml` och `FM_*` i `.env`: en varning i loggen om
   att `.env`-raderna ignoreras.
+- En fil där alla mottagare är bortkommenterade ger samma tydliga fel som
+  en fil som saknas, inte ett YAML-fel.
 - **Ny `.env.satellite.example`** med bara satellitens inställningar
   (aggregator, nodnamn, plats, inspelning). `docker-compose.satellite.yml`
   och README:s satellitavsnitt hänvisar till den. `.env.example` för
   kombinerad drift behåller sin satellitdel, men utan radion.
 - README: avsnittet "Dongles: receivers.yml" blir det enda radioavsnittet,
-  med ett "kom igång"-steg: starta, läs serienumret i loggen eller i
-  `receivers.example.yml`, skriv filen, starta om.
+  med ett kom igång-steg: starta, ta bort `#` i `rds-data/receivers.yml`,
+  skriv frekvensen, starta om.
 
-### Invändningar (mina)
+### Tester (A)
 
-- **Ett steg till för nya användare.** Med `.env` räckte en rad. Nu behövs
-  en fil i `rds-data/`, som Docker skapar som root vid första starten. Det
-  mildras av att `serial:` är valfritt och av mallen som satelliten
-  skriver, men det är fortfarande två filer i stället för en.
-- **Migreringen skriver i användarens datamapp.** Det är bekvämt men lite
-  magiskt. Alternativet är att stoppa med ett fel och be användaren göra
-  det själv, men då slutar varje befintlig satellit fungera vid
-  uppdateringen tills någon agerar.
+- Migrering: `.env` med en mottagare ger en `receivers.yml` som laddas
+  och ger samma mottagare som i dag.
+- Ny installation: mallen skrivs med de anslutna serienumren, och
+  satelliten stoppar med rätt meddelande.
+- En bortkommenterad fil ger samma meddelande.
+- `serial:` saknas: fel.
+- Mallen själv (`receivers.example.yml`) går att ladda när exemplen
+  avkommenteras, både för RTL-SDR och för Airspy.
 
 ## Del B: flera aggregatorer
 
-### Förslag
+### Beslut (2026-11-28)
 
 - `AGGREGATOR_URL` förblir **den egna aggregatorn** (den primära).
   Kombinerad compose sätter den till `http://aggregator:8081` som i dag.
@@ -101,7 +129,7 @@ ska själv kunna skicka till flera aggregatorer.
 - Kostnad: ingen. Bandbredden blir ungefär dubbel (0,7 MB per 2 min ljud
   per aggregator).
 
-### Tester
+### Tester (B)
 
 - Outbox: en ändring köas en gång per aggregator, och en som är nere
   blockerar inte den andra.
@@ -120,16 +148,7 @@ förrän underhållaren ber om det. Release notes ska beskriva migreringen
 
 ## Öppna frågor
 
-1. A: ska satelliten skriva `receivers.yml` själv från `.env` vid
-   uppdateringen (förslaget), eller stoppa och be användaren?
-2. A: räcker valfritt `serial:` med en mottagare, eller vill du att
-   serienumret alltid står i filen, så att det blir tydligt när en dongel
-   byts?
-3. B: namnet `ALSO_REPORT_TO`, eller `AGGREGATOR_URLS` (där den första är
-   den primära)? Det senare fungerar inte i kombinerad compose utan ändring
-   i compose-filen.
-4. B: ska en extra aggregator få andra inställningar än den primära, t.ex.
-   bara VMA och inte trafikmeddelanden, eller inget ljud? Förslaget är
-   "allt till alla" tills någon behöver mer.
-5. B: ska den extra aggregatorn visa noden som "speglad", eller ser den ut
-   som vilken satellit som helst? Förslaget: som vilken satellit som helst.
+Inga kvar. Besvarat 2026-11-28: migreringen skriver filen automatiskt,
+`serial:` krävs alltid, inställningen heter `ALSO_REPORT_TO`, och en extra
+aggregator får allt och visar noden som vilken nod som helst. Kommandon tas
+bara emot från den egna.
